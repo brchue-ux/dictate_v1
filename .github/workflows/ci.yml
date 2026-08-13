@@ -1,0 +1,505 @@
+# dictate_v1 CI
+#
+# WHAT THIS PROVES, AND WHAT IT CANNOT
+#
+# dictate runs on one Windows PC with an AMD RX 6900 XT in it, and nobody who
+# works on this repository has that machine - or any Windows machine, or any AMD
+# GPU. So this workflow exists to catch everything that can be caught without
+# one, on the same operating system the product actually runs on.
+#
+#   PROVED HERE  the Python package installs on Windows and its 165 tests pass;
+#                the installer's own logic works on Windows PowerShell 5.1,
+#                including a download that really is interrupted and resumed;
+#                whisper.cpp compiles from source with the Vulkan backend on
+#                Windows; the binary that comes out really transcribes audio;
+#                dictate's resident-process supervision and HTTP client drive
+#                that real binary end to end; sherpa-onnx loads and produces
+#                live-caption text from real audio.
+#
+#   NOT PROVED   anything about the GPU. GitHub's hosted Windows runners have no
+#                AMD card and no Vulkan driver, so Vulkan legitimately finds zero
+#                devices here and whisper.cpp falls back to the processor. This
+#                workflow is therefore built so that "it compiles and the tests
+#                pass" is a separate result from "the GPU path runs", and it
+#                never fails just because there is no GPU. A green tick on this
+#                workflow is NOT evidence that the GPU works. Nothing else is
+#                proved about the microphone, the global hotkey, the caption
+#                overlay or pasting into other applications either - those need
+#                a real desktop with a real person at it.
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # =========================================================================
+  tests:
+    name: Test suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dictate (core only - it has no third-party dependencies)
+        run: python -m pip install -e .
+
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Command line, on a machine with nothing else installed
+        shell: pwsh
+        run: |
+          # Programs like whisper.cpp, git and dictate itself write ordinary
+          # progress to stderr. With PowerShell's default of stop-on-error that
+          # can abort a step that is working perfectly, so exit codes are what
+          # decide success here.
+          $ErrorActionPreference = 'Continue'
+          dictate --version
+          dictate clean --explain "Um, so I was, you know, thinking about it."
+
+          # `doctor` is meant to report missing pieces, so a non-zero exit here
+          # is the correct answer on a bare CI machine. What must never happen
+          # is a stack trace: this whole command exists to be readable by
+          # someone who is not a developer.
+          $report = dictate --config config/dictate.example.toml doctor 2>&1 | Out-String
+          Write-Host $report
+          if ($report -match 'Traceback') {
+            throw 'dictate doctor printed a stack trace instead of a report'
+          }
+          if ($report -notmatch 'What to do:') {
+            throw 'dictate doctor did not tell the user what to do about its findings'
+          }
+          exit 0
+
+  # =========================================================================
+  installer-logic:
+    name: Installer logic (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Every PowerShell file parses
+        shell: powershell
+        run: |
+          # The product owner runs these with the PowerShell that ships with
+          # Windows, so they are parsed with exactly that, not PowerShell 7.
+          $bad = 0
+          Get-ChildItem -Path . -Filter *.ps1 -Recurse |
+            Where-Object { $_.FullName -notmatch '\\(\.git|whisper\.cpp)\\' } |
+            ForEach-Object {
+              $errors = $null
+              $tokens = $null
+              [System.Management.Automation.Language.Parser]::ParseFile(
+                $_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+              if ($errors) {
+                $bad++
+                Write-Host "FAIL $($_.FullName)"
+                $errors | ForEach-Object { Write-Host "     line $($_.Extent.StartLineNumber): $($_.Message)" }
+              } else {
+                Write-Host "ok   $($_.FullName)"
+              }
+            }
+          if ($bad -gt 0) { throw "$bad PowerShell file(s) would not parse" }
+
+      - name: The model list is readable and every fingerprint is a SHA-256
+        shell: powershell
+        run: |
+          $models = Import-PowerShellDataFile scripts\models.psd1
+          foreach ($key in $models.Keys) {
+            $entry = $models[$key]
+            Write-Host "$key : $($entry.Name)  $($entry.Bytes) bytes  $($entry.Sha256)"
+            if ($entry.Sha256 -notmatch '^[0-9a-f]{64}$') { throw "$key has no usable SHA-256" }
+            if ($entry.Bytes -le 0) { throw "$key has no size" }
+            if ($entry.Uri -notmatch '^https://') { throw "$key is not fetched over https" }
+          }
+
+      - name: Installer unit tests, including a download that really is interrupted
+        shell: powershell
+        run: |
+          .\scripts\tests\setup-lib.tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'installer tests failed' }
+
+      - name: setup.ps1 reports a missing tool in plain language rather than crashing
+        shell: powershell
+        run: |
+          # Programs like whisper.cpp, git and dictate itself write ordinary
+          # progress to stderr. With PowerShell's default of stop-on-error that
+          # can abort a step that is working perfectly, so exit codes are what
+          # decide success here.
+          $ErrorActionPreference = 'Continue'
+          # Run the build step with nothing set up. It must stop, with a problem
+          # and a next action, and no stack trace - that behaviour is the whole
+          # promise of the installer, so it is tested rather than assumed.
+          $env:VULKAN_SDK = ''
+          $output = & powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 `
+            -Only build -Root "$env:RUNNER_TEMP\dictate-refuses" 2>&1 | Out-String
+          Write-Host $output
+          if ($LASTEXITCODE -eq 0) { throw 'setup.ps1 carried on without the Vulkan SDK' }
+          if ($output -match 'at <ScriptBlock>|System\.Management\.Automation') {
+            throw 'setup.ps1 showed the user a stack trace'
+          }
+          if ($output -notmatch 'What to do:') {
+            throw 'setup.ps1 stopped without telling the user what to do'
+          }
+          exit 0
+
+      - name: Summary
+        if: always()
+        shell: pwsh
+        run: |
+          @'
+          ### Installer logic
+
+          Ran on Windows PowerShell 5.1, the version that ships with Windows.
+
+          Covered: version detection, the config-file edit (against the real
+          `config/dictate.example.toml`, re-read afterwards by Python's TOML
+          parser), integrity checking, and the resumable downloader against a
+          local HTTP server that genuinely drops the connection mid-transfer.
+
+          Not covered: winget installing the toolchain, and anything that needs
+          a GPU or a desktop.
+          '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+  # =========================================================================
+  windows-packages:
+    name: Windows packages + live captions (CPU)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dictate with its Windows packages
+        run: python -m pip install -e ".[windows]"
+
+      - name: Everything the Windows install needs actually imports
+        shell: pwsh
+        run: |
+          # Not a formality: sherpa-onnx and global-hotkeys are the two packages
+          # that had never been installed anywhere when dictate was written.
+          python -c "import sounddevice; print('sounddevice', sounddevice.__version__)"
+          python -c "import numpy; print('numpy', numpy.__version__)"
+          python -c "import sherpa_onnx; print('sherpa-onnx', getattr(sherpa_onnx, '__version__', 'unknown'))"
+          python -c "import global_hotkeys; print('global-hotkeys imported')"
+
+      - name: Cache the live-caption model
+        id: caption-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/models
+          key: caption-model-sherpa-zipformer-en-2023-06-26
+
+      - name: Download the live-caption model, through the installer's own downloader
+        if: steps.caption-cache.outputs.cache-hit != 'true'
+        shell: powershell
+        run: |
+          . .\scripts\setup-lib.ps1
+          $models = Import-PowerShellDataFile scripts\models.psd1
+          $captions = $models.Captions
+          $dir = "$env:RUNNER_TEMP\models"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $archive = Join-Path $dir 'caption-model.tar.bz2'
+          Get-FileResumable -Uri $captions.Uri -Destination $archive `
+            -ExpectedBytes $captions.Bytes -ExpectedSha256 $captions.Sha256 -Label $captions.Label
+          tar -xf $archive -C $dir
+          if ($LASTEXITCODE -ne 0) { throw 'could not unpack the caption model' }
+          Remove-Item $archive -Force
+          foreach ($file in $captions.Files) {
+            $path = Join-Path $dir (Join-Path $captions.Name $file)
+            if (-not (Test-Path -LiteralPath $path)) { throw "the model is missing $file" }
+          }
+
+      - name: The live-caption engine turns real audio into words
+        shell: pwsh
+        run: |
+          $models = Import-PowerShellDataFile scripts\models.psd1
+          $dir = Join-Path "$env:RUNNER_TEMP\models" $models.Captions.Name
+          $config = "$env:RUNNER_TEMP\captions.toml"
+          @"
+          [captions]
+          enabled = true
+          model_dir = '$dir'
+          num_threads = 2
+          provider = "cpu"
+          "@ | Set-Content -LiteralPath $config -Encoding UTF8
+          python scripts\ci\caption-smoke.py $config assets\jfk.wav country
+
+      - name: Summary
+        if: always()
+        shell: pwsh
+        run: |
+          @'
+          ### Windows packages + live captions
+
+          Proved: `pip install -e ".[windows]"` resolves and installs on Windows;
+          sounddevice, numpy, sherpa-onnx and global-hotkeys all import; the
+          streaming Zipformer loads and turns the bundled clip into caption text;
+          and closing a caption session destroys that text, which is what keeps
+          it out of the document.
+
+          Not proved: the caption **overlay** - the always-on-top, click-through,
+          never-focused window - which needs a real desktop. Nor the microphone
+          or the global hotkey.
+          '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+  # =========================================================================
+  whisper-vulkan:
+    name: whisper.cpp Vulkan build (compiles here; no GPU to run it on)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      DICTATE_ROOT: ${{ runner.temp }}\dictate-gpu
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache the Vulkan SDK
+        id: vulkan-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\VulkanSDK\current
+          # Bump the suffix to pick up a newer SDK.
+          key: vulkan-sdk-windows-v1
+
+      - name: Install the Vulkan SDK
+        if: steps.vulkan-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          # From LunarG directly, not from a third party - the same source the
+          # installer's `winget install LunarG.VulkanSDK` ends up at.
+          $installer = "$env:RUNNER_TEMP\vulkan_sdk.exe"
+          Invoke-WebRequest -Uri 'https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe' -OutFile $installer
+          $process = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
+            '--root', 'C:\VulkanSDK\current',
+            '--accept-licenses', '--default-answer', '--confirm-command', 'install')
+          if ($process.ExitCode -ne 0) { throw "the Vulkan SDK installer exited $($process.ExitCode)" }
+
+      - name: Put the Vulkan SDK on PATH
+        shell: pwsh
+        run: |
+          $sdk = 'C:\VulkanSDK\current'
+          if (-not (Test-Path "$sdk\Bin\glslc.exe")) {
+            Get-ChildItem $sdk -ErrorAction SilentlyContinue | Out-String | Write-Host
+            throw "the Vulkan SDK is not where it should be (no $sdk\Bin\glslc.exe)"
+          }
+          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Build whisper.cpp with Vulkan, using the installer's own build step
+        shell: powershell
+        run: |
+          # -Only build runs exactly the code the product owner's machine runs.
+          # It is not a copy of the commands: if this passes and his machine
+          # fails, the difference is his machine, not a stale script.
+          & .\setup.ps1 -Only build -Root "$env:DICTATE_ROOT"
+          if ($LASTEXITCODE -ne 0) { throw 'the whisper.cpp Vulkan build failed' }
+
+      - name: What came out of the build
+        shell: pwsh
+        run: |
+          $bin = "$env:DICTATE_ROOT\whisper.cpp\build\bin\Release"
+          Get-ChildItem "$bin\*.exe" | Select-Object Name, Length | Format-Table | Out-String | Write-Host
+          foreach ($needed in @('whisper-server.exe', 'whisper-cli.exe')) {
+            if (-not (Test-Path "$bin\$needed")) { throw "$needed was not built" }
+          }
+          # The Vulkan backend has to be IN the build, not merely requested.
+          $cache = "$env:DICTATE_ROOT\whisper.cpp\build\CMakeCache.txt"
+          if (-not (Select-String -Path $cache -Pattern '^GGML_VULKAN:BOOL=(ON|1|TRUE)$' -Quiet)) {
+            throw 'the build was configured without GGML_VULKAN'
+          }
+          $vulkanLib = Get-ChildItem "$bin\ggml-vulkan*" -ErrorAction SilentlyContinue
+          if (-not $vulkanLib) { throw 'no ggml-vulkan library was produced' }
+          Write-Host "Vulkan backend built: $($vulkanLib.Name -join ', ')"
+
+      - name: How much of the GPU path this machine can see (informational, never fails)
+        shell: pwsh
+        run: |
+          # Programs like whisper.cpp, git and dictate itself write ordinary
+          # progress to stderr. With PowerShell's default of stop-on-error that
+          # can abort a step that is working perfectly, so exit codes are what
+          # decide success here.
+          $ErrorActionPreference = 'Continue'
+          $summary = & "$env:VULKAN_SDK\Bin\vulkaninfoSDK.exe" --summary 2>&1 | Out-String
+          $devices = @([regex]::Matches($summary, 'deviceName\s*=\s*(.+)') |
+            ForEach-Object { $_.Groups[1].Value.Trim() })
+          Write-Host "Vulkan devices on this runner: $($devices.Count)"
+          $devices | ForEach-Object { Write-Host "  $_" }
+          if ($devices.Count -eq 0) {
+            Write-Host ''
+            Write-Host 'Zero devices is the expected and correct result here: GitHub hosted'
+            Write-Host 'runners have no GPU and no Vulkan driver. whisper.cpp will fall back to'
+            Write-Host 'the processor, which is what the next steps exercise. This says nothing'
+            Write-Host 'about whether the RX 6900 XT works.'
+          }
+          exit 0
+
+      - name: Cache the smoke-test model
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ci-models
+          key: ci-whisper-model-base-en
+
+      - name: Download the smoke-test model, through the installer's own downloader
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        shell: powershell
+        run: |
+          . .\scripts\setup-lib.ps1
+          $models = Import-PowerShellDataFile scripts\models.psd1
+          $model = $models.CiSmoke
+          $dir = "$env:RUNNER_TEMP\ci-models"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Get-FileResumable -Uri $model.Uri -Destination (Join-Path $dir $model.Name) `
+            -ExpectedBytes $model.Bytes -ExpectedSha256 $model.Sha256 -Label $model.Label
+
+      - name: The binary that was just built really transcribes audio
+        shell: pwsh
+        run: |
+          # Programs like whisper.cpp, git and dictate itself write ordinary
+          # progress to stderr. With PowerShell's default of stop-on-error that
+          # can abort a step that is working perfectly, so exit codes are what
+          # decide success here.
+          $ErrorActionPreference = 'Continue'
+          $models = Import-PowerShellDataFile scripts\models.psd1
+          $model = Join-Path "$env:RUNNER_TEMP\ci-models" $models.CiSmoke.Name
+          $cli = "$env:DICTATE_ROOT\whisper.cpp\build\bin\Release\whisper-cli.exe"
+          # No -fa / --flash-attn: whisper.cpp #3806 is whisper-server crashing
+          # inside AMD's amdvlk64.dll with it on. It is off everywhere on purpose.
+          $out = & $cli -m $model -f assets\jfk.wav -t 4 -bs 1 -bo 1 -nt 2>&1 | Out-String
+          Write-Host $out
+          if ($out -notmatch '(?i)country') {
+            throw 'the built binary did not transcribe the test clip correctly'
+          }
+          Write-Host 'The Vulkan-enabled build transcribes correctly on the processor.'
+
+      - name: Install dictate
+        run: python -m pip install -e .
+
+      - name: dictate drives the real whisper-server end to end (processor, not GPU)
+        shell: pwsh
+        run: |
+          # Programs like whisper.cpp, git and dictate itself write ordinary
+          # progress to stderr. With PowerShell's default of stop-on-error that
+          # can abort a step that is working perfectly, so exit codes are what
+          # decide success here.
+          $ErrorActionPreference = 'Continue'
+          # This is the part of dictate that cannot be tested off Windows: the
+          # resident process supervision, the health wait, the WAV encoding and
+          # the HTTP client, all against the real whisper-server that was just
+          # compiled. use_gpu is false because this machine has no GPU - the
+          # code path either side of the backend choice is identical.
+          $models = Import-PowerShellDataFile scripts\models.psd1
+          $model = Join-Path "$env:RUNNER_TEMP\ci-models" $models.CiSmoke.Name
+          $server = "$env:DICTATE_ROOT\whisper.cpp\build\bin\Release\whisper-server.exe"
+          $config = "$env:RUNNER_TEMP\dictate-ci.toml"
+          @"
+          [whisper]
+          server_exe = '$server'
+          model = '$model'
+          use_gpu = false
+          threads = 4
+          startup_timeout_s = 300.0
+
+          [captions]
+          enabled = false
+
+          [logging]
+          level = "INFO"
+          file = '$env:RUNNER_TEMP\dictate-ci.log'
+          "@ | Set-Content -LiteralPath $config -Encoding UTF8
+
+          $out = dictate --config $config transcribe assets\jfk.wav --repeat 1 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw 'dictate could not drive whisper-server' }
+          if ($out -notmatch '(?i)country') { throw 'dictate got the wrong text back' }
+          Write-Host 'Resident whisper-server, started and driven by dictate itself: works.'
+          exit 0
+
+      - name: What GPU mode does on a machine with no GPU (informational, never fails)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # Programs like whisper.cpp, git and dictate itself write ordinary
+          # progress to stderr. With PowerShell's default of stop-on-error that
+          # can abort a step that is working perfectly, so exit codes are what
+          # decide success here.
+          $ErrorActionPreference = 'Continue'
+          # The product owner's machine runs with use_gpu = true. Here that can
+          # only show what happens when Vulkan finds nothing - it is recorded
+          # because a graceful fall back to the processor is worth knowing about,
+          # and a crash would be worth knowing about even more. It is NOT a test
+          # of the GPU path, and it cannot fail this workflow.
+          $models = Import-PowerShellDataFile scripts\models.psd1
+          $model = Join-Path "$env:RUNNER_TEMP\ci-models" $models.CiSmoke.Name
+          $server = "$env:DICTATE_ROOT\whisper.cpp\build\bin\Release\whisper-server.exe"
+          $config = "$env:RUNNER_TEMP\dictate-ci-gpu.toml"
+          @"
+          [whisper]
+          server_exe = '$server'
+          model = '$model'
+          use_gpu = true
+          threads = 4
+          startup_timeout_s = 300.0
+
+          [captions]
+          enabled = false
+          "@ | Set-Content -LiteralPath $config -Encoding UTF8
+
+          $out = dictate --config $config transcribe assets\jfk.wav --repeat 1 2>&1 | Out-String
+          Write-Host $out
+          if ($out -match '(?i)country') {
+            Write-Host 'With use_gpu = true and no GPU present, it fell back to the processor and still worked.'
+          } else {
+            Write-Host 'With use_gpu = true and no GPU present, it did not produce a transcript here.'
+            Write-Host 'That is not a verdict on the real machine, which has a GPU.'
+          }
+          exit 0
+
+      - name: Summary
+        if: always()
+        shell: pwsh
+        run: |
+          @'
+          ### whisper.cpp Vulkan build
+
+          **Proved on real Windows:** whisper.cpp compiles from source with
+          `-DGGML_VULKAN=1`, the Vulkan backend library is in the build,
+          `whisper-server.exe` and `whisper-cli.exe` come out of it, the binary
+          transcribes the bundled clip correctly, and dictate itself starts and
+          drives that real `whisper-server` over HTTP end to end.
+
+          **Not proved, and cannot be:** that any of it runs on a GPU. This
+          runner has no AMD card and no Vulkan driver, so Vulkan reports zero
+          devices and every transcription above ran on the processor. Whether
+          the RX 6900 XT is used, and how fast it is, can only be answered on the
+          machine that has one - `dictate transcribe` prints that number in about
+          a minute.
+          '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
