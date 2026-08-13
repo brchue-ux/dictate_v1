@@ -129,12 +129,24 @@ function Invoke-Tool {
         [string[]]$Arguments = @(),
         [ValidateSet('echo', 'log')][string]$Show = 'log'
     )
+    $name = Split-Path -Leaf $FilePath
+    if (-not (Test-Path -LiteralPath $FilePath) -and
+        -not (Get-Command $FilePath -ErrorAction SilentlyContinue)) {
+        # Without this, a missing program would leave $LASTEXITCODE holding
+        # whatever the PREVIOUS command set - very often zero - and the step
+        # would sail past a failure. 9009 is what the Windows shell itself
+        # returns for a command it cannot find.
+        Write-SetupLog "not found: $FilePath"
+        return @{ ExitCode = 9009; Output = "$name was not found on this PC." }
+    }
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $name = Split-Path -Leaf $FilePath
     $lines = New-Object System.Collections.Generic.List[string]
     try {
         Write-SetupLog "run: $FilePath $($Arguments -join ' ')"
+        # Start from a known value so a stale one can never be read back as
+        # success if the call itself produces no exit code.
+        $global:LASTEXITCODE = 0
         & $FilePath @Arguments 2>&1 | ForEach-Object {
             $text = ''
             if ($_ -is [System.Management.Automation.ErrorRecord]) {

@@ -579,6 +579,20 @@ Test-Case 'a program writing to stderr does not stop the install' {
     Assert-Contains $run.Output 'done'
 }
 
+Test-Case 'a missing program is a failure, not a silent success' {
+    # The hazard: PowerShell leaves $LASTEXITCODE holding whatever the previous
+    # command set, so a program that is not installed at all can look like it
+    # succeeded and the install carries on past a step that never ran.
+    $python = Get-PythonCommand -MinimumVersion '3.8'
+    if (-not $python) { throw 'no Python to test with' }
+    $ok = Invoke-Tool -FilePath $python.Path -Arguments @('-c', 'pass')
+    Assert-Equal 0 $ok.ExitCode 'a real command still succeeds'
+
+    $missing = Invoke-Tool -FilePath 'a-program-that-is-not-installed-anywhere' -Arguments @('--version')
+    Assert-True ($missing.ExitCode -ne 0) 'a missing program reports a failure'
+    Assert-Contains $missing.Output 'was not found'
+}
+
 Test-Case 'a program that fails reports its exit code rather than throwing' {
     $python = Get-PythonCommand -MinimumVersion '3.8'
     if (-not $python) { throw 'no Python to test with' }
