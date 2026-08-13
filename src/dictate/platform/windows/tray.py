@@ -179,7 +179,8 @@ class WindowsTrayIcon:
 
     @property
     def describe(self) -> str:
-        return "an icon in the notification area, with stop and restart on it"
+        return ("an icon in the notification area, with stop, restart and the "
+                "update commands on it")
 
     # -- the thread that owns the window ---------------------------------
 

@@ -6,12 +6,13 @@ nothing on screen at all until you speak. A command you cannot see is a command
 you will not remember, and the product owner said so in as many words: "there is
 no easy way I see to stop it beyond powershell commands I wont remember". So the
 running copy carries one visible thing that says what it is doing and offers the
-two actions worth having: stop it, and start it again.
+actions worth having: stop it, start it again, and keep it up to date.
 
 It is not a second way of doing anything. Every item here does exactly what the
 matching command does - Stop is `dictate stop`, Restart is `dictate stop`
-followed by `dictate run` - and each menu item says the command out loud, so the
-tray teaches the commands rather than replacing them.
+followed by `dictate run`, the two update items are `dictate update --check` and
+`dictate update` - and each menu item says the command out loud, so the tray
+teaches the commands rather than replacing them.
 
 This module is the whole of the decision-making: what the states are, what each
 one is called, which items the menu has, and the bytes of the icon itself. All
@@ -32,6 +33,8 @@ from enum import Enum
 #: knows nothing else about what the menu means.
 STOP = "stop"
 RESTART = "restart"
+CHECK = "check"
+UPDATE = "update"
 LOG = "log"
 STATUS = "status"
 
@@ -84,6 +87,11 @@ class TrayState:
     model_resident: bool = False
     #: One line about what went wrong, when status is ERROR.
     detail: str = ""
+    #: An update this copy started is running in a window of its own, and this
+    #: copy is what it is about to stop and replace. Starting a second one is
+    #: the one thing that could hurt, so while this is true the menu will not
+    #: offer to.
+    updating: bool = False
 
     @property
     def colour(self) -> str:
@@ -139,15 +147,25 @@ def status_line(state: TrayState) -> str:
 def menu(state: TrayState) -> list[MenuItem]:
     """What right-clicking the icon offers.
 
-    Deliberately four lines. Everything he might need is one of them, and none
-    of them needs him to have worked out what went wrong first: Stop clears a
-    stuck copy as well as a healthy one, because `dictate stop` does.
+    Six lines, in three groups: what it is doing, the two that change whether it
+    is running, and the two that change which version it is. None of them needs
+    him to have worked out what went wrong first - Stop clears a stuck copy as
+    well as a healthy one, because `dictate stop` does.
+
+    **Check for updates changes nothing, ever**, which is why it is offered even
+    while an update is already running: it is a report and cannot make anything
+    worse. **Update now** is the one item that can, and there is exactly one
+    thing it must not do, which is start twice - the second copy would race the
+    first over the same folder. So it goes grey the moment one is running.
     """
     return [
         MenuItem(STATUS, status_line(state), enabled=False, separator_after=True),
         MenuItem(STOP, "Stop dictate", "dictate stop", default=True),
         MenuItem(RESTART, "Restart dictate", "dictate stop, dictate run",
                  separator_after=True),
+        MenuItem(CHECK, "Check for updates", "dictate update --check"),
+        MenuItem(UPDATE, "Update now", "dictate update",
+                 enabled=not state.updating, separator_after=True),
         MenuItem(LOG, "Open the log folder"),
     ]
 
@@ -160,10 +178,14 @@ class TrayActions:
     stop: Callable[[], None]
     restart: Callable[[], None]
     open_log: Callable[[], None]
+    check_updates: Callable[[], None]
+    update_now: Callable[[], None]
     handlers: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.handlers = {STOP: self.stop, RESTART: self.restart, LOG: self.open_log}
+        self.handlers = {STOP: self.stop, RESTART: self.restart,
+                         CHECK: self.check_updates, UPDATE: self.update_now,
+                         LOG: self.open_log}
 
     def invoke(self, key: str) -> bool:
         """Run the action for `key`. False if there is nothing to run, which is

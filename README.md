@@ -205,6 +205,15 @@ If you have edited a file inside `C:\dictate_v1` yourself, it stops and names th
 file rather than overwriting it. `dictate update --force` goes ahead anyway, and
 still keeps the copy.
 
+Both of these are on the icon by the clock as well, as **Check for updates** and
+**Update now**, so you never have to open a window to find out whether there is
+anything new. Choosing one of them **opens a window of its own** and runs the
+command in it — the same output, the same questions answered, and it stays open
+until you press Enter, so a failure is still on screen afterwards. **Update now**
+then stops this copy, replaces the files and starts it again, which means the
+icon disappears for a few seconds part way through and comes back on the new
+version. The window is what is on screen in between.
+
 ### If anything is ever stuck
 
 ```
@@ -230,10 +239,10 @@ You can also right-click **the dictate icon by the clock** — it is there
 whenever dictate is running, including when it started by itself at logon and
 there is no window anywhere. It shows what dictate is doing (grey while it
 waits, gold while it is listening to you, red if something needs reading), and
-carries **Stop**, **Restart** and **Open the log folder**. Each one is labelled
-with the command that does the same thing, so the icon teaches you the commands
-rather than replacing them. Turn it off with `[tray] enabled = false` if you
-would rather not have it.
+carries **Stop**, **Restart**, **Check for updates**, **Update now** and **Open
+the log folder**. Each one is labelled with the command that does the same thing,
+so the icon teaches you the commands rather than replacing them. Turn it off with
+`[tray] enabled = false` if you would rather not have it.
 
 ### If something is wrong later
 
@@ -381,7 +390,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 488 tests, run and passing
+### Verified anywhere — 511 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -445,9 +454,15 @@ python -m unittest discover -s tests -t .
   first one, the one that replaces a crash, and the one an idle release brings
   back. The containment itself is Windows' job and is proved on Windows; that
   nothing slips past it is proved here.
-* **What the tray icon says and offers**: the tooltip, the status line, the four
+* **What the tray icon says and offers**: the tooltip, the status line, the six
   menu items, that each names the command that does the same thing, and that the
   icon's own bytes are an icon Windows can read whose colour is the status.
+* **That an update chosen from the icon runs somewhere else** — a separate
+  process, with a console of its own, breaking out of the job that would take it
+  down when this copy stops. Doing the work inside the copy being replaced is
+  the one shape that cannot work, so that is what these tests hold in place,
+  along with a second update being refused while one is running and offered
+  again once that one has ended.
 * **Everything `dictate update` decides**, driven with real archives built and
   unpacked in the test: which folder is the install, what changed between two
   revisions in plain language, which files to write and which to remove, which
@@ -492,7 +507,7 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
-* **The 488 tests above, on Windows** as well as on Linux — which is where the
+* **The 511 tests above, on Windows** as well as on Linux — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.
 * **That a supervised child process cannot outlive its parent.** CI starts a
@@ -539,6 +554,12 @@ misbehaves.
   Stop and Restart do what they say. A hosted runner has no notification area
   and no one to click anything in it. The `[tray] enabled = false` line in your
   config turns it off if it misbehaves; nothing else depends on it.
+* **Choosing an update from that icon.** Everything it decides is tested, and
+  what it starts is `dictate update`, which CI does run for real. What nobody
+  has seen is the click: that a console window really appears when a copy
+  running under `pythonw.exe` asks for one, that the icon really goes and comes
+  back across the restart, and that the window is still there to read
+  afterwards. From a PowerShell window the same two commands are proved.
 * **`gh auth login` in a browser, and Windows remembering it.** CI borrows the
   workflow's own token, so the one interactive step of `dictate update` — the
   sign-in you do once — has never been run by anybody. Everything after it is

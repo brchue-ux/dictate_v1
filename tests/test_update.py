@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 import tarfile
 import tempfile
 import time
@@ -889,6 +890,28 @@ class WhenItGoesWrong(TempState):
         self.assertEqual(update.tree_files(self.root), good)
         self.assertIsNone(update.read_journal())
 
+    def test_check_names_an_interrupted_update_and_repairs_nothing(self):
+        """`--check` says what would change and changes nothing - and putting a
+        backup back is a change. It is also how the notification area's "Check
+        for updates" is run, where nobody asked for anything to happen at all.
+        """
+        backup = self.tmp / "state" / "updates" / "backup-20260813-210000-aaaaaaa"
+        update.copy_tree(self.root, backup)
+        write_file(self.root / "src" / "dictate" / "cli.py", "half\n")
+        half = update.tree_files(self.root)
+        journal = update.Journal(root=str(self.root), backup=str(backup),
+                                 started="2026-08-13 21:00:00")
+        update.write_journal(journal)
+
+        self.run_update(Gh(files=source_tree()), check_only=True)
+        self.assertIn("did not finish", self.output)
+        self.assertIn("--check changes nothing", self.output)
+        self.assertIn("dictate update", self.output)
+        # Not one byte moved, and the journal is still there for the real
+        # update to act on.
+        self.assertEqual(update.tree_files(self.root), half)
+        self.assertIsNotNone(update.read_journal())
+
     def test_a_journal_for_some_other_folder_is_left_alone(self):
         update.write_journal(update.Journal(
             root="C:\\some\\other\\install", backup=str(self.tmp / "backup")))
@@ -1049,6 +1072,100 @@ class RestartingAfterwards(TempState):
                         side_effect=DictateError("no", "type `dictate run`")):
             self.assertIsNone(update._restart(holder, None, self.say))
         self.assertIn("dictate run", self.output)
+
+
+# ---------------------------------------------------------------------------
+# Started from the notification area
+# ---------------------------------------------------------------------------
+
+
+class FromTheNotificationArea(TempState):
+    """What the tray's two update items actually run.
+
+    The click cannot be made here - nobody has a notification area - so what is
+    checked is the whole of the decision: that it is another process, that it is
+    one with a window, and that it is `dictate update` rather than a second
+    implementation of it.
+    """
+
+    def spawn(self, seen: list) -> object:
+        class Started:
+            pid = 5150
+
+        def spawn(argv, **kwargs):
+            seen.append((argv, kwargs))
+            return Started()
+
+        return spawn
+
+    def test_it_starts_the_command_rather_than_doing_the_work_in_here(self):
+        seen: list = []
+        started = update.start_in_console(None, spawn=self.spawn(seen),
+                                          executable=r"C:\Python\python.exe")
+        self.assertEqual(started.pid, 5150)
+        argv, _kwargs = seen[0]
+        self.assertEqual(argv[:4], [r"C:\Python\python.exe", "-m", "dictate", "update"])
+        self.assertNotIn("--check", argv)
+
+    def test_the_check_carries_the_flag_that_makes_it_change_nothing(self):
+        seen: list = []
+        update.start_in_console(None, check_only=True, spawn=self.spawn(seen),
+                                executable=r"C:\Python\python.exe")
+        self.assertIn("--check", seen[0][0])
+
+    def test_it_asks_for_the_window_to_stay_open_after_it_has_finished(self):
+        """That window is the only place its report - and any failure - is
+        shown. One that closed on the last line would take both with it."""
+        self.assertIn("--pause", update.update_argv(pause=True))
+        self.assertNotIn("--pause", update.update_argv())
+
+    def test_the_config_it_was_started_with_is_carried_over(self):
+        argv = update.update_argv(r"D:\conf\dictate.toml")
+        self.assertEqual(argv[3:5], ["--config", r"D:\conf\dictate.toml"])
+
+    def test_it_gets_a_console_and_leaves_the_job_that_would_take_it_down(self):
+        """It has to outlive this process by design: stopping this process is
+        the second thing it does. On Windows that means a new console rather
+        than none, and breaking out of the job the logon task runs us in."""
+        seen: list = []
+        update.start_in_console(None, spawn=self.spawn(seen),
+                                executable=r"C:\Python\python.exe")
+        _argv, kwargs = seen[0]
+        if sys.platform == "win32":
+            self.assertTrue(kwargs["creationflags"] & 0x00000010)   # NEW_CONSOLE
+            self.assertTrue(kwargs["creationflags"] & 0x01000000)   # BREAKAWAY
+        else:
+            self.assertTrue(kwargs["start_new_session"])
+
+    def test_the_windowless_interpreter_is_swapped_for_the_one_with_a_console(self):
+        """A copy started at logon runs under pythonw.exe, where print has
+        nowhere to go. Starting the update with it would produce a process that
+        ran perfectly and said nothing - the "it did nothing" failure."""
+        # Named through the interpreter running this, so the path is a real one
+        # on whichever platform that is.
+        windowless = Path(sys.executable).with_name("pythonw.exe")
+        found = update.console_python(windowless, exists=lambda p: True)
+        self.assertEqual(found.name, "python.exe")
+        self.assertEqual(found.parent, windowless.parent)
+        # An ordinary console interpreter is already the right answer.
+        self.assertEqual(update.console_python(Path(sys.executable)),
+                         Path(sys.executable))
+
+    def test_no_console_interpreter_is_refused_rather_than_run_silently(self):
+        windowless = Path(sys.executable).with_name("pythonw.exe")
+        with self.assertRaises(DictateError) as ctx:
+            update.console_python(windowless, exists=lambda p: False)
+        self.assertIn("dictate update", ctx.exception.remedy)
+
+    def test_a_window_that_will_not_open_says_what_to_type_instead(self):
+        def spawn(argv, **kwargs):
+            raise OSError("nope")
+
+        with self.assertRaises(DictateError) as ctx:
+            update.start_in_console(None, spawn=spawn,
+                                    executable=r"C:\Python\python.exe")
+        self.assertIn("Nothing has been changed", ctx.exception.remedy)
+        self.assertIn("dictate update", ctx.exception.remedy)
 
 
 if __name__ == "__main__":

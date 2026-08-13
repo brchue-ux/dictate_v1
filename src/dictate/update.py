@@ -1210,6 +1210,30 @@ def _stamp_for(root: Path, revision: Revision, branch: str, repo: str) -> Stamp:
     )
 
 
+def _note_interrupted(updates: Path, root: Path, say: Say) -> bool:
+    """Say that an earlier update did not finish, and change nothing.
+
+    What `--check` does about it, which is nothing at all. `--check` says what
+    would change; putting a backup back is a change, and the one thing a check
+    is not allowed to do is be the reason a folder is different afterwards. The
+    fact is still worth saying - it is the only place he would learn it.
+    """
+    journal = read_journal(updates)
+    if journal is None:
+        return False
+    say("")
+    say(f"An earlier update did not finish ({journal.describe()}).")
+    if journal.root and Path(journal.root) != root:
+        say(f"It was an update of {journal.root}, which is not the folder this "
+            "dictate loads from.")
+        return True
+    say("Nothing has been put back, because --check changes nothing. Run "
+        "`dictate update` and")
+    say("it will restore the version that was there before it.")
+    say("")
+    return True
+
+
 def _recover_interrupted(updates: Path, root: Path, say: Say) -> bool:
     """An update that did not finish. Put the backup back before anything else.
 
@@ -1363,7 +1387,13 @@ def update(*, say: Say, root: Path | None = None, repo: str = DEFAULT_REPO,
     say(f"install folder:  {root}")
     say("                 (this is the folder Python loads dictate from)")
 
-    _recover_interrupted(updates, root, say)
+    # `--check` is a report, not an action: an interrupted update is named
+    # rather than repaired, because a check that put a backup back would have
+    # changed the very thing it promised only to describe.
+    if check_only:
+        _note_interrupted(updates, root, say)
+    else:
+        _recover_interrupted(updates, root, say)
 
     stamp = read_stamp(root) or Stamp(installed_by="setup.ps1")
     say(f"this copy:       {stamp.describe()}")
@@ -1671,3 +1701,103 @@ def restore(*, say: Say, root: Path | None = None, timeout_s: float = 30.0,
     if holder is not None:
         outcome.restarted_pid = _restart(holder, config_path, say)
     return outcome
+
+
+# ---------------------------------------------------------------------------
+# Running it from the notification area
+#
+# The menu item is not a second implementation of any of the above - it starts
+# exactly this command, in a window of its own. That is not a shortcut; it is
+# the only shape that works.
+#
+# The process running the tray is the process being replaced. If an update ran
+# INSIDE it, `_stop_running_copy` would ask this very process to stop, this very
+# process would honour it, and the thread doing the updating would be killed
+# somewhere in the middle of writing files - the one state the whole of this
+# module exists to make impossible. So the update runs somewhere else, and this
+# copy is stopped and started again by it, through the same door `dictate
+# update` uses from a console and the same `recovery.relaunch` the tray's own
+# Restart item ends up in.
+#
+# It gets a console because it needs a voice. A copy started at logon runs under
+# `pythonw.exe`, where `print` has nowhere to go; the window IS how he sees that
+# it is working, that it finished, and - the case that matters - what went wrong
+# and what to type about it. `--pause` keeps that window open afterwards, so a
+# failure is still on screen minutes later.
+# ---------------------------------------------------------------------------
+
+
+def console_python(executable: str | None = None, *, exists=None) -> Path:
+    """`python.exe`: the interpreter that can put words on a screen.
+
+    The mirror image of `autostart.windowless_python`, for the same reason and
+    in the opposite direction. A copy started at logon is running under
+    `pythonw.exe`, which has no console and cannot be given one - starting the
+    update with it would produce a process that runs perfectly and says nothing
+    at all, which is precisely the "the menu item did nothing" failure.
+
+    So a missing `python.exe` is refused rather than quietly swapped for the
+    windowless one. `dictate update` from any console still works, and that is
+    what the message says to do.
+    """
+    exe = Path(executable or sys.executable)
+    if exe.name.lower() != "pythonw.exe":
+        return exe
+    exists = exists or (lambda path: path.exists())
+    candidate = exe.with_name("python.exe")
+    if exists(candidate):
+        return candidate
+    raise DictateError(
+        f"dictate could not find python.exe next to {exe}, so it cannot open a "
+        "window to update in.",
+        "Nothing has been changed. Update from a PowerShell window instead:\n"
+        "  dictate update",
+    )
+
+
+def update_argv(config_path: str | None = None, *, executable: str | None = None,
+                check_only: bool = False, pause: bool = False) -> list[str]:
+    """What to run for an update that has a window of its own.
+
+    `-m dictate` rather than `dictate.exe`, exactly as `recovery.relaunch_argv`
+    does: the console-script wrapper is a separate program that may or may not
+    be on the PATH of a process started by Task Scheduler, and the interpreter
+    running right now is neither of those questions.
+    """
+    argv = [str(executable or sys.executable), "-m", "dictate"]
+    if config_path:
+        argv += ["--config", str(config_path)]
+    argv += ["update"]
+    if check_only:
+        argv += ["--check"]
+    if pause:
+        argv += ["--pause"]
+    return argv
+
+
+def start_in_console(config_path: str | None = None, *, check_only: bool = False,
+                     executable: str | None = None, exists=None,
+                     spawn=subprocess.Popen):
+    """Start `dictate update` in a window of its own. Returns the process.
+
+    It has to outlive the caller, and by more than an accident: the update's
+    second act is to stop the copy that started it. `recovery.spawn_detached`
+    is what makes that true on Windows - see the note there about the job object
+    Task Scheduler runs the logon task inside.
+
+    The process, not the pid, so that the caller can ask whether it is still
+    going: an update that failed before it stopped anything leaves the tray
+    running, and he must be able to choose the item again.
+    """
+    argv = update_argv(config_path,
+                       executable=str(console_python(executable, exists=exists)),
+                       check_only=check_only, pause=True)
+    try:
+        return recovery.spawn_detached(argv, console=True, spawn=spawn)
+    except OSError as exc:
+        raise DictateError(
+            f"dictate could not open a window to update in: {exc}",
+            "Nothing has been changed. Update from a PowerShell window "
+            "instead:\n"
+            + ("  dictate update --check" if check_only else "  dictate update"),
+        ) from exc

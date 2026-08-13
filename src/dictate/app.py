@@ -33,7 +33,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import instance, tray as tray_mod
+from . import instance, tray as tray_mod, update as update_mod
 from .cleanup.service import CleanupService
 from .config import Config
 from .engines.residency import ResidentModel, Residency
@@ -95,6 +95,11 @@ class Application:
         #: The last thing published for `dictate update` to read; `None` until
         #: something has been, so the first idle state is written too.
         self._published_activity: str | None = None
+        #: The update started from the tray, while it may still be running. It
+        #: is kept rather than its pid so that "is it still going?" can be asked
+        #: rather than assumed - an update that failed before it stopped
+        #: anything leaves this copy running, and he must be able to try again.
+        self._update = None
 
         self.pipeline = Pipeline(
             batch=self.batch,
@@ -201,6 +206,8 @@ class Application:
             stop=self.request_stop_from_tray,
             restart=self.request_restart,
             open_log=self._open_log_folder,
+            check_updates=self.check_for_updates,
+            update_now=self.update_now,
         )
         try:
             self.tray = factory.make_tray_icon(
@@ -238,7 +245,30 @@ class Application:
         except DictateError:
             hotkey = self.cfg.hotkey.combination
         return tray_mod.TrayState(status=status, hotkey=hotkey,
-                                  model_resident=resident, detail=self._last_error)
+                                  model_resident=resident, detail=self._last_error,
+                                  updating=self.update_in_flight())
+
+    def update_in_flight(self) -> bool:
+        """Is the update this copy started still going?
+
+        Asked of the process itself, so a run that ended - because it failed
+        before it stopped anything, or because he closed its window - puts the
+        menu item back rather than greying it out for the rest of the session.
+        A process that will not answer is treated as still running: refusing a
+        second update is always the safer of the two mistakes.
+        """
+        process = self._update
+        if process is None:
+            return False
+        try:
+            if process.poll() is None:
+                return True
+        except Exception:
+            log.debug("could not tell whether the update is still running",
+                      exc_info=True)
+            return True
+        self._update = None
+        return False
 
     def _refresh_tray(self) -> None:
         state = self._tray_state()
@@ -272,7 +302,7 @@ class Application:
         instance.publish_activity(bool(what), what)
 
     def _open_log_folder(self) -> None:
-        """The tray's third item. The folder, not the file: the log may not
+        """The tray's last item. The folder, not the file: the log may not
         exist yet, and what he wants is somewhere to look."""
         target = Path(self.cfg.logging.file).parent if self.cfg.logging.file \
             else instance.state_dir()
@@ -282,6 +312,64 @@ class Application:
             log.exception("could not open %s", target)
             self.notify("warning", f"dictate could not open {target}. Open it "
                                    f"yourself - the log is in there.")
+
+    def check_for_updates(self) -> None:
+        """The tray's `dictate update --check`.
+
+        A report and nothing else: it does not stop this copy, does not touch
+        the install folder, and does not repair an update that was interrupted -
+        it names one. So there is nothing to guard and nothing to undo, and it
+        may be run as often as he likes.
+        """
+        self._start_update(check_only=True)
+
+    def update_now(self) -> None:
+        """The tray's `dictate update`.
+
+        The window it opens will ask this process to stop - through the same
+        file `dictate stop` uses - update the folder Python loads dictate from,
+        and start a fresh copy the way it was started before. So the icon
+        disappears part way through and comes back a few seconds later with the
+        new version behind it, and the window is what is on screen in between.
+        """
+        self._start_update(check_only=False)
+
+    def _start_update(self, *, check_only: bool) -> None:
+        """Open a window and run `dictate update` in it.
+
+        The update deliberately does NOT run in this process. This is the
+        process it is going to stop and replace, and a thread doing the writing
+        when that happens would be killed in the middle of it. See the note at
+        the foot of `update.py`.
+
+        Nothing here blocks: this runs on the thread that owns the icon, and a
+        tray that stops answering is a tray that has stopped being the one
+        visible thing. Starting a process is all it does.
+        """
+        what = "dictate update --check" if check_only else "dictate update"
+        if not check_only and self.update_in_flight():
+            # The menu greys this out, but the click that opened the menu and
+            # the click that chose the item are two moments; this is the one
+            # that is actually authoritative. Two updates over one folder is
+            # the only way this could hurt him.
+            self.console("dictate: an update is already running in its own window.")
+            return
+        config_path = str(self.cfg.source_path) if self.cfg.source_path else None
+        try:
+            process = update_mod.start_in_console(config_path, check_only=check_only)
+        except DictateError as exc:
+            # There is no console to print this in and no dialog worth showing:
+            # a modal box would block the thread that owns the icon until
+            # somebody clicked it. `notify` turns the icon red and puts the
+            # first line in the tooltip, which is the surface this copy has.
+            self.notify("error", f"{what} could not be started: {exc.message}")
+            log.error("%s", exc.report())
+            return
+        if not check_only:
+            self._update = process
+        self.console(f"dictate: {what} is running in a window of its own "
+                     f"(process {getattr(process, 'pid', '?')}).")
+        self._refresh_tray()
 
     def request_stop_from_tray(self) -> None:
         """The tray's Stop item. Exactly what `dictate stop` asks for, through

@@ -53,10 +53,33 @@ class WhatItSays(unittest.TestCase):
         self.assertIn("hotkey", released)
 
 
+class Started:
+    """A started `dictate update`, standing in for the process object the app
+    keeps so it can ask whether that update is still going."""
+
+    def __init__(self, pid: int, code: int | None = None) -> None:
+        self.pid = pid
+        self.code = code
+
+    def poll(self) -> int | None:
+        return self.code
+
+
+def actions(done: list[str]) -> tray.TrayActions:
+    return tray.TrayActions(
+        stop=lambda: done.append("stop"),
+        restart=lambda: done.append("restart"),
+        open_log=lambda: done.append("log"),
+        check_updates=lambda: done.append("check"),
+        update_now=lambda: done.append("update"),
+    )
+
+
 class WhatItOffers(unittest.TestCase):
-    def test_the_menu_is_status_stop_restart_and_the_log(self):
+    def test_the_menu_is_status_stop_restart_the_updates_and_the_log(self):
         keys = [item.key for item in tray.menu(state())]
-        self.assertEqual(keys, [tray.STATUS, tray.STOP, tray.RESTART, tray.LOG])
+        self.assertEqual(keys, [tray.STATUS, tray.STOP, tray.RESTART,
+                                tray.CHECK, tray.UPDATE, tray.LOG])
 
     def test_the_status_line_is_not_clickable(self):
         items = {item.key: item for item in tray.menu(state())}
@@ -70,6 +93,26 @@ class WhatItOffers(unittest.TestCase):
         self.assertEqual(items[tray.STOP].command, "dictate stop")
         self.assertIn("dictate stop", items[tray.RESTART].command)
         self.assertIn("dictate stop", items[tray.STOP].text)
+        self.assertEqual(items[tray.CHECK].command, "dictate update --check")
+        self.assertEqual(items[tray.UPDATE].command, "dictate update")
+
+    def test_the_two_update_items_say_which_one_changes_something(self):
+        """He is choosing between a report and a replacement. The labels are
+        the only thing standing between those two, so they are checked."""
+        items = {item.key: item for item in tray.menu(state())}
+        self.assertEqual(items[tray.CHECK].label, "Check for updates")
+        self.assertEqual(items[tray.UPDATE].label, "Update now")
+        self.assertIn("--check", items[tray.CHECK].text)
+
+    def test_a_second_update_cannot_be_started_while_one_is_running(self):
+        """Two updates over the same folder is the one way this could hurt: the
+        second would race the first over the files the first is replacing."""
+        items = {item.key: item for item in tray.menu(state(updating=True))}
+        self.assertFalse(items[tray.UPDATE].enabled)
+        # A check changes nothing at all, so it is still offered - and so is
+        # everything about stopping the copy that is being replaced.
+        self.assertTrue(items[tray.CHECK].enabled)
+        self.assertTrue(items[tray.STOP].enabled)
 
     def test_stop_is_what_a_click_does(self):
         default = [item for item in tray.menu(state()) if item.default]
@@ -77,20 +120,15 @@ class WhatItOffers(unittest.TestCase):
 
     def test_the_actions_are_wired_to_the_keys(self):
         done: list[str] = []
-        actions = tray.TrayActions(
-            stop=lambda: done.append("stop"),
-            restart=lambda: done.append("restart"),
-            open_log=lambda: done.append("log"),
-        )
         for item in tray.menu(state()):
-            actions.invoke(item.key)
-        self.assertEqual(done, ["stop", "restart", "log"])
+            actions(done).invoke(item.key)
+        self.assertEqual(done, ["stop", "restart", "check", "update", "log"])
 
     def test_an_unknown_id_does_nothing_rather_than_raising(self):
-        actions = tray.TrayActions(stop=lambda: None, restart=lambda: None,
-                                   open_log=lambda: None)
-        self.assertFalse(actions.invoke("nonsense"))
-        self.assertFalse(actions.invoke(tray.STATUS))
+        done: list[str] = []
+        self.assertFalse(actions(done).invoke("nonsense"))
+        self.assertFalse(actions(done).invoke(tray.STATUS))
+        self.assertEqual(done, [])
 
 
 class WhatItLooksLike(unittest.TestCase):
@@ -193,6 +231,7 @@ class WhatTheAppTellsIt(unittest.TestCase):
         app._in_flight = 0
         app._last_error = ""
         app._published_activity = None
+        app._update = None
         app.batch = SimpleNamespace(state=kwargs.pop("residency", Residency.RESIDENT))
         for key, value in kwargs.items():
             setattr(app, key, value)
@@ -275,6 +314,99 @@ class WhatTheAppTellsIt(unittest.TestCase):
         self.assertEqual(path.read_text(encoding="utf-8"),
                          "busy=1\nwhat=tampered\n")
         self.assertIsNotNone(first)
+
+    def test_the_update_runs_in_another_process_and_not_in_this_one(self):
+        """The reason both update items exist as they do.
+
+        This process is the one an update replaces and restarts. Doing the work
+        in here would mean a thread writing files while the process it is in is
+        being asked to stop - so what the menu item does is start `dictate
+        update` elsewhere and let it stop this copy the ordinary way.
+        """
+        from unittest import mock
+
+        app = self.app()
+        with mock.patch("dictate.update.start_in_console",
+                        return_value=Started(4321)) as start:
+            app.update_now()
+        self.assertFalse(start.call_args.kwargs["check_only"])
+        # Nothing about this copy was touched from in here: no shutdown was
+        # asked for, and the update is what will ask for one.
+        self.assertFalse(app.overlay.closed.is_set())
+        self.assertFalse(app.restart_wanted)
+
+    def test_check_for_updates_starts_the_command_that_changes_nothing(self):
+        from unittest import mock
+
+        app = self.app()
+        with mock.patch("dictate.update.start_in_console",
+                        return_value=Started(99)) as start:
+            app.check_for_updates()
+        self.assertTrue(start.call_args.kwargs["check_only"])
+        # A check may be run as often as he likes, because it cannot leave
+        # anything different behind.
+        self.assertFalse(app.update_in_flight())
+        self.assertFalse(app.overlay.closed.is_set())
+
+    def test_a_second_update_is_refused_even_if_the_menu_is_clicked_twice(self):
+        from unittest import mock
+
+        app = self.app()
+        with mock.patch("dictate.update.start_in_console",
+                        return_value=Started(4321)) as start:
+            app.update_now()
+            self.assertTrue(app.update_in_flight())
+            self.assertTrue(app._tray_state().updating)
+            app.update_now()
+        self.assertEqual(start.call_count, 1)
+
+    def test_an_update_that_ended_without_stopping_us_can_be_tried_again(self):
+        """The case that would otherwise grey the item out for good: `dictate
+        update` refusing before it changed anything - not signed in to GitHub,
+        say - leaves this copy running exactly as it was."""
+        from unittest import mock
+
+        app = self.app()
+        finished = Started(4321)
+        with mock.patch("dictate.update.start_in_console",
+                        return_value=finished) as start:
+            app.update_now()
+            finished.code = 2                # its window said why, and closed
+            self.assertFalse(app.update_in_flight())
+            self.assertFalse(app._tray_state().updating)
+            app.update_now()
+        self.assertEqual(start.call_count, 2)
+
+    def test_an_update_that_will_not_say_is_treated_as_still_running(self):
+        from unittest import mock
+
+        class Silent:
+            pid = 1
+
+            def poll(self):
+                raise OSError("no idea")
+
+        app = self.app()
+        with mock.patch("dictate.update.start_in_console", return_value=Silent()):
+            app.update_now()
+        self.assertTrue(app.update_in_flight())
+
+    def test_an_update_that_cannot_be_started_turns_the_icon_red(self):
+        """There is no console to say it in and no dialog worth showing - a
+        modal box would hold the thread that owns the icon until somebody
+        clicked it. The icon itself is the surface this copy has."""
+        from unittest import mock
+
+        from dictate.errors import DictateError
+
+        app = self.app()
+        with mock.patch("dictate.update.start_in_console",
+                        side_effect=DictateError("no window to update in", "type it")):
+            app.update_now()          # must not raise: the tray thread is here
+        state = app._tray_state()
+        self.assertIs(state.status, tray.TrayStatus.ERROR)
+        self.assertIn("no window to update in", state.detail)
+        self.assertFalse(app.update_in_flight())
 
     def test_restart_from_the_tray_shuts_down_first_and_says_so(self):
         from dictate.app import EXIT_RESTART
