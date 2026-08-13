@@ -119,11 +119,16 @@ class FakeWindows:
 class FakeOverlay:
     def __init__(self) -> None:
         self.history: list[tuple[OverlayState, str]] = []
+        #: Every target handed to set_state, so tests can hold in place that the
+        #: window captured at press is what decides which monitor is used.
+        self.targets: list[TargetWindow | None] = []
         self._lock = threading.Lock()
 
-    def set_state(self, state: OverlayState, text: str = "") -> None:
+    def set_state(self, state: OverlayState, text: str = "",
+                  target: TargetWindow | None = None) -> None:
         with self._lock:
             self.history.append((state, text))
+            self.targets.append(target)
 
     def close(self) -> None:
         pass

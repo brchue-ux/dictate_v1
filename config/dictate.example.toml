@@ -59,19 +59,77 @@ decoding_method = "greedy_search"
 [overlay]
 # The caption window. It is always on top, it never takes focus, and clicks pass
 # straight through it to whatever is underneath.
+#
+# To see it without dictating - it shows sample text and runs the whole
+# appear-and-fade cycle, so you can change a value here and look at the result
+# in about two seconds:
+#
+#   dictate overlay
+#
+# EVERY PIXEL VALUE BELOW IS AT 100% DISPLAY SCALING. On a monitor set to 150%
+# they are all multiplied by 1.5, so the captions are the same physical size on
+# every screen instead of two thirds the size on the scaled one.
+
 position = "bottom-center"   # bottom-center, bottom-left, bottom-right,
                              # top-center, top-left, top-right
-margin_px = 90
-max_width_px = 1100
-font_family = "Segoe UI"
-font_size = 20
-opacity = 0.88
-background = "#12121a"
-foreground = "#eaeaf2"
-accent = "#7aa2f7"
+margin_px = 64               # gap from the edge of the screen's usable area
+max_width_px = 1080          # never more than 72% of the display, whatever this says
+
+# Fira Code, as asked for. If it is not installed dictate uses Consolas instead
+# and SAYS SO when it starts - it never quietly draws a different font.
+# Fira Code's other weights install under their own names, so "Fira Code Retina"
+# and "Fira Code Medium" are both valid here if you want it a touch heavier.
+font_family = "Fira Code"
+font_size = 18               # points
+
+# 1.0 means solid. Anything less lets the window behind show through, which
+# looks appealing on a dark desktop and goes muddy over a white page - the thing
+# you are most often dictating into. 0.88 was the old default if you want it.
+opacity = 1.0
+
+# The colours. The panel is one dark material in two values - a lit "face" that
+# the words sit on, inside a near-black "edge" that gives it a visible thickness
+# and a base to sit on - plus one block of colour down the left that is the
+# whole state indicator: brass while recording, grey while transcribing, rust if
+# something went wrong.
+background = "#262a31"       # the lit face
+foreground = "#c7ccd6"       # the caption words. Deliberately not white.
+accent = "#c8a45c"           # recording
+edge = "#0a0b0e"             # the shoulder around the face, and the base
+muted = "#7e8794"            # transcribing, and pasted
+error = "#c9705c"            # something went wrong
+
+edge_px = 8                  # thickness of that shoulder and of the state bar
+padding_px = 26              # breathing room inside the face
+
+# Caption lines the panel reserves. It is this tall whether you say one word or
+# fifty, so it never grows or shifts while you are talking - which is the thing
+# that makes it restless in the corner of your eye.
+lines = 2
 # How much caption text stays on screen; older words scroll off the left.
-max_chars = 220
+max_chars = 110
 click_through = true
+
+# Appearing and disappearing are eased rather than switched. The fade out is
+# longer than the fade in on purpose; it runs after your text has already been
+# pasted, so it never delays anything. Set fade = false for the old behaviour,
+# which snapped in and out.
+fade = true
+fade_in_ms = 260
+fade_out_ms = 420
+fade_step_ms = 16
+
+# Which screen the captions appear on. true puts them on the monitor holding the
+# window you were in when you pressed the hotkey - the one the text is about to
+# be pasted into - falling back to the monitor your mouse is on, then the
+# primary. false always uses the primary monitor.
+follow_focus = true
+
+# How the overlay handles monitors with different scaling. "per-monitor" sizes
+# the captions for whichever screen they appear on. "off" hands that back to
+# Windows; try it if captions on a second screen are the wrong size or land in
+# the wrong place.
+dpi_awareness = "per-monitor"
 
 
 [whisper]
