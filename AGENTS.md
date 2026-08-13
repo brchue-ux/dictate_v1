@@ -114,6 +114,17 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   holds the transcription port, and ~1.6 GB of VRAM whenever the model is resident.
   Killing the parent orphans it. Anything that stops the app has to go through the
   same clean shutdown Ctrl+C uses.
+- **Nothing under test may reach a blocking Win32 call.** `MessageBoxW` in
+  `platform/windows/notify.py` waits for a click, and on a CI runner nobody ever
+  clicks: the suite hung for hours instead of failing. `tests/test_autostart.py`
+  patches `_notify_failure` for the whole logon-start class rather than relying on
+  each test's config to turn it off — the test that found this was the one whose
+  config is deliberately unparseable, so it could not read `notify_on_failure` at
+  all. CI jobs carry `timeout-minutes`, and the suite runs under `python -u` so a
+  hang names the test it is in rather than losing it in a buffer.
+- **A modal dialog must never be shown while holding the instance lock.** It can sit
+  there until the next morning, and `dictate run` would answer "already running" for
+  a copy that gave up hours ago.
 - **What autostart costs is `[whisper] idle_release_minutes`, not "1.6 GB all day".**
   Since the idle release, leaving the logon task on holds no VRAM between dictation
   sessions. Anything that states the cost — the README, `autostart enable`'s output,

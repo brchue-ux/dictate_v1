@@ -819,10 +819,17 @@ def run_at_logon(config_path: str | None = None) -> int:
             log.write(f"outcome: gave up after {attempt} attempt(s). dictate is NOT "
                       "running. Start it by hand with `dictate run` once the "
                       "problem above is fixed.")
-            _notify_failure(settings, last.report() if last else "dictate could not start.")
-            return 2
+            failure = last.report() if last else "dictate could not start."
         finally:
             lock.release()
+
+    # Everything above has let go before this point, and deliberately: the
+    # dialog is modal and waits for a click that may not come until he sits down
+    # tomorrow. Holding the single-instance lock behind it would mean `dictate
+    # run` answering "dictate is already running" for a copy that gave up hours
+    # ago - exactly the baffling failure this whole guard exists to prevent.
+    _notify_failure(settings, failure)
+    return 2
 
 
 def _settings_or_default(config_path: str | None,

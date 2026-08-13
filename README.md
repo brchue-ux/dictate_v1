@@ -285,7 +285,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 342 tests, run and passing
+### Verified anywhere — 343 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -374,7 +374,7 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
-* **The 342 tests above, on Windows** as well as on Linux — which is where the
+* **The 343 tests above, on Windows** as well as on Linux — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.
 

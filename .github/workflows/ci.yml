@@ -7,7 +7,7 @@
 # GPU. So this workflow exists to catch everything that can be caught without
 # one, on the same operating system the product actually runs on.
 #
-#   PROVED HERE  the Python package installs on Windows and its 342 tests pass;
+#   PROVED HERE  the Python package installs on Windows and its 343 tests pass;
 #                the installer's own logic works on Windows PowerShell 5.1,
 #                including a download that really is interrupted and resumed;
 #                whisper.cpp compiles from source with the Vulkan backend on
@@ -52,6 +52,12 @@ jobs:
   tests:
     name: Test suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The suite takes about two minutes. This is here so that a test which
+    # HANGS fails in ten rather than sitting for the default six hours: a
+    # blocking Win32 call with nobody to answer it is the way to do that on
+    # Windows, and it happened - a message box on a machine with no one to
+    # click it.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -67,7 +73,10 @@ jobs:
         run: python -m pip install -e .
 
       - name: Run the test suite
-        run: python -m unittest discover -s tests -t . -v
+        # -u so the log names the test that is running rather than holding it in
+        # a buffer. Without it a hang leaves no clue which test hung, because
+        # stdout to a pipe is block-buffered and the last line never arrives.
+        run: python -u -m unittest discover -s tests -t . -v
 
       - name: Command line, on a machine with nothing else installed
         shell: pwsh
@@ -109,6 +118,7 @@ jobs:
   autostart:
     name: Logon task (registers on real Windows; nothing here ever logs on)
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -217,6 +227,7 @@ jobs:
   installer-logic:
     name: Installer logic (Windows PowerShell 5.1)
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -331,6 +342,7 @@ jobs:
   windows-packages:
     name: Windows packages + live captions (CPU)
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

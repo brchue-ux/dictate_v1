@@ -311,6 +311,17 @@ class TheLogonStart(TempState):
 
         self.addCleanup(logging.getLogger().handlers.clear)
 
+        # And nothing here may reach the real message box. On Windows that is
+        # MessageBoxW, which blocks until somebody clicks it - on a CI machine,
+        # forever. This is class-wide rather than per-test on purpose: a test
+        # that fails to turn notification off in its config would otherwise hang
+        # the suite rather than fail it, which is how this was found.
+        from unittest import mock
+
+        patcher = mock.patch.object(autostart, "_notify_failure")
+        self.notified = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_it_stands_aside_for_a_copy_that_is_already_running(self):
         from dictate import instance
 
@@ -353,6 +364,9 @@ class TheLogonStart(TempState):
         self.assertNotIn("attempt 2 of", text)
         self.assertIn("num_threads = 2", text)  # the remedy, not just the fault
         self.assertIn("gave up", text)
+        # He is still told, even though the file that could have turned the
+        # message off is the very file that will not parse.
+        self.assertTrue(self.notified.called)
 
     def test_the_failure_is_still_there_afterwards(self):
         """The whole point: a logon failure must not vanish with a window that
@@ -383,6 +397,23 @@ class TheLogonStart(TempState):
         self.assertIn("nobody saw this coming", text)
         self.assertIn("Traceback", text)  # the technical detail, in the log
         self.assertIn("gave up", text)
+
+    def test_the_lock_is_already_back_before_he_is_told(self):
+        """The message box is modal: it waits for a click that may not come
+        until he sits down the next morning. If the single-instance lock were
+        still held behind it, `dictate run` would answer "dictate is already
+        running" for a copy that gave up hours ago - which is the exact
+        confusion the lock exists to prevent."""
+        from dictate import instance
+
+        held = []
+        self.notified.side_effect = lambda *_: held.append(
+            instance.running_instance() is not None)
+
+        path = self.write_config("[autostart]\nstartup_attempts = 1\n")
+        autostart.run_at_logon(str(path))
+
+        self.assertEqual(held, [False], "the lock was still held while notifying")
 
     def test_it_releases_the_lock_when_it_gives_up(self):
         from dictate import instance
