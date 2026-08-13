@@ -272,14 +272,20 @@ jobs:
     name: whisper.cpp Vulkan build (compiles here; no GPU to run it on)
     runs-on: windows-latest
     timeout-minutes: 90
-    env:
-      DICTATE_ROOT: ${{ runner.temp }}\dictate-gpu
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Where the build goes
+        shell: pwsh
+        run: |
+          # Outside the checkout, so the whisper.cpp source tree is not mistaken
+          # for part of this repository by anything that walks it.
+          "DICTATE_ROOT=$env:RUNNER_TEMP\dictate-gpu" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Cache the Vulkan SDK
         id: vulkan-cache
