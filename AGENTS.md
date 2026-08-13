@@ -68,7 +68,21 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   one of those two checks.
 - **CI has no GPU and never will.** Keep "it compiles and the tests pass" separate from
   "the GPU path runs" in the workflow, in the README, and in any PR description. A
-  green tick is not GPU verification.
+  green tick is not GPU verification. The same applies to the logon task: CI proves
+  Windows *accepts* it, never that it fires — a runner never logs on.
+- **Starting at logon must never become a Windows service.** Services run in session 0
+  with no interactive desktop, so the overlay cannot be shown and synthesised
+  keystrokes reach nothing — it would install and start and do nothing. It is a
+  per-user Task Scheduler logon task; `src/dictate/autostart.py` carries the reasoning
+  and the settings that are load-bearing.
+- **Only one copy may run**, or two hooks fight over the hotkey and two servers over
+  the port. `src/dictate/instance.py` holds an exclusive byte-range lock for the life
+  of the process, so the OS releases it on any kind of death and there is no such
+  thing as a stale lock. It is plain stdlib and works on Linux too, which is what lets
+  `tests/test_instance.py` contend for it with a real second process anywhere.
+- **`dictate stop` asks; it never kills.** dictate owns a whisper-server child holding
+  ~1.6 GB of VRAM and the port, and killing the parent orphans it. Anything that stops
+  the app has to go through the same clean shutdown Ctrl+C uses.
 
 ## Maintaining this file
 

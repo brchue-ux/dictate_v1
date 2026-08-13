@@ -126,7 +126,7 @@ influence on the structure, and it is deliberate rather than apologetic:
   component that cannot work says so and stops. `tests/test_cli.py` asserts that
   `src/` contains no test doubles at all.
 * **The pipeline, cleanup, config, process supervision and HTTP client are plain
-  Python** and are tested for real, here — 167 tests, on Linux and on Windows.
+  Python** and are tested for real, here — 231 tests, on Linux and on Windows.
 * **The fiddly bits of the platform code were factored out into pure functions**
   so they could be tested anyway: `platform/geometry.py` (overlay placement),
   `platform/injection_plan.py` (UTF-16 surrogate pairs, Return vs Unicode),
@@ -189,6 +189,13 @@ the audio callback; the utterance buffer feeding the GPU pass is never dropped.
   toolchain builds llama.cpp), but hallucination risk in a dictation tool is the
   wrong trade. Revisit only if rule-based output disappoints on real speech.
 * **No re-punctuation or re-casing.** Whisper does both, better.
+* **No Windows service**, even though "run it as a service" is the obvious
+  answer to "start it automatically". Services run in session 0, which has no
+  interactive desktop: the caption overlay cannot appear on screen from there
+  and synthesised keystrokes cannot reach a focused window. Both are constraints
+  2 and 3 above, so a service would install, start, and do nothing. Starting at
+  logon is a **per-user Task Scheduler logon task** running in his own session -
+  see `src/dictate/autostart.py`, which carries the rest of the reasoning.
 * **No installer, no Windows CI.** Separate follow-up task.
 * **No ROCm path.** Blocked on this card; kept only as the diagnostic in
   `scripts/check-rocm-gfx1030.py`.

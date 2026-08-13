@@ -21,9 +21,11 @@ import logging
 import signal
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import instance
 from .cleanup.service import CleanupService
 from .config import Config
 from .engines.sherpa_stream import SherpaStreamingTranscriber
@@ -42,6 +44,7 @@ class Application:
         self.console = console or (lambda msg: print(msg, file=sys.stderr, flush=True))
         self._stopping = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._started_at = time.time()
 
         self.overlay = factory.make_overlay(cfg)
         self.tracker = factory.make_window_tracker()
@@ -85,6 +88,12 @@ class Application:
     # -- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
+        # First, before anything slow: a request left by a copy that is no
+        # longer here was not meant for this one, and honouring it would make
+        # dictate exit the moment it started. Clearing it now rather than at the
+        # end of start() also means a `dictate stop` sent DURING startup is
+        # still seen, instead of being wiped by our own tidying up.
+        instance.clear_stop_request()
         self.console(f"dictate: cleanup rules  {self.cfg.cleanup.rules_file}"
                      if self.cfg.cleanup.enabled else "dictate: cleanup disabled")
         self.cleaner.load()
@@ -112,10 +121,12 @@ class Application:
         self.console(f"dictate: paste method   {self.injector.describe}")
 
         self._spawn(self._caption_loop, "dictate-captions")
+        self._spawn(self._stop_request_loop, "dictate-stop-watch")
         self.hotkey.register(self.pipeline.start_utterance, self.pipeline.finish_utterance)
         self.hotkey.start()
         self.console(f"dictate: hotkey         {self.hotkey.describe}")
-        self.console("dictate: ready. Hold the hotkey and speak. Ctrl+C here to quit.")
+        self.console("dictate: ready. Hold the hotkey and speak. Ctrl+C here to quit,")
+        self.console("dictate: or `dictate stop` from any other window.")
 
     def _warm_captions(self) -> None:
         """Load the Zipformer now, not on the first hotkey press."""
@@ -133,6 +144,25 @@ class Application:
                 self.pipeline.pump_captions(timeout=0.2)
             except Exception:
                 log.exception("caption pump failed; continuing")
+
+    def _stop_request_loop(self) -> None:
+        """Watch for `dictate stop`.
+
+        It has to be a request rather than a kill: this process owns a
+        whisper-server child holding ~1.6 GB of VRAM and the transcription port,
+        and killing the parent would orphan it - the next start would then fail
+        on a port that nothing appears to be using. So `dictate stop` leaves a
+        file, and this brings the app down exactly the way Ctrl+C does.
+        """
+        while not self._stopping.wait(0.5):
+            try:
+                if instance.stop_requested(since=self._started_at):
+                    self.console("\ndictate: stop requested; shutting down…")
+                    instance.clear_stop_request()
+                    self.overlay.close()  # ends run_forever, which triggers stop()
+                    return
+            except Exception:
+                log.exception("stop-request watch failed; continuing")
 
     def run(self) -> int:
         """Start everything, then run the overlay loop on the main thread."""

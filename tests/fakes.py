@@ -120,13 +120,16 @@ class FakeOverlay:
     def __init__(self) -> None:
         self.history: list[tuple[OverlayState, str]] = []
         self._lock = threading.Lock()
+        #: The real overlay's close() is what ends run_forever and so ends the
+        #: app. An Event rather than a flag so a test can wait for it.
+        self.closed = threading.Event()
 
     def set_state(self, state: OverlayState, text: str = "") -> None:
         with self._lock:
             self.history.append((state, text))
 
     def close(self) -> None:
-        pass
+        self.closed.set()
 
     @property
     def states(self) -> list[OverlayState]:

@@ -39,6 +39,19 @@ class TranscriptionError(DictateError):
     """A single transcription request failed. Recoverable - the app keeps running."""
 
 
+class AlreadyRunningError(DictateError):
+    """A second copy of dictate was asked to start while one is already running.
+
+    Two copies would fight over the global hotkey and over whisper-server's port,
+    and the resulting failure is baffling rather than legible. `holder` describes
+    the copy that got there first, so the message can name it.
+    """
+
+    def __init__(self, message: str, remedy: str = "", holder=None) -> None:
+        super().__init__(message, remedy)
+        self.holder = holder
+
+
 class PlatformUnsupportedError(DictateError):
     """A platform-specific component was asked for on a platform that has no
     implementation. Raised loudly and early - never silently substituted."""

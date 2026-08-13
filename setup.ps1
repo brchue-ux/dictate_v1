@@ -1094,6 +1094,14 @@ Write-Host ''
 Write-Host 'Then hold Ctrl + Alt + Space, speak, and let go. Ctrl+C in that window'
 Write-Host 'stops it.'
 Write-Host ''
+Write-Host 'Once you are happy with it, you can have it start by itself when you'
+Write-Host 'log in, so you never type that again:'
+Write-Host '  dictate autostart enable' -ForegroundColor White
+Write-Host 'It then holds about 1.6 GB of graphics memory for as long as you are'
+Write-Host 'logged in, which is what makes your first sentence as fast as the rest.'
+Write-Host '  dictate autostart status   is it on, is it running, and did it start'
+Write-Host '  dictate autostart disable  turn it off again, leaving nothing behind'
+Write-Host ''
 Write-Host "Config:  $(Join-Path $env:APPDATA 'dictate\dictate.toml')"
 Write-Host "Log:     $(Join-Path $Root 'dictate.log')"
 Write-Host '-----------------------------------------------------------------------' -ForegroundColor Green
