@@ -78,8 +78,15 @@ class CaptionOverlay(Protocol):
     equivalent) and must never call a focus or activate API.
     """
 
-    def set_state(self, state: OverlayState, text: str = "") -> None:
-        """Update what is on screen. Safe to call from any thread."""
+    def set_state(self, state: OverlayState, text: str = "",
+                  target: TargetWindow | None = None) -> None:
+        """Update what is on screen. Safe to call from any thread.
+
+        `target` is the window captured at hotkey press, passed so the overlay
+        can appear on the display that window is on - which is the display the
+        user is working on, and where the text is about to be pasted. It is
+        advisory: an implementation that only has one screen ignores it.
+        """
 
     def close(self) -> None: ...
 

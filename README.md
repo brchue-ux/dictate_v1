@@ -148,6 +148,41 @@ Try a rule without dictating:
 dictate clean --explain "Um, so I was, you know, thinking about it."
 ```
 
+### The caption window
+
+The words that appear while you are speaking come up in a panel at the bottom of
+the screen. To look at it without dictating — it shows sample text and runs the
+whole appear, fill, clear and fade cycle:
+
+```powershell
+dictate overlay
+```
+
+Change something in the `[overlay]` block of your config, run that again, and you
+see the result in about two seconds instead of a record-speak-release round trip.
+`dictate overlay --error` shows the failure state, `--repeat 3` loops it, and
+`--rate 150` runs the words in faster than real dictation does.
+
+Three things about it are worth knowing:
+
+* **It appears on the screen you are working on.** Not always the primary one —
+  it uses the monitor holding the window you were in when you pressed the
+  hotkey, which is the window your text is about to be pasted into. If that
+  cannot be worked out it falls back to the monitor your mouse is on, then the
+  primary. `follow_focus = false` restores the old always-primary behaviour.
+* **It is sized for the monitor it lands on.** Every pixel measurement in
+  `[overlay]` is at 100% scaling and is multiplied by that display's own
+  scaling, so a second screen at 150% gets captions the same physical size
+  rather than two thirds the size. If that misbehaves, `dpi_awareness = "off"`
+  hands the scaling back to Windows.
+* **It is set in Fira Code**, which is already installed on this PC. If it ever
+  is not, dictate uses Consolas and **says so when it starts** — it will not
+  quietly draw a different font and leave you wondering.
+
+It never takes focus and clicks pass straight through it, which is what stops
+your text being pasted into the wrong window. That has not changed and is not
+allowed to.
+
 ### Your clipboard is not touched
 
 The default paste method synthesises the characters as keystrokes and never uses
@@ -167,7 +202,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 167 tests, run and passing
+### Verified anywhere — 234 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -188,9 +223,18 @@ python -m unittest discover -s tests -t .
   upload, response parsing, HTTP errors, nothing-listening.
 * The cleanup pass, including the "can only delete" guarantee — and that every
   shipped rule preserves it on realistic dictation.
-* Config and rules validation, WAV encoding, the utterance buffer, overlay
-  placement arithmetic, UTF-16 surrogate handling for text injection, hotkey
-  parsing, and the doctor's reporting.
+* Config and rules validation, WAV encoding, the utterance buffer, UTF-16
+  surrogate handling for text injection, hotkey parsing, and the doctor's
+  reporting.
+* **Everything about the caption overlay that is not the window itself**: the
+  fade curve and its mid-flight reversal, the font fallback decision, and the
+  per-monitor layout arithmetic — including that a second monitor at 150%
+  scaling gets a *bigger* caption rather than a smaller one, that the panel
+  lands inside that monitor's work area and not the primary one's, and that it
+  still fits on a 1366×768 laptop. Plus the look's own rules, checked against
+  the source: no geometry call in the caption path, no call anywhere in the
+  file that could activate the window, and comfortable rather than maximum
+  text contrast.
 * That the package ships no test doubles.
 
 ### Verified on real Windows — by CI, on every change
@@ -222,7 +266,7 @@ Windows machines. These are things that used to be on the "never run" list:
 * **That a genuinely absent Vulkan SDK is reported as absent** — CI asserts the
   installer never claims it installed, never asks for a restart, and always
   prints a download address.
-* **The 167 tests above, on Windows** as well as on Linux.
+* **The 234 tests above, on Windows** as well as on Linux.
 
 ### Still not verified — needs this actual PC
 
@@ -244,10 +288,28 @@ misbehaves.
   and the direct download from LunarG that steps in when winget cannot install
   the Vulkan SDK (including the Authenticode check on what arrives), have run
   nowhere.
-* **The caption overlay.** The non-activating, click-through, always-on-top
-  window is built from the documented Win32 extended styles, but no one has
-  watched it fail to steal focus. This is the highest-risk unverified piece,
-  because if it does steal focus the paste lands in the wrong window.
+* **The caption overlay, as a window.** The non-activating, click-through,
+  always-on-top window is built from the documented Win32 extended styles, but
+  no one has watched it fail to steal focus. This is the highest-risk unverified
+  piece, because if it does steal focus the paste lands in the wrong window.
+* **What the overlay looks like.** Nobody here has run it. The colours, the type
+  and the layout arithmetic were checked by rendering the panel at exactly the
+  sizes the code uses, with the real Fira Code file, against a white document, a
+  dark editor and a photo wallpaper — but that is a picture of the design, drawn
+  by a different renderer, not a screenshot of the Tk window. `dictate overlay`
+  is how it gets looked at for real, and it takes about ten seconds.
+* **How Fira Code's ligatures render here.** Fira Code puts all of them in the
+  OpenType `calt` feature — it has no `liga` table at all (checked against the
+  6.2 release). Tk draws text through GDI on Windows, which is not expected to
+  apply `calt`, so the ligatures most likely do not appear at all, which for
+  prose captions is the outcome we want. That expectation has not been tested on
+  a real screen. If something does look odd in a sentence, the fix is one line:
+  set `font_family` to `"Fira Mono"` or anything else.
+* **Per-monitor DPI and multi-monitor placement.** The rule and the arithmetic
+  are tested here; the Win32 calls behind them (`SetProcessDpiAwarenessContext`,
+  `MonitorFromWindow`, `GetDpiForMonitor`) have run nowhere. A mixed-DPI desktop
+  is the case to watch. `dpi_awareness = "off"` and `follow_focus = false` are
+  both one-line retreats if either misbehaves.
 * **The global hotkey**, including whether press/release feels right in practice.
 * **Microphone capture** through PortAudio.
 * **Text injection** into real applications — terminals in particular vary.

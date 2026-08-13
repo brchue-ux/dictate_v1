@@ -5,6 +5,7 @@
     dictate init          write a config file you can edit
     dictate devices       list the microphones dictate can see
     dictate clean         run the cleanup rules over text on stdin
+    dictate overlay       show the caption overlay with sample text
     dictate transcribe    push a .wav through the resident GPU pass and time it
 
 `doctor`, `init` and `clean` all work on any platform, on purpose: they are the
@@ -16,10 +17,14 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 
-from . import __version__, app as app_mod, config as config_mod, doctor as doctor_mod
+from . import (
+    __version__, app as app_mod, config as config_mod, doctor as doctor_mod,
+    pipeline as pipeline_mod,
+)
 from .errors import DictateError
 
 def _template_dir() -> Path | None:
@@ -151,6 +156,89 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+#: What the preview shows. Ordinary dictated speech, in the shape the caption
+#: model actually produces it - upper case, no punctuation - because that is what
+#: has to look right, not a designer's sample sentence.
+_PREVIEW_WORDS = (
+    "SO THE THING I WANTED TO SAY IS THAT THE OVERLAY SHOULD BE CALM ENOUGH TO "
+    "READ WITHOUT LOOKING STRAIGHT AT IT WHILE I AM STILL TALKING"
+).split()
+
+
+def cmd_overlay(args: argparse.Namespace) -> int:
+    """Show the caption overlay with sample text, without dictating.
+
+    The whole appear-type-release-fade cycle, on demand, so the overlay can be
+    looked at and argued with in seconds instead of a record-speak-release round
+    trip - and so that changing a colour in the config is a two-second question.
+
+    It drives the real overlay through the real interface. It is not a mock: the
+    only thing standing in for the pipeline is a timer that feeds it words.
+    """
+    from .platform import factory
+    from .platform.base import OverlayState
+
+    cfg = _load_config(args)
+    overlay = factory.make_overlay(cfg, notify=lambda level, msg: _err(f"   {msg}"))
+
+    _out("Showing the caption overlay. It appears, fills with words, clears on")
+    _out("'release', shows 'pasted', then fades out. Ctrl+C to stop early.")
+    _out("")
+    _out(f"  font       {cfg.overlay.font_family} {cfg.overlay.font_size}pt")
+    _out(f"  position   {cfg.overlay.position}, {cfg.overlay.margin_px}px margin, "
+         f"{cfg.overlay.max_width_px}px wide")
+    _out(f"  fade       {'off' if not cfg.overlay.fade else f'{cfg.overlay.fade_in_ms}ms in, {cfg.overlay.fade_out_ms}ms out'}")
+    _out(f"  monitor    {'follows the focused window' if cfg.overlay.follow_focus else 'primary only'}")
+    _out("")
+    if args.error:
+        _out("Showing the error state, then stopping.")
+
+    def script() -> None:
+        # Runs on a worker thread, exactly as the pipeline's threads do, so this
+        # exercises the real cross-thread queueing rather than a shortcut.
+        overlay.wait_ready()
+        target = None
+        try:
+            target = factory.make_window_tracker().foreground()
+        except Exception:
+            pass  # the preview still works without knowing the focused window
+        for _ in range(max(1, args.repeat)):
+            if args.error:
+                overlay.set_state(OverlayState.ERROR,
+                                  "whisper-server stopped responding", target)
+                time.sleep(3.0)
+                break
+            overlay.set_state(OverlayState.LISTENING, "", target)
+            shown = ""
+            for word in _PREVIEW_WORDS:
+                shown = f"{shown} {word}".strip()
+                # The same trimming the real caption path does, so the preview
+                # shows the same tail behaviour rather than a tidier one.
+                overlay.set_state(OverlayState.LISTENING,
+                                  pipeline_mod.caption_tail(shown, cfg.overlay.max_chars))
+                time.sleep(args.rate / 1000.0)
+            time.sleep(0.4)
+            overlay.set_state(OverlayState.THINKING, "")
+            time.sleep(1.1)
+            overlay.set_state(OverlayState.DONE, "")
+            time.sleep(2.0)
+        overlay.set_state(OverlayState.HIDDEN, "")
+        time.sleep(1.0)
+        overlay.close()
+
+    thread = threading.Thread(target=script, name="dictate-overlay-preview",
+                              daemon=True)
+    thread.start()
+    try:
+        overlay.run_forever()
+    except KeyboardInterrupt:
+        overlay.close()
+    _out("")
+    _out(f"That was: {overlay.describe}")
+    _out("Everything above is in the [overlay] block of your config.")
+    return 0
+
+
 def cmd_transcribe(args: argparse.Namespace) -> int:
     """Time the resident GPU pass on a WAV file. This is the command to run on
     the Windows machine to turn the estimated 0.4-1.0 s into a real number."""
@@ -216,6 +304,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--rules", help="a rules file to use instead of the configured one")
     p_clean.add_argument("--explain", action="store_true", help="say which rules fired")
     p_clean.set_defaults(func=cmd_clean)
+
+    p_ov = sub.add_parser("overlay",
+                          help="show the caption overlay with sample text, "
+                               "without dictating")
+    p_ov.add_argument("--repeat", type=int, default=1,
+                      help="run the appear-and-fade cycle this many times")
+    p_ov.add_argument("--rate", type=int, default=320,
+                      help="milliseconds between words (default: 320, the real "
+                           "caption update interval)")
+    p_ov.add_argument("--error", action="store_true",
+                      help="show the error state instead")
+    p_ov.set_defaults(func=cmd_overlay)
 
     p_tr = sub.add_parser("transcribe", help="time the GPU pass on a .wav file")
     p_tr.add_argument("wav")

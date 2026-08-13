@@ -43,6 +43,28 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `[[deletions]]` blocks, or they silently become fields of the last one.
 - **Caption threads are capped at 4 in `config.validate()`** because more threads were
   measured to be slower. This is a settled decision, not a limitation to lift.
+- **Never remove or rename a key from a config dataclass.** An *unknown* key is a
+  hard error by design, so a key that disappears from `[overlay]` makes the product
+  owner's existing `dictate.toml` — written by `dictate init` from the example —
+  fail to load on startup. Add keys; deprecate by ignoring, never by deleting.
+  `tests/test_overlay.py` asserts every key in the shipped example still exists.
+- **The overlay lays itself out once per appearance, never per caption.** Text and
+  colour are all `_apply` may touch; `geometry()`, `SetWindowPos` and
+  `update_idletasks` belong in `_show()`. A window that re-measures every 320 ms is
+  visibly restless in peripheral vision, and re-measuring is also the slower option.
+  `tests/test_overlay.py::TheLooksOwnRules` greps for this, against source with the
+  comments stripped — that file discusses the calls it must not make, at length.
+- **Everything in `[overlay]` is a pixel value at 100% display scaling**, multiplied
+  by the chosen monitor's DPI in `geometry.plan_slab`. Fonts are sized in pixels
+  (Tk's negative-size form), not points, so scaling is decided here rather than
+  inferred by Tk from the primary display.
+- **Tk substitutes a missing font family silently.** `platform/fonts.py` compares
+  what was asked for against `Font.actual("family")` and reports the substitution on
+  startup. Anything that picks a font must go through it; "it looked wrong and
+  nothing said why" is the failure it exists to prevent.
+- **`dictate overlay`** shows the caption panel with sample text and no dictation.
+  It is the only way anyone without Windows can get the look in front of the product
+  owner, so keep it working when you change the overlay.
 - **The Vulkan SDK's winget id is `KhronosGroup.VulkanSDK`**, not
   `LunarG.VulkanSDK` — winget files it under that publisher and only *displays*
   "LunarG Inc.". The wrong id returns "No package found matching input criteria"

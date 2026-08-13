@@ -52,11 +52,14 @@ def make_injector(cfg: Config, tracker):
     )
 
 
-def make_overlay(cfg: Config):
+def make_overlay(cfg: Config, *, notify=None):
     _require_windows("caption overlay")
     from .windows.overlay import TkCaptionOverlay  # noqa: PLC0415
 
-    return TkCaptionOverlay(cfg.overlay)
+    # `notify` is how the overlay says out loud that the caption font it was
+    # asked for is not installed. Tk substitutes silently, so without this the
+    # only symptom is that the captions look wrong for no stated reason.
+    return TkCaptionOverlay(cfg.overlay, notify=notify)
 
 
 def make_audio_capture(cfg: Config):

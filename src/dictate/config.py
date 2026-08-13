@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .errors import ConfigError
+from .platform.fade import MIN_FADE_MS
 
 # The live-caption Zipformer measurably gets *worse* above 2 threads
 # (dictate-feasibility report S3c: 6 threads was 3x worse than 2).
@@ -67,20 +69,61 @@ class CaptionConfig:
 
 @dataclass
 class OverlayConfig:
+    """The caption window.
+
+    Every pixel measurement here is at 100% display scaling. On a monitor set to
+    150% they are all multiplied by 1.5, so the overlay is the same physical size
+    on every display rather than two thirds the size on the scaled one.
+    """
+
     #: bottom-center | top-center | bottom-left | bottom-right | top-left | top-right
     position: str = "bottom-center"
-    margin_px: int = 90
-    max_width_px: int = 1100
-    font_family: str = "Segoe UI"
-    font_size: int = 20
-    opacity: float = 0.88
-    background: str = "#12121a"
-    foreground: str = "#eaeaf2"
-    accent: str = "#7aa2f7"
+    margin_px: int = 64
+    max_width_px: int = 1080
+    font_family: str = "Fira Code"
+    font_size: int = 18
+    #: 1.0 on purpose. A partly transparent panel goes muddy over a white
+    #: document, which is where this is looked at most.
+    opacity: float = 1.0
+    #: The lit face of the slab - the surface the words sit on.
+    background: str = "#262a31"
+    #: Caption text. Deliberately not white: comfortable, not maximum, contrast.
+    foreground: str = "#c7ccd6"
+    #: The state bar and word while recording. The one saturated thing on screen.
+    accent: str = "#c8a45c"
+    #: The unlit shoulder around the face, and the plinth it sits on.
+    edge: str = "#0a0b0e"
+    #: The state colour once recording has stopped - transcribing, and pasted.
+    muted: str = "#7e8794"
+    #: The state colour when something went wrong.
+    error: str = "#c9705c"
+    #: Thickness of that shoulder, and of the state bar. The plinth is twice it.
+    edge_px: int = 8
+    #: Space between the face's edge and anything drawn on it.
+    padding_px: int = 26
+    #: Caption lines the slab reserves. The window is this tall whether or not
+    #: there is anything on the second line, so it never grows mid-sentence.
+    lines: int = 2
     #: Longest caption tail kept on screen. Older words scroll off the left.
-    max_chars: int = 220
+    max_chars: int = 110
     #: Let mouse clicks fall through to the window underneath.
     click_through: bool = True
+    #: Ease the window's opacity in and out instead of appearing at full alpha.
+    #: false restores the old behaviour, which snapped.
+    fade: bool = True
+    fade_in_ms: int = 260
+    #: Longer than the fade in, deliberately. It runs after the text has already
+    #: been pasted, so it costs nothing and reads as an object leaving rather
+    #: than a box being switched off.
+    fade_out_ms: int = 420
+    fade_step_ms: int = 16
+    #: Put the captions on the monitor holding the window captured at hotkey
+    #: press, then the mouse pointer's monitor, then the primary one. false
+    #: restores the old behaviour, which always used the primary display.
+    follow_focus: bool = True
+    #: per-monitor | system | off. Governs how the overlay is sized on displays
+    #: with different scaling. "off" hands the scaling back to Windows.
+    dpi_awareness: str = "per-monitor"
 
 
 @dataclass
@@ -259,6 +302,13 @@ _POSITIONS = {
     "top-right",
 }
 
+_DPI_MODES = {"per-monitor", "system", "off"}
+
+#: Tk accepts named colours too, but a typo in a name is a Tk error thrown deep
+#: inside the overlay on the UI thread, where it becomes "captions stopped
+#: working". Hex is checked here instead, where the message can say what to fix.
+_COLOUR = re.compile(r"#[0-9a-fA-F]{6}")
+
 
 def validate(cfg: Config) -> Config:
     """Reject settings that are impossible or that break a settled design decision."""
@@ -313,13 +363,57 @@ def validate(cfg: Config) -> Config:
     if not 0.05 <= cfg.overlay.opacity <= 1.0:
         raise ConfigError(
             f"[overlay] opacity is {cfg.overlay.opacity}, which is outside 0.05-1.0.",
-            "0.88 is the default.",
+            "1.0 is the default - a solid panel stays readable over a white page.",
         )
     if cfg.overlay.max_chars < 20:
         raise ConfigError(
             "[overlay] max_chars must be at least 20.",
-            "220 is the default.",
+            "110 is the default.",
         )
+    for key in ("margin_px", "max_width_px", "edge_px", "padding_px", "font_size"):
+        value = getattr(cfg.overlay, key)
+        if value < 1:
+            raise ConfigError(
+                f"[overlay] {key} is {value}, and it has to be at least 1 pixel.",
+                "Delete the line to get the default back.",
+            )
+    if not 1 <= cfg.overlay.lines <= 6:
+        raise ConfigError(
+            f"[overlay] lines is {cfg.overlay.lines}, which is outside 1-6.",
+            "2 is the default. The slab reserves this many caption lines and "
+            "never grows past them, so more lines means a taller window all the "
+            "time, not only when you talk for longer.",
+        )
+    for key in ("fade_in_ms", "fade_out_ms"):
+        value = getattr(cfg.overlay, key)
+        if cfg.overlay.fade and value < MIN_FADE_MS:
+            raise ConfigError(
+                f"[overlay] {key} is {value} ms, which is short enough to read "
+                f"as a flicker rather than a fade.",
+                f"Use at least {MIN_FADE_MS}, or set fade = false to turn the "
+                f"fade off altogether.",
+            )
+    if not 1 <= cfg.overlay.fade_step_ms <= 200:
+        raise ConfigError(
+            f"[overlay] fade_step_ms is {cfg.overlay.fade_step_ms}, which is "
+            f"outside 1-200.",
+            "16 is the default - about one step per frame at 60 Hz.",
+        )
+    if cfg.overlay.dpi_awareness not in _DPI_MODES:
+        raise ConfigError(
+            f"[overlay] dpi_awareness is {cfg.overlay.dpi_awareness!r}, which is "
+            f"not one of {', '.join(sorted(_DPI_MODES))}.",
+            'Use "per-monitor" unless captions misbehave on a second screen, in '
+            'which case "off" hands the scaling back to Windows.',
+        )
+    for key in ("background", "foreground", "accent", "edge", "muted", "error"):
+        value = getattr(cfg.overlay, key)
+        if not _COLOUR.fullmatch(value):
+            raise ConfigError(
+                f"[overlay] {key} is {value!r}, which is not a colour dictate "
+                f"can use.",
+                'Write colours as "#rrggbb", for example "#262a31".',
+            )
     if not 1 <= cfg.whisper.port <= 65535:
         raise ConfigError(
             f"[whisper] port {cfg.whisper.port} is not a valid TCP port.",
