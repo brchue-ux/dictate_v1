@@ -297,6 +297,58 @@ Try a rule without dictating:
 dictate clean --explain "Um, so I was, you know, thinking about it."
 ```
 
+### Spoken punctuation
+
+Say "hello comma world" and get `hello, world`. **Off until you turn it on:**
+
+```toml
+[punctuation]
+enabled = true
+```
+
+`voice-punctuation.toml`, next to the config, is the list of what you can say —
+period / full stop, comma, question mark, exclamation mark / point, colon,
+semicolon, dash, open and close quote, open and close bracket, new line, new
+paragraph. It is yours to edit like the cleanup rules are, and adding "new
+section" is one block of four lines.
+
+It is off by default for one reason: every phrase in that file is a phrase you
+can then no longer dictate literally, and a new version of dictate is not
+allowed to start eating the word "period" out of sentences you are dictating
+today. With `enabled = false` the pasted text is byte for byte what it was
+before this existed.
+
+**When is "comma" a mark and when is it the word?** The rule is one line: it is
+the WORD when the word in front of it is a determiner or possessive — "the
+comma goes here", "set the period to five minutes", "put it on a new line" —
+and the MARK everywhere else. Plurals are never touched at all. It is a blunt
+rule and it is sometimes wrong; when it is, say **"literal"** in front of the
+phrase:
+
+```
+"I am not going literal full stop"   ->   I am not going full stop
+```
+
+**This stage substitutes, so it is not part of the cleanup pass** and the
+deletion-only guarantee above is untouched. It carries a narrower one of its
+own: a rule may only insert punctuation and whitespace — dictate refuses to load
+the file if a rule would insert a letter or a digit — and afterwards the same
+subsequence check runs again. So this cannot put a word you did not say into
+your document either. Every substitution it makes goes into the log with the
+words that produced it, so a mark in the wrong place can be traced instead of
+being a mystery.
+
+One warning about `new line` and `new paragraph`: a line break is delivered as a
+Return keypress, because that is the only thing that puts a new line into
+another application. **In a chat box or a terminal, Return submits.** Delete
+those two blocks from the file if that is where you dictate.
+
+Try it without dictating:
+
+```powershell
+dictate punctuate --explain "hello comma world"
+```
+
 ### The caption window
 
 The words that appear while you are speaking come up in a panel at the bottom of
@@ -381,7 +433,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 488 tests, run and passing
+### Verified anywhere — 572 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -412,6 +464,15 @@ python -m unittest discover -s tests -t .
   upload, response parsing, HTTP errors, nothing-listening.
 * The cleanup pass, including the "can only delete" guarantee — and that every
   shipped rule preserves it on realistic dictation.
+* **Spoken punctuation**, against transcripts that really came out of Whisper
+  large-v3-turbo rather than invented examples: every mark it can produce, the
+  spacing and capitalisation around each one, that ordinary speech comes back
+  byte-identical, that the phrases which are also real words survive, the
+  escape, the "off gives you exactly today's behaviour" path, and the cases the
+  mark/word rule gets **wrong**, asserted on purpose so that fixing one is a
+  visible change. Also that the cleanup pass's own guarantee is exactly where it
+  was: same schema, same subsequence check, and still handed Whisper's text
+  byte for byte.
 * Config and rules validation, WAV encoding, the utterance buffer, UTF-16
   surrogate handling for text injection, hotkey parsing, and the doctor's
   reporting.
@@ -492,7 +553,7 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
-* **The 488 tests above, on Windows** as well as on Linux — which is where the
+* **The 572 tests above, on Windows** as well as on Linux — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.
 * **That a supervised child process cannot outlive its parent.** CI starts a
@@ -534,6 +595,14 @@ misbehaves.
   CI is the mechanism underneath that case, a parent dying with no chance to
   clean up; nobody has typed those two keys at a real `dictate run` with a real
   whisper-server holding a real 1.6 GB of VRAM.
+* **Spoken punctuation in your own voice.** The transcripts it is designed
+  against are real Whisper large-v3-turbo output, but the speaker was a
+  synthetic voice, not you, on a processor rather than your card. That matters
+  here more than it usually would: how Whisper punctuates a spoken mark depends
+  on the pause you leave around it, and the same sentence read fluidly and read
+  with pauses came back written two different ways — both handled, but nobody
+  knows which of the two your dictation looks like. `dictate punctuate` over a
+  handful of your own transcripts is the check, and it needs no microphone.
 * **The icon by the clock.** Whether it appears, what it looks like at the size
   Windows draws it, whether the menu opens and closes properly, and whether
   Stop and Restart do what they say. A hosted runner has no notification area

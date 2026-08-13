@@ -49,7 +49,24 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   holds the line, list included; a phrase belongs in `filler_phrases` only if no
   sentence exists where it is meant literally.
 - **`config/cleanup-rules.toml` is TOML**: plain settings must come *before* the
-  `[[deletions]]` blocks, or they silently become fields of the last one.
+  `[[deletions]]` blocks, or they silently become fields of the last one. Same
+  trap, same rule, in `config/voice-punctuation.toml`.
+- **Spoken punctuation is a stage of its own and must stay one.** It substitutes,
+  which the cleanup pass is built to make impossible, so it lives in
+  `src/dictate/punctuation/` and runs *after* cleanup — never inside it, never
+  before it. Its own guarantee is that `insert` may hold no letter or digit,
+  re-checked on the output with cleanup's own `words_are_subsequence` (imported,
+  never copied). Order is load-bearing: cleanup's filler rules eat a trailing
+  comma, so punctuating first would delete the comma he just asked for.
+  `docs/DESIGN.md` carries the reasoning; `tests/test_punctuation.py` holds it,
+  including transcripts MEASURED from large-v3-turbo and a
+  `WhereTheRuleIsWrong` class that asserts the failures on purpose.
+- **Whisper writes a dictated mark twice: as punctuation AND as the word.**
+  MEASURED: "hello comma world" → `Hello, comma, world.`; "are you sure question
+  mark" → `Are you sure? Question mark.`; and it writes `open, quote,` and
+  `semi-colon`. That is why marks are matched word by word rather than as
+  strings, and why a substitution absorbs the punctuation touching it. Do not
+  "simplify" either back into a plain string replace.
 - **Caption threads are capped at 4 in `config.validate()`** because more threads were
   measured to be slower. This is a settled decision, not a limitation to lift.
 - **Never remove or rename a key from a config dataclass.** An *unknown* key is a

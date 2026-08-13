@@ -187,6 +187,24 @@ enabled = true
 rules_file = "cleanup-rules.toml"    # <<< CHECK THIS (it should sit next to this file)
 
 
+[punctuation]
+# SPOKEN PUNCTUATION. Say "hello comma world" and get "hello, world".
+#
+# Off by default, and you have to turn it on yourself. Every phrase in
+# voice-punctuation.toml is a phrase you can then no longer dictate literally -
+# "period", "comma", "new line" - so installing a newer dictate is not allowed
+# to start doing this to sentences you are already dictating today.
+#
+# With enabled = false, the text that gets pasted is exactly what it was before
+# this feature existed. Nothing else changes.
+#
+# Try it before you turn it on, with no microphone involved:
+#   dictate punctuate --explain "hello comma world"
+enabled = false
+# Relative paths are relative to this config file.
+rules_file = "voice-punctuation.toml"    # <<< CHECK THIS (next to this file)
+
+
 [paste]
 # "sendinput"  types the text directly. Your clipboard is never touched.
 # "clipboard"  copies, sends Ctrl+V, then puts your old clipboard back.
