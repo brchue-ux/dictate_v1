@@ -87,6 +87,18 @@ $WhisperModel = $Models.Whisper
 $CaptionModel = $Models.Captions
 
 $WhisperRepo = 'https://github.com/ggml-org/whisper.cpp'
+
+# The Vulkan SDK's winget package identifier. It is KhronosGroup.VulkanSDK, not
+# LunarG.VulkanSDK: winget's community repository files it under the publisher
+# KhronosGroup (microsoft/winget-pkgs, manifests/k/KhronosGroup/VulkanSDK -
+# there is no manifests/l/LunarG at all), while winget DISPLAYS the publisher as
+# "LunarG Inc.". Setup asked for the display name for months; winget answered
+# "No package found matching input criteria" every time, and the toolchain step
+# then blamed the missing SDK on Windows not having announced it yet.
+# Checked against microsoft/winget-pkgs on 13 August 2026, newest manifest
+# there 1.4.357.0. If it ever moves again, the direct download from LunarG below
+# is what keeps setup working while this line is corrected.
+$VulkanWingetId = 'KhronosGroup.VulkanSDK'
 $MinFreeGbHard = 15
 $MinFreeGbComfortable = 25
 $TestClip = Join-Path $RepoRoot 'assets\jfk.wav'
@@ -292,6 +304,56 @@ function Invoke-RocmDiagnostic {
 # 2. Toolchain
 # ===========================================================================
 
+function New-WantedPackage {
+    <# One tool winget is about to be asked for, with the test that decides
+       whether it is really there afterwards.
+
+       That Check is the point of this: winget's exit code cannot be the
+       authority on success, because it reports "already installed" and "restart
+       required" as failures. So every package carries its own way of answering
+       "is this tool now usable?", and every key exists from the start so that
+       nothing here can read a field that was never set. #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][scriptblock]$Check,
+        [string]$Override = '',
+        [switch]$Slow
+    )
+    return @{
+        Id       = $Id
+        Name     = $Name
+        Check    = $Check
+        Override = $Override
+        Slow     = [bool]$Slow
+        Failed   = $false
+        ExitCode = 0
+        Said     = ''
+    }
+}
+
+function Confirm-VulkanSdk {
+    <# An SDK has been found. Point this window at it and say which of the two
+       "it is here" states we are in - because "already set up" and "here, but
+       Windows had not told this window" are different things, and the second
+       one used to be reported as a failure that needed a reboot. #>
+    param([Parameter(Mandatory = $true)]$Found)
+    Set-VulkanSdkForSession -Path $Found.Path
+    if ($Found.Source -eq 'session') {
+        Write-Skip "The Vulkan SDK is already installed ($($Found.Path))"
+    } else {
+        Write-Ok "The Vulkan SDK is installed at $($Found.Path)"
+        Write-Detail 'Windows had not told this window about it, so setup has pointed this run'
+        Write-Detail "at it directly - found via $($Found.How). Nothing needs restarting."
+    }
+    if (-not (Test-VulkanShaderCompiler -Path $Found.Path)) {
+        Write-Note "That SDK has no Bin\glslc.exe in it, and the build needs it to compile the graphics shaders."
+        Write-Detail 'If step 3 later says it cannot find glslc, run the Vulkan SDK installer'
+        Write-Detail 'again from https://vulkan.lunarg.com/sdk/home#windows and leave every'
+        Write-Detail 'component ticked.'
+    }
+}
+
 function Invoke-Toolchain {
     $wanted = New-Object System.Collections.Generic.List[hashtable]
 
@@ -300,43 +362,57 @@ function Invoke-Toolchain {
         Write-Skip "Python $($python.Version) is already installed"
         $script:Python = $python
     } else {
-        $wanted.Add(@{ Id = 'Python.Python.3.12'; Name = 'Python 3.12' })
+        $wanted.Add((New-WantedPackage -Id 'Python.Python.3.12' -Name 'Python 3.12' -Check {
+                    $script:Python = Get-PythonCommand -MinimumVersion '3.11'
+                    return [bool]$script:Python
+                }))
     }
 
     $git = Get-ToolVersion -Command 'git'
     if ($git) {
         Write-Skip "Git $git is already installed"
     } else {
-        $wanted.Add(@{ Id = 'Git.Git'; Name = 'Git' })
+        $wanted.Add((New-WantedPackage -Id 'Git.Git' -Name 'Git' -Check {
+                    return [bool](Get-ToolVersion -Command 'git')
+                }))
     }
 
+    $cmakeCheck = {
+        $found = Get-ToolVersion -Command 'cmake'
+        return ($found -and $found -ge ([version]'3.20'))
+    }
     $cmake = Get-ToolVersion -Command 'cmake'
     if ($cmake -and $cmake -ge ([version]'3.20')) {
         Write-Skip "CMake $cmake is already installed"
-    } elseif ($cmake) {
-        Write-Detail "CMake $cmake is too old (3.20 or newer is needed); installing a current one."
-        $wanted.Add(@{ Id = 'Kitware.CMake'; Name = 'CMake' })
     } else {
-        $wanted.Add(@{ Id = 'Kitware.CMake'; Name = 'CMake' })
+        if ($cmake) {
+            Write-Detail "CMake $cmake is too old (3.20 or newer is needed); installing a current one."
+        }
+        $wanted.Add((New-WantedPackage -Id 'Kitware.CMake' -Name 'CMake' -Check $cmakeCheck))
     }
 
+    # The Vulkan SDK is looked for, not deduced from a variable. See the block
+    # comment above Test-VulkanSdkDir in scripts/setup-lib.ps1 for why.
     Update-SessionEnvironment
-    if ($env:VULKAN_SDK -and (Test-Path -LiteralPath $env:VULKAN_SDK)) {
-        Write-Skip "The Vulkan SDK is already installed ($env:VULKAN_SDK)"
+    $vulkan = Resolve-VulkanSdk
+    if ($vulkan) {
+        Confirm-VulkanSdk $vulkan
     } else {
-        $wanted.Add(@{ Id = 'LunarG.VulkanSDK'; Name = 'Vulkan SDK' })
+        $wanted.Add((New-WantedPackage -Id $VulkanWingetId -Name 'Vulkan SDK' -Check {
+                    return [bool](Resolve-VulkanSdk)
+                }))
     }
 
     $vs = Get-VisualStudioCppPath
     if ($vs) {
         Write-Skip "The C++ build tools are already installed ($vs)"
     } else {
-        $wanted.Add(@{
-                Id       = 'Microsoft.VisualStudio.2022.BuildTools'
-                Name     = 'Visual Studio 2022 Build Tools (the C++ compiler)'
-                Override = '--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
-                Slow     = $true
-            })
+        $wanted.Add((New-WantedPackage `
+                    -Id 'Microsoft.VisualStudio.2022.BuildTools' `
+                    -Name 'Visual Studio 2022 Build Tools (the C++ compiler)' `
+                    -Override '--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended' `
+                    -Slow `
+                    -Check { return [bool](Get-VisualStudioCppPath) }))
     }
 
     if ($wanted.Count -eq 0) {
@@ -373,53 +449,96 @@ Everything already done is kept - it carries on from here.
 
     foreach ($package in $wanted) {
         $note = ''
-        if ($package.ContainsKey('Slow')) { $note = ' - this is the slow one, 5-15 minutes' }
+        if ($package.Slow) { $note = ' - this is the slow one, 5-15 minutes' }
         Write-Detail "Installing $($package.Name)$note..."
         $arguments = @('install', '--id', $package.Id, '--exact', '--source', 'winget',
             '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
-        if ($package.ContainsKey('Override')) {
+        if ($package.Override) {
             $arguments += @('--override', $package.Override)
         }
         $run = Invoke-Tool -FilePath 'winget' -Arguments $arguments
-        Write-SetupLog "winget exit code for $($package.Id): $($run.ExitCode)"
-        # winget's exit code is not the authority here - whether the tool now
-        # exists is. A "already installed" or "restart required" code with a
-        # working tool is a success, and a zero exit with nothing installed is
-        # not.
+        Write-SetupLog "winget exit code for $($package.Id): $(Format-ExitCode $run.ExitCode)"
         Update-SessionEnvironment
+
+        # winget's exit code is not the authority on SUCCESS - whether the tool
+        # now exists is. It reports "already installed" and "restart required"
+        # as failures, and a zero exit with nothing installed is not a success.
+        #
+        # But when the tool is not there, the exit code and winget's own words
+        # are the evidence for why, and they are said HERE, at the install that
+        # failed. Letting them fall on the floor is how a winget that answered
+        # "No package found matching input criteria" turned into a claim, four
+        # checks later, that the Vulkan SDK had installed and Windows was being
+        # slow about it.
+        if (& $package.Check) {
+            Write-Ok "$($package.Name) installed."
+            continue
+        }
+        $package.Failed = $true
+        $package.ExitCode = $run.ExitCode
+        $package.Said = Get-WingetFailureSummary -Output $run.Output
+        Write-Note (Get-WingetFailureNote -Name $package.Name -Id $package.Id `
+                -ExitCode $package.ExitCode -Said $package.Said)
     }
 
-    # -- Re-check, and be specific about whatever is still missing ----------
-    $stillMissing = New-Object System.Collections.Generic.List[string]
-    $script:Python = Get-PythonCommand -MinimumVersion '3.11'
-    if (-not $script:Python) { $stillMissing.Add('Python 3.11+') }
-    if (-not (Get-ToolVersion -Command 'git')) { $stillMissing.Add('Git') }
-    $cmake = Get-ToolVersion -Command 'cmake'
-    if (-not $cmake -or $cmake -lt ([version]'3.20')) { $stillMissing.Add('CMake 3.20+') }
-    if (-not (Get-VisualStudioCppPath)) { $stillMissing.Add('the C++ build tools') }
-
-    if ($stillMissing.Count -gt 0) {
-        Stop-Setup -Problem ('These are still not usable after installing: ' + ($stillMissing -join ', ') + '.') `
+    # -- Be specific about whatever is still missing ------------------------
+    # Everything except the Vulkan SDK first: it is the only one with a second
+    # route to try, so there is no sense downloading 200 MB of it while the C++
+    # compiler is missing anyway.
+    $failed = @($wanted | Where-Object { $_.Failed -and $_.Id -ne $VulkanWingetId })
+    if ($failed.Count -gt 0) {
+        $detail = New-Object System.Collections.Generic.List[string]
+        foreach ($package in $failed) {
+            $detail.Add((Get-WingetFailureNote -Name $package.Name -Id $package.Id `
+                        -ExitCode $package.ExitCode -Said $package.Said))
+        }
+        $blank = [Environment]::NewLine + [Environment]::NewLine
+        Stop-Setup -Problem ($detail -join $blank) `
             -NextAction @"
-This is almost always because a newly installed tool only appears once Windows
-is restarted. Restart the PC, then run this setup again - it keeps everything
-it has already done.
-If it says the same thing after a restart, the detail of what the installer did
-is in:
+Install the ones that failed by hand, then run this setup again - it keeps
+everything it has already done and carries on:
+  Python  https://www.python.org/downloads/windows/
+  Git     https://git-scm.com/download/win
+  CMake   https://cmake.org/download/
+  C++     https://visualstudio.microsoft.com/downloads/  ("Build Tools for
+          Visual Studio", then tick "Desktop development with C++")
+If winget said a package could not be found, that is the identifier in this
+script being out of date rather than anything wrong with your PC - the pages
+above install exactly the same thing.
+The full output from every installer is in:
   $script:DictateLogPath
 "@
     }
 
-    if (-not $env:VULKAN_SDK -or -not (Test-Path -LiteralPath $env:VULKAN_SDK)) {
-        Stop-Setup -Problem 'The Vulkan SDK installed, but Windows has not made it visible to this window yet (VULKAN_SDK is not set), and the build cannot find Vulkan without it.' `
-            -NextAction @"
-Restart the PC and run this setup again. For this one, restarting genuinely is
-needed - opening a new PowerShell window is often not enough.
-Everything already installed is kept.
-"@
+    # -- The Vulkan SDK: found, findable, or genuinely not installed ---------
+    $vulkanPackage = @($wanted | Where-Object { $_.Id -eq $VulkanWingetId })
+    $directReason = ''
+    if ($vulkanPackage.Count -eq 1 -and $vulkanPackage[0].Failed) {
+        # winget could not install it. Say so, then take the other route rather
+        # than leaving him with nothing to do.
+        Write-Detail 'Trying the other route: LunarG publish the SDK on their own site.'
+        $direct = Install-VulkanSdkFromLunarG -WorkDir $Root
+        if (-not $direct.Ok) {
+            $directReason = $direct.Reason
+            Write-Note "That did not work either: $directReason."
+        }
     }
 
-    Write-Ok "Vulkan SDK at $env:VULKAN_SDK"
+    $vulkan = Resolve-VulkanSdk
+    if (-not $vulkan) {
+        $id = ''
+        $code = 0
+        $said = ''
+        if ($vulkanPackage.Count -eq 1) {
+            $id = $vulkanPackage[0].Id
+            $code = $vulkanPackage[0].ExitCode
+            $said = $vulkanPackage[0].Said
+        }
+        $report = Get-VulkanSdkMissingReport -WingetId $id -WingetExitCode $code `
+            -WingetSaid $said -DirectReason $directReason
+        Stop-Setup -Problem $report.Problem -NextAction $report.NextAction
+    }
+    Confirm-VulkanSdk $vulkan
     Write-Ok 'All build tools are in place.'
 }
 
@@ -437,15 +556,25 @@ if you have just installed it, and run setup again.
 "@
         }
     }
+    # Same rule as step 2: look for the SDK, do not deduce it from a variable.
+    # If it is on disk, point this window at it and get on with the build
+    # instead of sending him away to restart a PC that has nothing to gain.
     Update-SessionEnvironment
-    if (-not $env:VULKAN_SDK -or -not (Test-Path -LiteralPath $env:VULKAN_SDK)) {
-        Stop-Setup -Problem 'VULKAN_SDK is not set, so CMake will not find Vulkan and the build would silently come out without GPU support.' `
-            -NextAction @"
-If you have just installed the Vulkan SDK, restart the PC and run setup again.
-If you have not installed it, run the whole setup (without -Only) and step 2
-will do it.
-"@
+    $vulkan = Resolve-VulkanSdk
+    if (-not $vulkan) {
+        $report = Get-VulkanSdkMissingReport
+        Stop-Setup -Problem ($report.Problem +
+            [Environment]::NewLine + [Environment]::NewLine +
+            'Without it CMake cannot find Vulkan, and the build would come out with no GPU support at all.') `
+            -NextAction ("Run the whole setup, without -Only, and step 2 installs it for you:" +
+                [Environment]::NewLine +
+                "  powershell -ExecutionPolicy Bypass -File `"$PSCommandPath`"" +
+                [Environment]::NewLine + [Environment]::NewLine +
+                'If step 2 has already been tried and could not do it:' +
+                [Environment]::NewLine + $report.NextAction)
     }
+    Set-VulkanSdkForSession -Path $vulkan.Path
+    Write-Detail "Building against the Vulkan SDK at $($vulkan.Path)."
 
     $src = Get-WhisperSourceDir
     $existing = Get-WhisperServerExe
@@ -532,9 +661,11 @@ The list of versions is at $WhisperRepo/releases
             $configure = Invoke-Tool -FilePath 'cmake' -Arguments @('-B', 'build', '-DGGML_VULKAN=1') -Show echo
             Assert-ExitCode -Code $configure.ExitCode -Problem 'CMake could not set up the build.' `
                 -NextAction @"
-If the message above mentions "Could not find Vulkan", the Vulkan SDK is
-installed but Windows has not made it visible yet: restart the PC and run setup
-again.
+If the message above mentions "Could not find Vulkan", the SDK setup is using
+is incomplete rather than absent - setup found it at
+$($vulkan.Path). Run the Vulkan SDK installer again from
+https://vulkan.lunarg.com/sdk/home#windows, leave every component ticked, and
+run setup again.
 If it mentions no C++ compiler, the build tools did not install: run the whole
 setup (without -Only) as administrator.
 The full output is in:

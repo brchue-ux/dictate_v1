@@ -154,7 +154,10 @@ jobs:
           # Run the build step with nothing set up. It must stop, with a problem
           # and a next action, and no stack trace - that behaviour is the whole
           # promise of the installer, so it is tested rather than assumed.
+          # This runner has no Vulkan SDK anywhere, which makes it the genuine
+          # not-installed state.
           $env:VULKAN_SDK = ''
+          $env:VK_SDK_PATH = ''
           $output = & powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 `
             -Only build -Root "$env:RUNNER_TEMP\dictate-refuses" 2>&1 | Out-String
           Write-Host $output
@@ -164,6 +167,21 @@ jobs:
           }
           if ($output -notmatch 'What to do:') {
             throw 'setup.ps1 stopped without telling the user what to do'
+          }
+          # The bug this replaced: with no SDK on the machine, setup claimed one
+          # had installed and asked for a reboot that could never help. On a
+          # runner with no SDK, saying either of those would be a lie.
+          if ($output -match 'installed, but Windows has not made it visible') {
+            throw 'setup.ps1 claimed the Vulkan SDK installed when it is not on this machine'
+          }
+          if ($output -match '(?i)restart the pc[\s,]*(and|then)\s+run') {
+            throw 'setup.ps1 told the user to restart the PC to fix software that was never installed'
+          }
+          if ($output -notmatch 'not installed on this PC') {
+            throw 'setup.ps1 did not say plainly that the Vulkan SDK is not installed'
+          }
+          if ($output -notmatch 'vulkan\.lunarg\.com') {
+            throw 'setup.ps1 did not give the user a download address that works'
           }
           exit 0
 
@@ -176,13 +194,15 @@ jobs:
 
           Ran on Windows PowerShell 5.1, the version that ships with Windows.
 
-          Covered: version detection, the config-file edit (against the real
+          Covered: version detection, Vulkan SDK detection and every branch of
+          what it says, the config-file edit (against the real
           `config/dictate.example.toml`, re-read afterwards by Python's TOML
           parser), integrity checking, and the resumable downloader against a
           local HTTP server that genuinely drops the connection mid-transfer.
 
-          Not covered: winget installing the toolchain, and anything that needs
-          a GPU or a desktop.
+          Not covered: winget installing the toolchain, the direct download of
+          the Vulkan SDK from LunarG and the Authenticode check on it, and
+          anything that needs a GPU or a desktop.
           '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
   # =========================================================================
@@ -302,7 +322,9 @@ jobs:
         shell: pwsh
         run: |
           # From LunarG directly, not from a third party - the same source the
-          # installer's `winget install LunarG.VulkanSDK` ends up at.
+          # installer's `winget install KhronosGroup.VulkanSDK` ends up at, and
+          # the same address setup.ps1 falls back to when winget cannot install
+          # it. Both are LunarG's own documented download endpoint.
           $installer = "$env:RUNNER_TEMP\vulkan_sdk.exe"
           Invoke-WebRequest -Uri 'https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe' -OutFile $installer
           $process = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
@@ -320,6 +342,36 @@ jobs:
           }
           "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: The installer finds a real Vulkan SDK without being told where it is
+        shell: powershell
+        run: |
+          # The only place in this workflow with a genuine LunarG SDK on disk,
+          # so it is the only place the fix for the "installed, but Windows has
+          # not announced it" bug can be checked against the real thing rather
+          # than against a folder of empty files.
+          . .\scripts\setup-lib.ps1
+          $sdk = 'C:\VulkanSDK\current'
+
+          if (-not (Test-VulkanSdkDir $sdk)) {
+            Get-ChildItem $sdk | Out-String | Write-Host
+            throw "a real SDK at $sdk was not recognised as one"
+          }
+          if (-not (Test-VulkanShaderCompiler $sdk)) { throw 'glslc was not found in a real SDK' }
+
+          # The state the product owner was actually in: the SDK is on the
+          # machine and no environment variable points at it. It must be found
+          # anyway, and this window pointed at it, with nothing restarted.
+          $env:VULKAN_SDK = ''
+          $env:VK_SDK_PATH = ''
+          $found = Resolve-VulkanSdk -SearchRoots @('C:\VulkanSDK') -Sources @('session','disk')
+          if (-not $found) { throw 'a real installed SDK was not found with VULKAN_SDK unset' }
+          if ($found.Source -ne 'disk') { throw "expected to find it on disk, got $($found.Source)" }
+          if ($found.Path -ne $sdk) { throw "found $($found.Path), expected $sdk" }
+
+          Set-VulkanSdkForSession -Path $found.Path
+          if ($env:VULKAN_SDK -ne $sdk) { throw 'VULKAN_SDK was not set for this session' }
+          Write-Host "Found and adopted a real Vulkan SDK with no variable set: $($found.Path)"
 
       - name: Build whisper.cpp with Vulkan, using the installer's own build step
         shell: powershell

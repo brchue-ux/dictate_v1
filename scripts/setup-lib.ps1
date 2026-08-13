@@ -199,7 +199,7 @@ function Update-SessionEnvironment {
        whole reason the manual instructions say "close and reopen PowerShell".
        Re-reading them here is what lets the install run start to finish in one
        window. #>
-    $names = @('VULKAN_SDK', 'CMAKE_PREFIX_PATH')
+    $names = @('VULKAN_SDK', 'VK_SDK_PATH', 'CMAKE_PREFIX_PATH')
     foreach ($name in $names) {
         $machine = [Environment]::GetEnvironmentVariable($name, 'Machine')
         $user = [Environment]::GetEnvironmentVariable($name, 'User')
@@ -368,6 +368,510 @@ function Get-VisualStudioCppPath {
     $path = Get-LastLine $run.Output
     if ($path -and (Test-Path -LiteralPath $path)) { return $path }
     return $null
+}
+
+# ---------------------------------------------------------------------------
+# The Vulkan SDK
+#
+# Finding it is deliberately NOT "is VULKAN_SDK set?". That variable is written
+# by the SDK's own installer and only published to processes Windows starts
+# afterwards, so an unset variable means one of two completely different things:
+#
+#   the SDK is installed and this window has not been told   -> carry on
+#   the SDK is not installed at all                          -> install it
+#
+# Those have different remedies, and the installer used to report the second as
+# the first: it told the product owner the SDK had installed and to restart his
+# PC. Restarting cannot conjure up software that was never installed, so that
+# message was an infinite loop as well as a lie. Everything below exists to tell
+# the two states apart by looking for the SDK itself.
+# ---------------------------------------------------------------------------
+
+function Test-VulkanSdkDir {
+    <# Is this directory an actual Vulkan SDK, rather than a leftover folder or
+       a stale variable pointing at nothing?
+
+       Judged by the two files CMake's FindVulkan has to locate for the
+       whisper.cpp build to configure at all, so a directory that passes this is
+       one the build can really use. #>
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+    foreach ($needed in @('Include\vulkan\vulkan.h', 'Lib\vulkan-1.lib')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Path $needed))) { return $false }
+    }
+    return $true
+}
+
+function Test-VulkanShaderCompiler {
+    <# whisper.cpp compiles its own shaders, so the SDK also has to carry glslc.
+       Separate from Test-VulkanSdkDir because a headers-and-library SDK is
+       still a real SDK - it just cannot build this - and the two get different
+       messages. #>
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    return (Test-Path -LiteralPath (Join-Path $Path 'Bin\glslc.exe'))
+}
+
+function Get-DefaultVulkanSearchRoots {
+    <# Where LunarG's installer puts the SDK when nobody tells it otherwise:
+       "The default SDK install location is C:\VulkanSDK\<version>"
+       (vulkan.lunarg.com/doc/view/latest/windows/getting_started.html). #>
+    $roots = New-Object System.Collections.Generic.List[string]
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($drive in @($env:SystemDrive, 'C:')) {
+        if (-not $drive) { continue }
+        # Built by hand rather than with Join-Path: Join-Path asks the provider
+        # to resolve "C:", so a drive letter that does not exist on the machine
+        # running this is an error rather than a path that simply does not
+        # exist. That difference stops these functions being exercised anywhere
+        # but Windows, and there is nothing to work out here anyway.
+        $root = $drive.TrimEnd('\') + '\VulkanSDK'
+        if ($seen.Add($root.ToLowerInvariant())) { $roots.Add($root) }
+    }
+    # The leading comma keeps this an array. Without it PowerShell unrolls a
+    # one-element result into a bare string on the way out, and callers that
+    # index or count it get the wrong answer.
+    return , $roots.ToArray()
+}
+
+function Get-VulkanSdkFromDisk {
+    <# The SDK as it sits on disk, whatever Windows has or has not published.
+       Newest version wins; a folder that is not really an SDK is ignored. #>
+    param([string[]]$SearchRoots = @())
+    if (-not $SearchRoots -or $SearchRoots.Count -eq 0) { $SearchRoots = Get-DefaultVulkanSearchRoots }
+
+    $best = ''
+    $bestVersion = $null
+    foreach ($root in $SearchRoots) {
+        if (-not $root) { continue }
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        foreach ($dir in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
+            if (-not (Test-VulkanSdkDir $dir.FullName)) { continue }
+            $version = ConvertTo-VersionOrNull $dir.Name
+            if ($null -eq $bestVersion) {
+                # Either the first hit, or the first one with a version number -
+                # a versioned folder always beats an unversioned one like
+                # "current", because that is the one the installer made.
+                if (-not $best -or $null -ne $version) {
+                    $best = $dir.FullName
+                    $bestVersion = $version
+                }
+            } elseif ($null -ne $version -and $version -gt $bestVersion) {
+                $best = $dir.FullName
+                $bestVersion = $version
+            }
+        }
+    }
+    if ($best) { return $best }
+    return $null
+}
+
+function Get-VulkanSdkFromRegistry {
+    <# The variable as Windows has recorded it, rather than as this window has
+       it. This is the re-read that was already here, kept as one source among
+       several instead of being the only one. VK_SDK_PATH is checked too: the
+       SDK sets both. #>
+    foreach ($name in @('VULKAN_SDK', 'VK_SDK_PATH')) {
+        foreach ($scope in @('Machine', 'User')) {
+            $value = ''
+            try {
+                $value = [Environment]::GetEnvironmentVariable($name, $scope)
+            } catch {
+                Write-SetupLog "could not read $name from the $scope environment: $($_.Exception.Message)"
+                continue
+            }
+            if (Test-VulkanSdkDir $value) { return $value }
+        }
+    }
+    return $null
+}
+
+function Get-VulkanSdkFromInstalledPrograms {
+    <# Where the SDK's own entry in Windows' installed-programs list says it put
+       itself. This is what finds an SDK installed somewhere other than the
+       default folder, which no amount of scanning C:\VulkanSDK ever will. #>
+    $keys = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+    )
+    foreach ($key in $keys) {
+        if (-not (Test-Path -LiteralPath $key)) { continue }
+        $entries = @()
+        try {
+            $entries = @(Get-ChildItem -LiteralPath $key -ErrorAction SilentlyContinue)
+        } catch {
+            Write-SetupLog "could not read ${key}: $($_.Exception.Message)"
+            continue
+        }
+        foreach ($entry in $entries) {
+            $item = $null
+            try {
+                $item = Get-ItemProperty -LiteralPath $entry.PSPath -ErrorAction SilentlyContinue
+            } catch {
+                continue
+            }
+            if (-not $item) { continue }
+            $name = ''
+            if ($item.PSObject.Properties.Match('DisplayName').Count -gt 0) { $name = [string]$item.DisplayName }
+            if ($name -notmatch '(?i)vulkan.*sdk') { continue }
+            $location = ''
+            if ($item.PSObject.Properties.Match('InstallLocation').Count -gt 0) { $location = [string]$item.InstallLocation }
+            if (Test-VulkanSdkDir $location) { return $location.TrimEnd('\') }
+        }
+    }
+    return $null
+}
+
+function Resolve-VulkanSdk {
+    <# Is there a Vulkan SDK on this PC, and where?
+
+       Returns @{ Path; Source; How } or $null. `How` is the phrase the
+       messages use, so what the product owner is told matches how it was
+       actually found.
+
+       -Sources exists so each route can be exercised on its own; the default is
+       all four, in the order that answers fastest. #>
+    param(
+        [string[]]$SearchRoots = @(),
+        [ValidateSet('session', 'registry', 'disk', 'programs')]
+        [string[]]$Sources = @('session', 'registry', 'disk', 'programs')
+    )
+    foreach ($source in $Sources) {
+        $path = $null
+        $how = ''
+        switch ($source) {
+            'session' {
+                foreach ($value in @($env:VULKAN_SDK, $env:VK_SDK_PATH)) {
+                    if (-not $path -and (Test-VulkanSdkDir $value)) { $path = $value }
+                }
+                $how = 'the VULKAN_SDK setting this window already had'
+            }
+            'registry' {
+                $path = Get-VulkanSdkFromRegistry
+                $how = 'the VULKAN_SDK setting Windows has recorded'
+            }
+            'disk' {
+                $path = Get-VulkanSdkFromDisk -SearchRoots $SearchRoots
+                $how = 'the folder it is installed in'
+            }
+            'programs' {
+                $path = Get-VulkanSdkFromInstalledPrograms
+                $how = "Windows' own list of installed programs"
+            }
+        }
+        if ($path) {
+            $path = ([string]$path).TrimEnd('\')
+            Write-SetupLog "Vulkan SDK found via ${source}: $path"
+            return @{ Path = $path; Source = $source; How = $how }
+        }
+    }
+    Write-SetupLog ('no Vulkan SDK found; looked in ' + (($Sources) -join ', '))
+    return $null
+}
+
+function Set-VulkanSdkForSession {
+    <# Point this running window at an SDK that is already on disk.
+
+       This is exactly what Windows does for processes it starts after the SDK
+       is installed - set VULKAN_SDK, set VK_SDK_PATH, put its Bin folder on
+       PATH. Doing it here is what turns "restart the PC and run setup again"
+       into "carry on", and it is why the install no longer has a step that can
+       only be got past by rebooting. #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $clean = $Path.TrimEnd('\')
+    $env:VULKAN_SDK = $clean
+    $env:VK_SDK_PATH = $clean
+    $bin = Join-Path $clean 'Bin'
+    if (Test-Path -LiteralPath $bin) {
+        $already = @(($env:PATH -split ';') | Where-Object { $_ -and $_.TrimEnd('\') -ieq $bin })
+        if ($already.Count -eq 0) { $env:PATH = $bin + ';' + $env:PATH }
+    }
+    Write-SetupLog "VULKAN_SDK set for this session: $clean"
+}
+
+# ---------------------------------------------------------------------------
+# winget: what it actually said, in words that can be shown to someone
+# ---------------------------------------------------------------------------
+
+function Format-ExitCode {
+    <# winget documents its failures in hex and PowerShell hands them back as a
+       signed number, so neither on its own can be looked up. Show both. #>
+    param([Parameter(Mandatory = $true)][int]$Code)
+    return ('{0} (0x{1:X8})' -f $Code, $Code)
+}
+
+function Get-WingetFailureSummary {
+    <# The one line of winget's output that says why it failed, with its
+       progress bars, banners and licence boilerplate dropped. #>
+    param([string]$Output)
+    if (-not $Output) { return '' }
+
+    $interesting = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($Output -split "`r?`n")) {
+        $text = $line.Trim()
+        if (-not $text) { continue }
+        # Progress bars and percentages carry no letters and say nothing.
+        if ($text -notmatch '[A-Za-z]') { continue }
+        if ($text -match '^(Found |Downloading |Successfully verified|Starting package install|This application is licensed|The publisher|You agree)') { continue }
+        $interesting.Add($text)
+    }
+    if ($interesting.Count -eq 0) { return '' }
+
+    $telling = '(?i)(no package found|no applicable|no sources|could not|cannot|not found|fail|error|abandon|cancel|declin|requires|restart|reboot)'
+    for ($i = $interesting.Count - 1; $i -ge 0; $i--) {
+        if ($interesting[$i] -match $telling) { return $interesting[$i] }
+    }
+    return $interesting[$interesting.Count - 1]
+}
+
+function Get-WingetFailureNote {
+    <# One sentence naming the tool that did not install and the evidence for
+       it, said at the install that failed rather than inferred from a symptom
+       several steps later. #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Id,
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [string]$Said = ''
+    )
+    $text = "$Name did not install. winget was asked for $Id and stopped with " + (Format-ExitCode $ExitCode) + '.'
+    if ($Said) { $text += " It said: $Said" }
+    if ($Said -match '(?i)no package found') {
+        $text += " That is winget saying it has no package by that name at all, so the identifier is wrong or this PC's winget source does not carry it."
+    }
+    return $text
+}
+
+# ---------------------------------------------------------------------------
+# Installing the Vulkan SDK when winget cannot
+# ---------------------------------------------------------------------------
+
+# LunarG publish these two endpoints themselves, on the page that documents how
+# to script an SDK download (vulkan.lunarg.com/content/view/latest-sdk-version-api):
+#   the current version, as plain text
+#   the Windows installer for a given version, or for "latest"
+$script:LunarGVersionUri = 'https://vulkan.lunarg.com/sdk/latest/windows.txt'
+$script:LunarGDownloadPage = 'https://vulkan.lunarg.com/sdk/home#windows'
+
+function Get-LunarGSdkVersionUri { return $script:LunarGVersionUri }
+function Get-LunarGSdkDownloadPage { return $script:LunarGDownloadPage }
+
+function Get-LunarGSdkInstallerUri {
+    param([string]$Version = '')
+    if ($Version) { return "https://sdk.lunarg.com/sdk/download/$Version/windows/vulkan_sdk.exe" }
+    return 'https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe'
+}
+
+function ConvertTo-LunarGSdkVersion {
+    <# LunarG's version endpoint answers with the bare version and a newline.
+       Anything else - an error page, a redirect, HTML - is not a version, and
+       saying so gets the "latest" URL used instead of a nonsense one. #>
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    $trimmed = $Text.Trim()
+    if ($trimmed -match '^\d+\.\d+\.\d+(\.\d+)?$') { return $trimmed }
+    return ''
+}
+
+function Test-SignerSubject {
+    param([string]$Subject, [string]$Expected)
+    if (-not $Subject) { return $false }
+    if (-not $Expected) { return $true }
+    return ($Subject -like "*$Expected*")
+}
+
+function Test-InstallerSignature {
+    <# Before running a downloaded installer as administrator, ask Windows
+       whether it really came from who it claims and arrived whole. A truncated
+       download fails this too, which is what stands in for the SHA-256 that a
+       "latest" URL cannot have.
+
+       Returns @{ Ok; Reason; Subject } and never throws. #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$ExpectedSubject = ''
+    )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return @{ Ok = $false; Reason = 'the downloaded file is not there'; Subject = '' }
+    }
+    $signature = $null
+    try {
+        $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+    } catch {
+        Write-SetupLog "signature check failed for ${Path}: $($_.Exception.Message)"
+        return @{ Ok = $false; Reason = "Windows could not check the file's signature"; Subject = '' }
+    }
+    $status = [string]$signature.Status
+    $subject = ''
+    if ($signature.SignerCertificate) { $subject = [string]$signature.SignerCertificate.Subject }
+    if ($status -ne 'Valid') {
+        return @{ Ok = $false; Reason = "Windows reports its signature as $status"; Subject = $subject }
+    }
+    if (-not (Test-SignerSubject -Subject $subject -Expected $ExpectedSubject)) {
+        return @{ Ok = $false; Reason = "it is signed, but by $subject rather than $ExpectedSubject"; Subject = $subject }
+    }
+    return @{ Ok = $true; Reason = "signed by $subject, checked by Windows"; Subject = $subject }
+}
+
+function Install-VulkanSdkFromLunarG {
+    <# The route that works when winget cannot install the SDK - which is the
+       situation that produced this whole function, winget having had no package
+       called LunarG.VulkanSDK to install.
+
+       Returns @{ Ok; Path; Reason } and never throws: "that did not work
+       either" is one part of a larger message, and the caller is the one that
+       knows the rest of it. #>
+    param(
+        [Parameter(Mandatory = $true)][string]$WorkDir,
+        [string[]]$SearchRoots = @()
+    )
+
+    # -- Which version is current, from LunarG's own version endpoint --------
+    $version = ''
+    try {
+        $answer = Invoke-WebRequest -Uri (Get-LunarGSdkVersionUri) -UseBasicParsing -TimeoutSec 30
+        $version = ConvertTo-LunarGSdkVersion ([string]$answer.Content)
+    } catch {
+        Write-SetupLog "LunarG version lookup failed: $($_.Exception.Message)"
+    }
+    $uri = Get-LunarGSdkInstallerUri -Version $version
+    if ($version) {
+        Write-Detail "Downloading the Vulkan SDK $version straight from LunarG."
+    } else {
+        Write-Detail 'Downloading the current Vulkan SDK straight from LunarG.'
+    }
+    Write-SetupLog "LunarG installer URI: $uri"
+
+    if (-not (Test-Path -LiteralPath $WorkDir)) {
+        New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
+    }
+    $suffix = ''
+    if ($version) { $suffix = "-$version" }
+    $installer = Join-Path $WorkDir "vulkan-sdk$suffix.exe"
+
+    # -- Download it, and refuse to run anything Windows will not vouch for ---
+    # Two goes: the first can inherit a part-finished file from an earlier run,
+    # and the signature check is what catches that.
+    $verified = $false
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            Get-FileResumable -Uri $uri -Destination $installer -Label 'Vulkan SDK installer' -MaxAttempts 3 | Out-Null
+        } catch {
+            return @{ Ok = $false; Path = ''
+                Reason = "the download from LunarG did not finish ($($_.Exception.Message))"
+            }
+        }
+        $signature = Test-InstallerSignature -Path $installer -ExpectedSubject 'LunarG'
+        Write-SetupLog "LunarG installer signature: $($signature.Reason)"
+        if ($signature.Ok) {
+            Write-Detail "The download is $($signature.Reason)."
+            $verified = $true
+            break
+        }
+        Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath "$installer.part" -Force -ErrorAction SilentlyContinue
+        if ($attempt -ge 2) {
+            return @{ Ok = $false; Path = ''
+                Reason = "the file that came back from LunarG could not be confirmed as theirs ($($signature.Reason)), so setup would not run it"
+            }
+        }
+        Write-Note 'That download did not check out as LunarG''s own file. Fetching it once more.'
+    }
+    if (-not $verified) {
+        return @{ Ok = $false; Path = ''; Reason = 'the installer could not be downloaded and verified' }
+    }
+
+    # -- Run it, with the switches LunarG's installer documents ---------------
+    # Start-Process, not Invoke-Tool: this is a windowed program, and PowerShell
+    # does not wait for one of those to finish when it is called directly. It
+    # would look like an instant success and the check below would then be
+    # racing the installer.
+    Write-Detail 'Installing it. This takes a few minutes and asks nothing.'
+    $code = -1
+    try {
+        $process = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
+            'install', '--accept-licenses', '--default-answer', '--confirm-command')
+        $code = $process.ExitCode
+    } catch {
+        return @{ Ok = $false; Path = ''
+            Reason = "LunarG's installer would not start ($($_.Exception.Message))"
+        }
+    }
+    Write-SetupLog "LunarG installer exit code: $(Format-ExitCode $code)"
+
+    Update-SessionEnvironment
+    $found = Resolve-VulkanSdk -SearchRoots $SearchRoots
+    if ($found) { return @{ Ok = $true; Path = $found.Path; Reason = '' } }
+    return @{ Ok = $false; Path = ''
+        Reason = ("LunarG's installer ran and stopped with " + (Format-ExitCode $code) +
+            ', and there is still no Vulkan SDK on this PC afterwards')
+    }
+}
+
+function Get-VulkanSdkMissingReport {
+    <# The words for the one state that used to be reported as its exact
+       opposite: there is no Vulkan SDK on this PC.
+
+       Returns @{ Problem; NextAction }. It never says the SDK installed, and
+       the next action is one a non-developer can carry out and that can
+       actually work - unlike "restart the PC", which cannot install software
+       that was never downloaded. #>
+    param(
+        [string]$WingetId = '',
+        [int]$WingetExitCode = 0,
+        [string]$WingetSaid = '',
+        [string]$DirectReason = '',
+        [string[]]$SearchedRoots = @()
+    )
+    if (-not $SearchedRoots -or $SearchedRoots.Count -eq 0) { $SearchedRoots = Get-DefaultVulkanSearchRoots }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    # Only claim an install was attempted if one was. Step 3 calls this without
+    # having tried anything, and "setup could not install it" would be as untrue
+    # there as the message this replaced.
+    if ($WingetId -or $DirectReason) {
+        $lines.Add('The Vulkan SDK is not installed on this PC, and setup could not install it.')
+    } else {
+        $lines.Add('The Vulkan SDK is not installed on this PC.')
+    }
+    $lines.Add('')
+    $lines.Add('Setup looked in all of these, and it is in none of them:')
+    foreach ($root in $SearchedRoots) { $lines.Add("  the folder $root") }
+    $lines.Add('  the VULKAN_SDK setting Windows has recorded')
+    $lines.Add("  Windows' own list of installed programs")
+    if ($WingetId) {
+        $lines.Add('')
+        $lines.Add((Get-WingetFailureNote -Name 'The Vulkan SDK' -Id $WingetId -ExitCode $WingetExitCode -Said $WingetSaid))
+    }
+    if ($DirectReason) {
+        $lines.Add('')
+        $lines.Add("Downloading it straight from LunarG instead did not work: $DirectReason.")
+    }
+
+    $next = @"
+Install it by hand. It is one download and an ordinary Next-Next-Finish
+installer, and it takes about five minutes:
+
+  1. Open this page:
+       $(Get-LunarGSdkDownloadPage)
+  2. Under Windows, click the SDK Installer download. The file is called
+     vulkan_sdk.exe, or vulkansdk-windows-X64-<version>.exe.
+  3. Run it and accept everything it offers. It installs itself into
+     $($SearchedRoots[0])\<version>.
+  4. Run this setup again.
+
+You do NOT need to restart the PC. Setup now finds the SDK by looking for the
+folder it is in, so it picks it up in the same window.
+
+If that page will not open, the same file is at:
+  $(Get-LunarGSdkInstallerUri)
+
+Everything already installed and downloaded is kept.
+"@
+
+    return @{ Problem = ($lines -join [Environment]::NewLine); NextAction = $next.Trim() }
 }
 
 # ---------------------------------------------------------------------------

@@ -214,6 +214,14 @@ Windows machines. These are things that used to be on the "never run" list:
 * **The installer's own logic**, on Windows PowerShell 5.1 — the version that
   ships with Windows — including a download that is genuinely interrupted
   half-way and resumed, and the edit it makes to your config file.
+* **That a real, installed Vulkan SDK is found without `VULKAN_SDK` being set.**
+  The Vulkan build job installs the actual LunarG SDK, then clears the variable
+  and checks the installer still finds the SDK on disk and points itself at it.
+  That is the state that used to stop the install dead with a message telling
+  you to restart the PC.
+* **That a genuinely absent Vulkan SDK is reported as absent** — CI asserts the
+  installer never claims it installed, never asks for a restart, and always
+  prints a download address.
 * **The 167 tests above, on Windows** as well as on Linux.
 
 ### Still not verified — needs this actual PC
@@ -228,10 +236,14 @@ misbehaves.
   in about a minute**, and so does `dictate transcribe some.wav` at any time.
   A green tick on CI says nothing whatsoever about the GPU.
 * **The toolchain install** — winget fetching Python, CMake, the Vulkan SDK and
-  the C++ build tools. CI machines already have most of those and do not have
+  the C++ build tools. CI machines already have most of those and do not use
   winget at all, so step 2 of setup is the one part of it no machine here has
-  ever executed. It is written to check what is actually installed afterwards
-  rather than to trust the installer's exit code.
+  ever executed. Every tool it installs is now checked by looking for the tool
+  itself afterwards, never by trusting the installer's exit code and never by
+  reading an environment variable as a proxy — but the winget calls themselves,
+  and the direct download from LunarG that steps in when winget cannot install
+  the Vulkan SDK (including the Authenticode check on what arrives), have run
+  nowhere.
 * **The caption overlay.** The non-activating, click-through, always-on-top
   window is built from the documented Win32 extended styles, but no one has
   watched it fail to steal focus. This is the highest-risk unverified piece,

@@ -43,12 +43,29 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `[[deletions]]` blocks, or they silently become fields of the last one.
 - **Caption threads are capped at 4 in `config.validate()`** because more threads were
   measured to be slower. This is a settled decision, not a limitation to lift.
+- **The Vulkan SDK's winget id is `KhronosGroup.VulkanSDK`**, not
+  `LunarG.VulkanSDK` — winget files it under that publisher and only *displays*
+  "LunarG Inc.". The wrong id returns "No package found matching input criteria"
+  (`0x8A150014`), which is a silent no-op unless someone checks for it.
+- **Never treat an environment variable as proof a tool is installed.** Setup
+  once read an unset `VULKAN_SDK` as "installed, Windows just has not announced
+  it yet" and told the product owner to reboot, forever. Presence tests look for
+  the thing itself: `Resolve-VulkanSdk` in `scripts/setup-lib.ps1` checks the
+  session, the registry, `C:\VulkanSDK\<version>` on disk and the
+  installed-programs list, then sets the variable for this session rather than
+  asking for a restart. Every tool in the toolchain step carries its own such
+  `Check`, run straight after its install so a failure is reported where it
+  happened.
 - **Native commands in PowerShell go through `Invoke-Tool`.** git, cmake and pip write
   ordinary progress to stderr, which Windows PowerShell turns into a terminating error
   under `$ErrorActionPreference = 'Stop'`. Exit codes are what decide success.
 - **Downloads are pinned by size AND SHA-256 in `scripts/models.psd1`**, which both the
   installer and CI read. Provenance for each fingerprint is in the comments there; do
-  not add an entry you have not verified.
+  not add an entry you have not verified. The one deliberate exception is the Vulkan
+  SDK installer fetched from LunarG when winget cannot install it: its version floats,
+  so there is no fingerprint to pin, and `Test-InstallerSignature` requires a valid
+  Authenticode signature naming LunarG instead. Nothing downloaded is ever run without
+  one of those two checks.
 - **CI has no GPU and never will.** Keep "it compiles and the tests pass" separate from
   "the GPU path runs" in the workflow, in the README, and in any PR description. A
   green tick is not GPU verification.

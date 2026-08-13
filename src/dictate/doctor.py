@@ -259,10 +259,14 @@ def check_vulkan_tools() -> CheckResult:
         return CheckResult("Vulkan SDK tools", Status.OK, found)
     return CheckResult(
         "Vulkan SDK tools", Status.WARN, "vulkaninfo not on PATH",
+        # The identifier is KhronosGroup.VulkanSDK: winget files the SDK under
+        # that publisher and only DISPLAYS it as LunarG. Asking for
+        # LunarG.VulkanSDK gets "No package found matching input criteria",
+        # which is what setup.ps1 used to do.
         "Only needed to BUILD whisper.cpp, not to run dictate. If you have not\n"
-        "built it yet:\n"
-        "  winget install --id LunarG.VulkanSDK\n"
-        "then reboot so VULKAN_SDK reaches your PATH.",
+        "built it yet, run setup.ps1 - it installs the SDK for you. By hand:\n"
+        "  winget install --id KhronosGroup.VulkanSDK\n"
+        "or download it from https://vulkan.lunarg.com/sdk/home#windows",
     )
 
 
