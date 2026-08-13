@@ -131,6 +131,38 @@ class SettledDecisionsAreEnforced(unittest.TestCase):
             config_mod.from_mapping({"audio": {"channels": 2}})
 
 
+class IdleRelease(unittest.TestCase):
+    """[whisper] idle_release_minutes: how long the model sits in VRAM when
+    nobody is dictating. 0 is the escape hatch back to the old behaviour."""
+
+    def test_the_default_is_five_minutes(self):
+        self.assertEqual(config_mod.load(None).whisper.idle_release_minutes, 5.0)
+
+    def test_zero_is_allowed_and_means_never(self):
+        cfg = config_mod.from_mapping({"whisper": {"idle_release_minutes": 0}})
+        self.assertEqual(cfg.whisper.idle_release_minutes, 0.0)
+
+    def test_a_whole_number_of_minutes_is_accepted(self):
+        cfg = config_mod.from_mapping({"whisper": {"idle_release_minutes": 20}})
+        self.assertEqual(cfg.whisper.idle_release_minutes, 20.0)
+
+    def test_a_negative_value_is_refused(self):
+        with self.assertRaises(ConfigError) as ctx:
+            config_mod.from_mapping({"whisper": {"idle_release_minutes": -1}})
+        self.assertIn("cannot be negative", ctx.exception.message)
+        self.assertIn("0 never gives it back", ctx.exception.remedy)
+
+    def test_a_value_that_would_unload_between_sentences_is_refused(self):
+        with self.assertRaises(ConfigError) as ctx:
+            config_mod.from_mapping({"whisper": {"idle_release_minutes": 0.05}})
+        self.assertIn("between one sentence and the next", ctx.exception.message)
+        self.assertIn("or 0 to", ctx.exception.remedy)
+
+    def test_the_shipped_example_says_the_same_as_the_default(self):
+        self.assertEqual(config_mod.load(EXAMPLE).whisper.idle_release_minutes,
+                         config_mod.load(None).whisper.idle_release_minutes)
+
+
 class Ranges(unittest.TestCase):
     def test_bad_paste_method(self):
         with self.assertRaises(ConfigError) as ctx:

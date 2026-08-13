@@ -28,6 +28,11 @@ from .platform.fade import MIN_FADE_MS
 # This is a settled decision, so the config refuses to break it silently.
 CAPTION_THREAD_CEILING = 4
 
+# Releasing the GPU model more often than this would unload it between one
+# sentence and the next, which costs the ~2 s load that residency exists to
+# avoid. 0 (never release) is still allowed and is a different thing entirely.
+MIN_IDLE_RELEASE_MINUTES = 0.5
+
 
 @dataclass
 class HotkeyConfig:
@@ -155,6 +160,11 @@ class WhisperConfig:
     #: Push one second of silence through at startup so the first real utterance
     #: does not pay for lazy GPU buffer allocation.
     warmup: bool = True
+    #: Minutes without dictating after which whisper-server is shut down, so the
+    #: graphics card gets its ~1.6 GB back for games and other work. Pressing
+    #: the hotkey loads it again, and that load starts while you are still
+    #: speaking. 0 means never: the model stays loaded until dictate exits.
+    idle_release_minutes: float = 5.0
 
 
 @dataclass
@@ -423,6 +433,24 @@ def validate(cfg: Config) -> Config:
         raise ConfigError("[whisper] threads must be at least 1.", "8 is the default.")
     if cfg.whisper.max_restarts < 0:
         raise ConfigError("[whisper] max_restarts cannot be negative.", "3 is the default.")
+    if cfg.whisper.idle_release_minutes < 0:
+        raise ConfigError(
+            "[whisper] idle_release_minutes cannot be negative.",
+            "5 gives the graphics card its memory back after five minutes "
+            "without dictating. 0 never gives it back, which is how dictate "
+            "used to behave.",
+        )
+    if 0 < cfg.whisper.idle_release_minutes < MIN_IDLE_RELEASE_MINUTES:
+        # Below about half a minute the model would be unloaded between one
+        # sentence and the next, so every utterance would pay the ~2 s load that
+        # keeping it resident exists to avoid (docs/DESIGN.md, constraint 1).
+        raise ConfigError(
+            f"[whisper] idle_release_minutes is {cfg.whisper.idle_release_minutes}, "
+            f"which would unload the model between one sentence and the next and "
+            f"make every dictation about two seconds slower.",
+            f"Use {MIN_IDLE_RELEASE_MINUTES} or more (5 is the default), or 0 to "
+            f"keep the model loaded for as long as dictate is running.",
+        )
     if cfg.whisper.flash_attn:
         # Not refused - it is the user's machine - but they get told.
         pass

@@ -15,18 +15,59 @@ from dictate.platform.base import OverlayState, TargetWindow
 
 
 class FakeBatch:
-    """Stands in for whisper-server."""
+    """Stands in for whisper-server.
+
+    The gates exist for the residency tests: loading the real model takes
+    seconds, and the interesting cases are all about what happens *during* that
+    load or that shutdown. Holding a gate closed puts the wrapper in exactly
+    that state for as long as the test needs, with no sleeping and no guessing.
+    """
 
     def __init__(self, text: str = "Hello world.", error: Exception | None = None) -> None:
         self.text = text
         self.error = error
         self.calls: list[tuple[int, int]] = []
         self.healthy = True
+        self.running = False
+        #: Counts, so a test can prove nothing was started twice.
+        self.starts = 0
+        self.stops = 0
+        #: Set an Event here and start()/stop()/transcribe() block until it is set.
+        self.start_gate: threading.Event | None = None
+        self.stop_gate: threading.Event | None = None
+        self.transcribe_gate: threading.Event | None = None
+        #: Raised by start(), to stand in for a model that will not come back.
+        self.start_error: Exception | None = None
+        #: Signalled as soon as start()/transcribe() is entered, before the gate.
+        self.start_entered = threading.Event()
+        self.transcribe_entered = threading.Event()
 
     def start(self) -> None:
+        self.start_entered.set()
+        if self.start_gate is not None:
+            self.start_gate.wait(timeout=30)
+        if self.start_error is not None:
+            raise self.start_error
+        if self.running:
+            # The real backend would no-op here; this is louder on purpose,
+            # because two live whisper-servers on one port is the failure the
+            # residency tests are looking for.
+            raise AssertionError("start() while already running: two servers")
+        self.starts += 1
+        self.running = True
         self.healthy = True
 
     def stop(self) -> None:
+        # ManagedProcess.stop() signals a start that is still waiting for the
+        # server to become healthy, and that is what keeps shutdown bounded
+        # while a load is in flight. Model that here rather than deadlocking.
+        if self.start_gate is not None:
+            self.start_gate.set()
+        if self.stop_gate is not None:
+            self.stop_gate.wait(timeout=30)
+        if self.running:
+            self.stops += 1
+        self.running = False
         self.healthy = False
 
     def is_healthy(self) -> bool:
@@ -37,6 +78,9 @@ class FakeBatch:
         return "fake batch transcriber"
 
     def transcribe(self, pcm: bytes, sample_rate: int) -> str:
+        self.transcribe_entered.set()
+        if self.transcribe_gate is not None:
+            self.transcribe_gate.wait(timeout=30)
         self.calls.append((len(pcm), sample_rate))
         if self.error:
             raise self.error
