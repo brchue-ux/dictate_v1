@@ -829,8 +829,18 @@ function Invoke-Verify {
             }
         } elseif ($run.Output -notmatch '(?i)country') {
             Add-VerifyProblem 'Transcription ran, but what came back does not match the test clip - the words should include "ask not what your country can do for you".'
-            Write-Detail 'That usually means a damaged model file. Delete it and run setup again:'
-            Write-Detail ("  Remove-Item '" + (Join-Path (Get-ModelsDir) $WhisperModel.Name) + "'")
+            Write-Detail 'There are two things this can be, in the order worth trying:'
+            Write-Detail ''
+            Write-Detail '1. A damaged model file. Delete it and run setup again - it will'
+            Write-Detail '   download it afresh and check it this time:'
+            Write-Detail ("     Remove-Item '" + (Join-Path (Get-ModelsDir) $WhisperModel.Name) + "'")
+            Write-Detail ''
+            Write-Detail '2. A bad version of whisper.cpp. Graphics-card versions of it do'
+            Write-Detail '   occasionally ship a bug that turns transcripts into nonsense, and'
+            Write-Detail '   they are usually fixed within days. Go back to the last version'
+            Write-Detail '   that worked - the number is in whisper-build.txt next to this'
+            Write-Detail '   folder, and setup printed it when it built:'
+            Write-Detail '     powershell -ExecutionPolicy Bypass -File setup.ps1 -Only build,verify -Ref <that number> -Rebuild'
         } else {
             Write-Ok 'The test clip came back as the right words.'
             $seconds = [regex]::Match($run.Output, 'best of \d+\s+([0-9.]+)s')
