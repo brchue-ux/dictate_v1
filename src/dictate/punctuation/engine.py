@@ -33,10 +33,10 @@ MARK OR WORD
 ------------
 "the comma goes here" must not become "the , goes here". The rule, in full, is
 `_is_guarded` below: a mark phrase is a WORD when the word in front of it is one
-of the file's `guard_words` ("a", "an", "the", "this", "that", "these",
-"those", plus whatever the user adds) with no sentence break in between. It is a
-MARK everywhere else. Plurals never match at all, because a phrase is matched
-whole-word: "commas", "periods" and "question marks" are simply not the phrase.
+of the file's `guard_words` - determiners and possessives, as shipped - with no
+sentence break in between. It is a MARK everywhere else. Plurals never match at
+all, because a phrase is matched whole-word: "commas", "periods" and "question
+marks" are simply not the phrase.
 
 That is a blunt rule and it is wrong in both directions sometimes; the cases it
 gets wrong are written out in `tests/test_punctuation.py::WhereTheRuleIsWrong`

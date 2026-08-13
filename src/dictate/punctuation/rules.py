@@ -84,10 +84,6 @@ class PunctuationRules:
         default_factory=lambda: ["a", "an", "the", "this", "that", "these", "those"]
     )
 
-    @property
-    def enabled_marks(self) -> list[Mark]:
-        return self.marks
-
     def phrases(self) -> list[tuple[tuple[str, ...], Mark]]:
         """Every (phrase, mark) pair, longest phrase first.
 
