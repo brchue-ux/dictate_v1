@@ -388,7 +388,6 @@ jobs:
       # source archive, the private repository being visible at all - is
       # identical, and is genuinely proved below.
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      DICTATE_STATE_DIR: ${{ runner.temp }}\dictate-state
     steps:
       - uses: actions/checkout@v4
         with:
@@ -404,6 +403,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
+          # Set here rather than in the job's `env:`, where the `runner` context
+          # is not available and the whole workflow fails to start.
+          "DICTATE_STATE_DIR=$env:RUNNER_TEMP\dictate-state" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $install = "$env:RUNNER_TEMP\dictate-install"
           robocopy . $install /E /XD .git /NFL /NDL /NJH /NJS /NP | Out-Null
           # robocopy uses 0-7 for success and 8 upwards for failure.
