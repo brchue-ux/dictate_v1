@@ -221,8 +221,38 @@ jobs:
             taskkill /PID $ids.child /T /F 2>&1 | Out-String | Write-Host
             throw "the child ($($ids.child)) outlived its parent - an orphan is still possible"
           }
-          if (Test-PortHeld 8352) { throw 'the child is gone but something is still holding the port' }
-          Write-Host 'The parent was killed without any cleanup, and Windows ended the child with it.'
+          # The port gets the same bounded wait the process just got, and for
+          # the same reason. A process disappears from Get-Process the moment it
+          # is terminated, but Windows finishes tearing its listening socket
+          # down a moment later, so probing the port ONCE at that instant is a
+          # race - and it is a race this test loses more often the FASTER the
+          # job object works, which is exactly the wrong way round for a check
+          # whose job is to prove the job object works. It failed here twice in
+          # five minutes on two unrelated branches, both times about 0.3s after
+          # the child was confirmed up and holding the port, with the child
+          # already correctly dead. Nothing about the containment was wrong on
+          # either run.
+          #
+          # "Within seconds" is also the claim being made - the summary below
+          # says so, and what matters to the product owner is that the next
+          # dictate can bind the port, not which microsecond it came free.
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          $free = $false
+          $deadline = (Get-Date).AddSeconds(20)
+          while ((Get-Date) -lt $deadline) {
+            if (-not (Test-PortHeld 8352)) { $free = $true; break }
+            Start-Sleep -Milliseconds 250
+          }
+          if (-not $free) {
+            # Say who has it. A socket the kernel has not finished closing has
+            # no owning process left to name; a real orphan does, and that is
+            # the difference between this check being noise and being the thing
+            # that catches the bug coming back.
+            Write-Host 'port 8352 is still held 20s after the child died. netstat says:'
+            netstat -ano | Select-String ':8352' | Out-String | Write-Host
+            throw 'the child is gone but something is still holding the port'
+          }
+          Write-Host "The parent was killed without any cleanup, Windows ended the child with it, and port 8352 came free $([int]$sw.ElapsedMilliseconds) ms later."
           exit 0
 
       - name: Leave nothing behind even if a step above failed
