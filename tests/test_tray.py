@@ -157,9 +157,12 @@ class WhatItOffers(unittest.TestCase):
     def test_a_history_action_that_was_never_supplied_does_nothing(self):
         """A menu id from before the history was turned off must not reach a
         handler that is not there - least of all the delete one."""
-        actions = tray.TrayActions(stop=lambda: None, restart=lambda: None,
-                                   open_log=lambda: None)
-        self.assertFalse(actions.invoke(tray.HISTORY_DELETE))
+        bare = tray.TrayActions(stop=lambda: None, restart=lambda: None,
+                                open_log=lambda: None,
+                                check_updates=lambda: None,
+                                update_now=lambda: None)
+        self.assertFalse(bare.invoke(tray.HISTORY_DELETE))
+        self.assertFalse(bare.invoke(tray.HISTORY))
 
 
 class WhatItLooksLike(unittest.TestCase):
