@@ -129,6 +129,309 @@ Test-Case 'sizes and durations read as English' {
 
 # ===========================================================================
 Write-Host ''
+Write-Host 'Finding the Vulkan SDK' -ForegroundColor Cyan
+# ===========================================================================
+#
+# These cover the bug that stopped the product owner installing: setup told him
+# the SDK had installed and to restart his PC, when winget had in fact refused
+# to install anything and there was no SDK on the machine at all. "Is
+# VULKAN_SDK set?" cannot tell those two states apart; everything below is
+# about telling them apart by looking for the SDK itself.
+
+function New-FakeVulkanSdk {
+    <# The shape of a real SDK on disk: the two files CMake's FindVulkan needs,
+       plus the shader compiler the whisper.cpp build needs. #>
+    param([string]$Path, [switch]$NoShaderCompiler, [switch]$Empty)
+    New-Item -ItemType Directory -Force -Path $Path | Out-Null
+    if ($Empty) { return $Path }
+    New-Item -ItemType Directory -Force -Path (Join-Path $Path 'Include\vulkan') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $Path 'Lib') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $Path 'Bin') | Out-Null
+    Set-Content -LiteralPath (Join-Path $Path 'Include\vulkan\vulkan.h') -Value '/* header */' -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $Path 'Lib\vulkan-1.lib') -Value 'lib' -Encoding ASCII
+    if (-not $NoShaderCompiler) {
+        Set-Content -LiteralPath (Join-Path $Path 'Bin\glslc.exe') -Value 'exe' -Encoding ASCII
+    }
+    return $Path
+}
+
+Test-Case 'a real SDK folder is recognised and an empty one is not' {
+    $good = New-FakeVulkanSdk (New-TempPath 'sdk-good')
+    Assert-True (Test-VulkanSdkDir $good) 'a real SDK'
+    Assert-True (Test-VulkanShaderCompiler $good) 'glslc found'
+
+    # This is the case that mattered: a folder that exists but is not an SDK.
+    # Test-Path alone says yes to it, which is how a stale VULKAN_SDK pointing
+    # at nothing useful could read as "installed".
+    $empty = New-FakeVulkanSdk (New-TempPath 'sdk-empty') -Empty
+    Assert-False (Test-VulkanSdkDir $empty) 'an empty folder is not an SDK'
+    Assert-False (Test-VulkanSdkDir (New-TempPath 'sdk-not-there')) 'a missing folder is not an SDK'
+    Assert-False (Test-VulkanSdkDir '') 'an unset path is not an SDK'
+}
+
+Test-Case 'an SDK without the shader compiler is still an SDK, and says so separately' {
+    $partial = New-FakeVulkanSdk (New-TempPath 'sdk-no-glslc') -NoShaderCompiler
+    Assert-True (Test-VulkanSdkDir $partial) 'headers and library are there'
+    Assert-False (Test-VulkanShaderCompiler $partial) 'but glslc is not'
+}
+
+Test-Case 'the SDK is found on disk with no environment variable involved' {
+    # The whole point of the fix: Windows has published nothing, and the SDK is
+    # still found, because it is right there in the folder its installer uses.
+    $root = New-TempPath 'VulkanSDK-disk'
+    New-FakeVulkanSdk (Join-Path $root '1.3.290.0') | Out-Null
+    $found = Get-VulkanSdkFromDisk -SearchRoots @($root)
+    Assert-Equal (Join-Path $root '1.3.290.0') $found 'found on disk'
+}
+
+Test-Case 'when several SDK versions are installed the newest one wins' {
+    $root = New-TempPath 'VulkanSDK-many'
+    foreach ($version in @('1.3.290.0', '1.4.357.0', '1.4.313.2')) {
+        New-FakeVulkanSdk (Join-Path $root $version) | Out-Null
+    }
+    # A folder that is not an SDK at all must not win by sorting highest.
+    New-FakeVulkanSdk (Join-Path $root '9.9.9.9') -Empty | Out-Null
+    Assert-Equal (Join-Path $root '1.4.357.0') (Get-VulkanSdkFromDisk -SearchRoots @($root)) 'newest real SDK'
+}
+
+Test-Case 'a versioned SDK beats an unversioned folder next to it' {
+    $root = New-TempPath 'VulkanSDK-mixed'
+    New-FakeVulkanSdk (Join-Path $root 'current') | Out-Null
+    New-FakeVulkanSdk (Join-Path $root '1.4.341.1') | Out-Null
+    Assert-Equal (Join-Path $root '1.4.341.1') (Get-VulkanSdkFromDisk -SearchRoots @($root)) 'the installer-made folder'
+}
+
+Test-Case 'an unversioned folder is still found when it is the only SDK there' {
+    $root = New-TempPath 'VulkanSDK-only-current'
+    New-FakeVulkanSdk (Join-Path $root 'current') | Out-Null
+    Assert-Equal (Join-Path $root 'current') (Get-VulkanSdkFromDisk -SearchRoots @($root)) 'the only SDK'
+}
+
+Test-Case 'nothing installed means nothing found - not a guess' {
+    $root = New-TempPath 'VulkanSDK-absent'
+    Assert-True ($null -eq (Get-VulkanSdkFromDisk -SearchRoots @($root))) 'no SDK on disk'
+    Assert-True ($null -eq (Resolve-VulkanSdk -SearchRoots @($root) -Sources @('disk'))) 'and none resolved'
+}
+
+Test-Case 'the session variable is used when it points at a real SDK, and ignored when it does not' {
+    $good = New-FakeVulkanSdk (New-TempPath 'sdk-session')
+    $empty = New-FakeVulkanSdk (New-TempPath 'sdk-session-stale') -Empty
+    $before = $env:VULKAN_SDK
+    $beforeAlt = $env:VK_SDK_PATH
+    try {
+        $env:VULKAN_SDK = $good
+        $env:VK_SDK_PATH = ''
+        $found = Resolve-VulkanSdk -Sources @('session')
+        Assert-True ($null -ne $found) 'a real SDK in the variable is used'
+        Assert-Equal $good $found.Path 'path'
+        Assert-Equal 'session' $found.Source 'source'
+
+        # A variable left pointing at a folder that is not an SDK must not count
+        # as an install.
+        $env:VULKAN_SDK = $empty
+        Assert-True ($null -eq (Resolve-VulkanSdk -Sources @('session'))) 'a stale variable is not an install'
+    } finally {
+        $env:VULKAN_SDK = $before
+        $env:VK_SDK_PATH = $beforeAlt
+    }
+}
+
+Test-Case 'the disk is searched when the variable is unset, which is the case that was broken' {
+    $root = New-TempPath 'VulkanSDK-unset'
+    $sdk = New-FakeVulkanSdk (Join-Path $root '1.4.357.0')
+    $before = $env:VULKAN_SDK
+    $beforeAlt = $env:VK_SDK_PATH
+    try {
+        $env:VULKAN_SDK = ''
+        $env:VK_SDK_PATH = ''
+        $found = Resolve-VulkanSdk -SearchRoots @($root) -Sources @('session', 'disk')
+        Assert-True ($null -ne $found) 'found without any variable set'
+        Assert-Equal $sdk $found.Path 'path'
+        Assert-Equal 'disk' $found.Source 'source'
+        # Named How, not Where: a hashtable's `.Where` resolves to PowerShell's
+        # built-in Where member rather than the key, which would have put a
+        # method reference into a message meant for the product owner.
+        Assert-True ($found.How.Length -gt 0) 'it can say how it found it'
+    } finally {
+        $env:VULKAN_SDK = $before
+        $env:VK_SDK_PATH = $beforeAlt
+    }
+}
+
+Test-Case 'the session is pointed at a found SDK rather than the user being sent to reboot' {
+    $sdk = New-FakeVulkanSdk (New-TempPath 'sdk-adopt')
+    $before = $env:VULKAN_SDK
+    $beforeAlt = $env:VK_SDK_PATH
+    $beforePath = $env:PATH
+    try {
+        $env:VULKAN_SDK = ''
+        $env:VK_SDK_PATH = ''
+        Set-VulkanSdkForSession -Path $sdk
+        Assert-Equal $sdk $env:VULKAN_SDK 'VULKAN_SDK set'
+        Assert-Equal $sdk $env:VK_SDK_PATH 'VK_SDK_PATH set too - the SDK sets both'
+        Assert-Contains $env:PATH (Join-Path $sdk 'Bin')
+        # Running setup twice must not put the same folder on PATH twice.
+        Set-VulkanSdkForSession -Path $sdk
+        $hits = @(($env:PATH -split ';') | Where-Object { $_ -and $_.TrimEnd('\') -ieq (Join-Path $sdk 'Bin') })
+        Assert-Equal 1 $hits.Count 'Bin appears once'
+    } finally {
+        $env:VULKAN_SDK = $before
+        $env:VK_SDK_PATH = $beforeAlt
+        $env:PATH = $beforePath
+    }
+}
+
+Test-Case 'the registry and installed-programs routes answer without throwing' {
+    # Both read the real machine, so what they return depends on it. What is
+    # tested is that they answer at all rather than blowing up the install, and
+    # that whatever they do return is a real SDK.
+    foreach ($source in @('registry', 'programs')) {
+        $found = Resolve-VulkanSdk -Sources @($source)
+        if ($null -ne $found) { Assert-True (Test-VulkanSdkDir $found.Path) "$source returned a real SDK" }
+    }
+}
+
+# ===========================================================================
+Write-Host ''
+Write-Host 'Reporting what winget actually did' -ForegroundColor Cyan
+# ===========================================================================
+
+Test-Case 'winget exit codes are shown in both the forms they get looked up in' {
+    # PowerShell hands back the signed number; Microsoft document them in hex.
+    # This is the code the product owner's machine really returned.
+    Assert-Contains (Format-ExitCode -1978335212) '-1978335212'
+    Assert-Contains (Format-ExitCode -1978335212) '0x8A150014'
+    Assert-Contains (Format-ExitCode 0) '0x00000000'
+}
+
+Test-Case 'the reason winget failed is pulled out of its output' {
+    $output = @(
+        'Found Vulkan SDK [KhronosGroup.VulkanSDK] Version 1.4.357.0',
+        '  --------------------------  100%',
+        'Downloading https://sdk.lunarg.com/sdk/download/1.4.357.0/windows/vulkan_sdk.exe',
+        'Successfully verified installer hash',
+        'Starting package install...',
+        'Installer failed with exit code: 1603'
+    ) -join "`r`n"
+    Assert-Equal 'Installer failed with exit code: 1603' (Get-WingetFailureSummary -Output $output) 'the telling line'
+}
+
+Test-Case "winget's no-such-package answer survives to the screen" {
+    # This is exactly what his machine printed for LunarG.VulkanSDK.
+    $output = "   -`r   \`r   |`r`nNo package found matching input criteria.`r`n"
+    Assert-Equal 'No package found matching input criteria.' (Get-WingetFailureSummary -Output $output) 'the answer'
+    Assert-Equal '' (Get-WingetFailureSummary -Output '') 'nothing in, nothing out'
+    Assert-Equal '' (Get-WingetFailureSummary -Output "  ---`r`n  50%`r`n") 'progress bars are not a reason'
+}
+
+Test-Case 'a failed install is reported as a failed install, with the evidence' {
+    $note = Get-WingetFailureNote -Name 'Vulkan SDK' -Id 'LunarG.VulkanSDK' `
+        -ExitCode -1978335212 -Said 'No package found matching input criteria.'
+    Assert-Contains $note 'did not install'
+    Assert-Contains $note 'LunarG.VulkanSDK'
+    Assert-Contains $note '0x8A150014'
+    Assert-Contains $note 'No package found matching input criteria.'
+    # And it explains what that particular answer means, because "no package
+    # found" is winget saying the identifier is wrong - not that the PC is.
+    Assert-Contains $note 'identifier'
+    # It must never claim the opposite of what happened.
+    if ($note -match '(?i)installed, but|has not made it visible|restart') {
+        throw "the failure note suggested the SDK installed: $note"
+    }
+}
+
+# ===========================================================================
+Write-Host ''
+Write-Host 'What the user is told when the SDK is genuinely absent' -ForegroundColor Cyan
+# ===========================================================================
+
+Test-Case 'the not-installed message says not installed, and never says restart' {
+    $report = Get-VulkanSdkMissingReport -WingetId 'KhronosGroup.VulkanSDK' `
+        -WingetExitCode -1978335212 -WingetSaid 'No package found matching input criteria.' `
+        -SearchedRoots @('C:\VulkanSDK')
+
+    Assert-Contains $report.Problem 'not installed on this PC'
+    Assert-Contains $report.Problem 'C:\VulkanSDK'
+    Assert-Contains $report.Problem 'KhronosGroup.VulkanSDK'
+    Assert-Contains $report.Problem 'No package found matching input criteria.'
+
+    # The defect being fixed, asserted directly: this message used to claim the
+    # SDK had installed and ask for a reboot that could never help.
+    if ($report.Problem -match '(?i)installed, but Windows|has not made it visible') {
+        throw "the message still claims the SDK installed: $($report.Problem)"
+    }
+    # The next action may only MENTION restarting in order to say it is
+    # unnecessary. The instruction that sent him round the loop - "Restart the
+    # PC and run this setup again" - must be gone.
+    if ($report.NextAction -match '(?i)restart the pc[\s,]*(and|then)\s+run') {
+        throw "the next action still tells the user to restart the PC: $($report.NextAction)"
+    }
+    Assert-Contains $report.NextAction 'do NOT need to restart'
+}
+
+Test-Case 'the not-installed message gives a route a non-developer can follow' {
+    $report = Get-VulkanSdkMissingReport -SearchedRoots @('C:\VulkanSDK')
+    Assert-Contains $report.NextAction 'https://vulkan.lunarg.com/sdk/home#windows'
+    Assert-Contains $report.NextAction 'https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe'
+    Assert-Contains $report.NextAction 'vulkan_sdk.exe'
+    Assert-Contains $report.NextAction 'run this setup again'
+    # Numbered steps, not "go and figure it out".
+    Assert-Contains $report.NextAction '1.'
+    Assert-Contains $report.NextAction '4.'
+    Assert-Contains $report.NextAction 'Everything already installed and downloaded is kept.'
+}
+
+Test-Case 'when the direct download failed too, the message says so as well' {
+    $report = Get-VulkanSdkMissingReport -WingetId 'KhronosGroup.VulkanSDK' -WingetExitCode 1 `
+        -WingetSaid 'Installer failed with exit code: 1603' `
+        -DirectReason 'the download from LunarG did not finish (the remote name could not be resolved)'
+    Assert-Contains $report.Problem 'straight from LunarG'
+    Assert-Contains $report.Problem 'could not be resolved'
+    # Both attempts are named, so it is clear what was tried.
+    Assert-Contains $report.Problem 'Installer failed with exit code: 1603'
+}
+
+Test-Case 'the LunarG download addresses are the ones LunarG publish' {
+    Assert-Equal 'https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe' `
+        (Get-LunarGSdkInstallerUri) 'the latest-installer address'
+    Assert-Equal 'https://sdk.lunarg.com/sdk/download/1.4.357.0/windows/vulkan_sdk.exe' `
+        (Get-LunarGSdkInstallerUri -Version '1.4.357.0') 'a pinned-version address'
+    Assert-Equal 'https://vulkan.lunarg.com/sdk/latest/windows.txt' (Get-LunarGSdkVersionUri) 'the version address'
+}
+
+Test-Case "a version answer that is not a version is not used to build a URL" {
+    # If LunarG's endpoint ever answers with an error page or a redirect, the
+    # "latest" address is used rather than a nonsense one.
+    Assert-Equal '1.4.357.0' (ConvertTo-LunarGSdkVersion "1.4.357.0`n") 'a real answer'
+    Assert-Equal '1.3.290' (ConvertTo-LunarGSdkVersion '  1.3.290  ') 'three parts is fine'
+    Assert-Equal '' (ConvertTo-LunarGSdkVersion '<html><body>404</body></html>') 'an error page'
+    Assert-Equal '' (ConvertTo-LunarGSdkVersion '') 'nothing at all'
+    Assert-Equal 'https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe' `
+        (Get-LunarGSdkInstallerUri -Version (ConvertTo-LunarGSdkVersion 'not a version')) 'falls back to latest'
+}
+
+Test-Case 'a downloaded installer is not run unless Windows vouches for it' {
+    # Nothing downloaded from the internet gets run as administrator on the
+    # strength of the URL alone. A truncated download fails this check too,
+    # which is what stands in for the SHA-256 a "latest" URL cannot have.
+    $unsigned = New-TempPath 'pretend-installer.exe'
+    Set-Content -LiteralPath $unsigned -Value 'not really an installer' -Encoding ASCII
+    $result = Test-InstallerSignature -Path $unsigned -ExpectedSubject 'LunarG'
+    Assert-False $result.Ok 'an unsigned file is refused'
+    Assert-True ($result.Reason.Length -gt 0) 'and it says why'
+
+    $missing = Test-InstallerSignature -Path (New-TempPath 'never-downloaded.exe') -ExpectedSubject 'LunarG'
+    Assert-False $missing.Ok 'a file that is not there is refused'
+}
+
+Test-Case 'a signature by the wrong publisher is refused' {
+    Assert-True (Test-SignerSubject -Subject 'CN=LunarG, Inc., O=LunarG, C=US' -Expected 'LunarG') 'the right publisher'
+    Assert-False (Test-SignerSubject -Subject 'CN=Some Other Company' -Expected 'LunarG') 'the wrong publisher'
+    Assert-False (Test-SignerSubject -Subject '' -Expected 'LunarG') 'no publisher at all'
+}
+
+# ===========================================================================
+Write-Host ''
 Write-Host 'The config file' -ForegroundColor Cyan
 # ===========================================================================
 
