@@ -1,6 +1,8 @@
 """Command line.
 
     dictate run           hold the hotkey and talk (the actual product)
+    dictate stop          ask the copy that is running to shut down cleanly
+    dictate autostart     start it (or stop it) starting itself when you log in
     dictate doctor        check everything the app needs, and say what to fix
     dictate init          write a config file you can edit
     dictate devices       list the microphones dictate can see
@@ -10,6 +12,9 @@
 
 `doctor`, `init` and `clean` all work on any platform, on purpose: they are the
 commands you want when the app will not start.
+
+Exit codes: 0 fine, 1 something is missing, 2 an error with a remedy attached,
+3 dictate is already running, 130 Ctrl+C.
 """
 
 from __future__ import annotations
@@ -22,10 +27,14 @@ import time
 from pathlib import Path
 
 from . import (
-    __version__, app as app_mod, config as config_mod, doctor as doctor_mod,
-    pipeline as pipeline_mod,
+    __version__, app as app_mod, autostart as autostart_mod, config as config_mod,
+    doctor as doctor_mod, instance as instance_mod, pipeline as pipeline_mod,
 )
-from .errors import DictateError
+from .errors import AlreadyRunningError, DictateError
+
+#: `dictate run` while one is already running. Not a crash and not a success:
+#: it did not start what was asked for, and it says why.
+EXIT_ALREADY_RUNNING = 3
 
 def _template_dir() -> Path | None:
     """Find the shipped `config/` templates.
@@ -75,17 +84,76 @@ def _load_config(args: argparse.Namespace) -> config_mod.Config:
 def cmd_run(args: argparse.Namespace) -> int:
     from .logging_setup import configure
 
-    cfg = _load_config(args)
-    configure(cfg.logging.level, cfg.logging.file)
+    if getattr(args, "autostart", False):
+        return autostart_mod.run_at_logon(args.config)
 
-    results = doctor_mod.collect(cfg)
-    failures = [r for r in results if r.status is doctor_mod.Status.FAIL]
-    if failures:
-        _err("dictate cannot start yet:\n")
-        _err(doctor_mod.format_report(failures))
-        _err("\nRun `dictate doctor` for the full check.")
-        return 2
-    return app_mod.run(cfg, console=_err)
+    # Before anything is loaded and long before the hotkey or the port is taken:
+    # two copies would fight over both, and the resulting failure is baffling.
+    lock = instance_mod.InstanceLock(started_by="hand")
+    try:
+        lock.acquire()
+    except AlreadyRunningError as exc:
+        _err(f"\n{exc.report()}\n")
+        return EXIT_ALREADY_RUNNING
+
+    try:
+        cfg = _load_config(args)
+        configure(cfg.logging.level, cfg.logging.file)
+
+        results = doctor_mod.collect(cfg)
+        failures = [r for r in results if r.status is doctor_mod.Status.FAIL]
+        if failures:
+            _err("dictate cannot start yet:\n")
+            _err(doctor_mod.format_report(failures))
+            _err("\nRun `dictate doctor` for the full check.")
+            return 2
+        return app_mod.run(cfg, console=_err)
+    finally:
+        lock.release()
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    """Ask the running copy to shut down - politely, because it owns a
+    whisper-server child that holds the transcription port, and 1.6 GB of VRAM
+    whenever the model is resident. Killing the parent strands it."""
+    holder = instance_mod.running_instance()
+    if holder is None:
+        _out("dictate is not running.")
+        return 0
+
+    _out(f"asking dictate to stop ({holder.describe()})…")
+    instance_mod.request_stop()
+    if instance_mod.wait_until_stopped(args.timeout):
+        _out("dictate has stopped, and whisper-server with it - nothing of it is "
+             "left running.")
+        if holder.started_by == "logon":
+            _out("")
+            _out("It will start again the next time you log in. To prevent that:")
+            _out("  dictate autostart disable")
+        return 0
+
+    instance_mod.clear_stop_request()
+    _err(f"dictate did not stop within {args.timeout:.0f} seconds.")
+    _err("")
+    _err("It may be finishing a transcription. Run this again, and if it still")
+    _err("will not go, end it in Task Manager - look for pythonw.exe or")
+    _err("python.exe, and for whisper-server.exe, which has to go too.")
+    return 1
+
+
+def cmd_autostart(args: argparse.Namespace) -> int:
+    action = getattr(args, "autostart_command", None)
+    if action == "enable":
+        for line in autostart_mod.enable(_load_config(args), config_path=args.config):
+            _out(line)
+        return 0
+    if action == "disable":
+        for line in autostart_mod.disable():
+            _out(line)
+        return 0
+    for line in autostart_mod.status_lines():
+        _out(line)
+    return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -289,7 +357,23 @@ def build_parser() -> argparse.ArgumentParser:
                                          "(default: %%APPDATA%%\\dictate\\dictate.toml)")
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("run", help="start dictating").set_defaults(func=cmd_run)
+    p_run = sub.add_parser("run", help="start dictating")
+    p_run.add_argument("--autostart", action="store_true",
+                       help=argparse.SUPPRESS)  # how the logon task calls it
+    p_run.set_defaults(func=cmd_run)
+
+    p_stop = sub.add_parser("stop", help="stop the copy that is running")
+    p_stop.add_argument("--timeout", type=float, default=20.0,
+                        help="seconds to wait for it to go (default: 20)")
+    p_stop.set_defaults(func=cmd_stop)
+
+    p_auto = sub.add_parser("autostart", help="start dictate when you log in")
+    p_auto.set_defaults(func=cmd_autostart)
+    auto_sub = p_auto.add_subparsers(dest="autostart_command")
+    auto_sub.add_parser("enable", help="start dictate when you log in")
+    auto_sub.add_parser("disable", help="stop doing that, and leave nothing behind")
+    auto_sub.add_parser("status", help="is it on, is it running, and did it start")
+
     sub.add_parser("doctor", help="check the setup and say what to fix").set_defaults(
         func=cmd_doctor)
     sub.add_parser("devices", help="list microphones").set_defaults(func=cmd_devices)

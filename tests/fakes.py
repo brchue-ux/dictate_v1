@@ -167,6 +167,9 @@ class FakeOverlay:
         #: window captured at press is what decides which monitor is used.
         self.targets: list[TargetWindow | None] = []
         self._lock = threading.Lock()
+        #: The real overlay's close() is what ends run_forever and so ends the
+        #: app. An Event rather than a flag so a test can wait for it.
+        self.closed = threading.Event()
 
     def set_state(self, state: OverlayState, text: str = "",
                   target: TargetWindow | None = None) -> None:
@@ -175,7 +178,7 @@ class FakeOverlay:
             self.targets.append(target)
 
     def close(self) -> None:
-        pass
+        self.closed.set()
 
     @property
     def states(self) -> list[OverlayState]:

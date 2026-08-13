@@ -98,7 +98,38 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   one of those two checks.
 - **CI has no GPU and never will.** Keep "it compiles and the tests pass" separate from
   "the GPU path runs" in the workflow, in the README, and in any PR description. A
-  green tick is not GPU verification.
+  green tick is not GPU verification. The same applies to the logon task: CI proves
+  Windows *accepts* it, never that it fires — a runner never logs on.
+- **Starting at logon must never become a Windows service.** Services run in session 0
+  with no interactive desktop, so the overlay cannot be shown and synthesised
+  keystrokes reach nothing — it would install and start and do nothing. It is a
+  per-user Task Scheduler logon task; `src/dictate/autostart.py` carries the reasoning
+  and the settings that are load-bearing.
+- **Only one copy may run**, or two hooks fight over the hotkey and two servers over
+  the port. `src/dictate/instance.py` holds an exclusive byte-range lock for the life
+  of the process, so the OS releases it on any kind of death and there is no such
+  thing as a stale lock. It is plain stdlib and works on Linux too, which is what lets
+  `tests/test_instance.py` contend for it with a real second process anywhere.
+- **`dictate stop` asks; it never kills.** dictate owns a whisper-server child that
+  holds the transcription port, and ~1.6 GB of VRAM whenever the model is resident.
+  Killing the parent orphans it. Anything that stops the app has to go through the
+  same clean shutdown Ctrl+C uses.
+- **Nothing under test may reach a blocking Win32 call.** `MessageBoxW` in
+  `platform/windows/notify.py` waits for a click, and on a CI runner nobody ever
+  clicks: the suite hung for hours instead of failing. `tests/test_autostart.py`
+  patches `_notify_failure` for the whole logon-start class rather than relying on
+  each test's config to turn it off — the test that found this was the one whose
+  config is deliberately unparseable, so it could not read `notify_on_failure` at
+  all. CI jobs carry `timeout-minutes`, and the suite runs under `python -u` so a
+  hang names the test it is in rather than losing it in a buffer.
+- **A modal dialog must never be shown while holding the instance lock.** It can sit
+  there until the next morning, and `dictate run` would answer "already running" for
+  a copy that gave up hours ago.
+- **What autostart costs is `[whisper] idle_release_minutes`, not "1.6 GB all day".**
+  Since the idle release, leaving the logon task on holds no VRAM between dictation
+  sessions. Anything that states the cost — the README, `autostart enable`'s output,
+  the example config — reads that setting rather than asserting a number, because
+  the honest answer is different when it is 0.
 
 ## Maintaining this file
 

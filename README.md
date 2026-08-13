@@ -69,6 +69,51 @@ dictate run
 
 Hold **Ctrl + Alt + Space**, speak, let go. Ctrl+C in that window to quit.
 
+### Or have it start by itself when you log in
+
+```powershell
+dictate autostart enable
+```
+
+From then on it is just there: about half a minute after you reach the desktop,
+without a window appearing, ready for the hotkey. You never type anything to
+start dictating again.
+
+```powershell
+dictate autostart status     # is it on, is it running, and did it start?
+dictate stop                 # stop the copy that is running, now
+dictate autostart disable    # never mind, go back to how it was
+```
+
+**What it costs.** Almost nothing while you are not dictating. The 1.6 GB of
+graphics memory is handed back after five idle minutes either way — see [your
+graphics card is only busy while you are
+dictating](#your-graphics-card-is-only-busy-while-you-are-dictating) — so
+leaving this on is not the same as leaving that memory tied up all day, and
+there is no reason to turn it off before a game. What stays is one background
+Python process, a few tens of megabytes of ordinary memory, waiting for a
+keypress.
+
+The one case where it does cost you the card: if you have set
+`idle_release_minutes = 0` to keep the model loaded permanently, then starting
+at logon means it is loaded from logon. Then it *is* 1.6 GB all day, and
+`dictate autostart disable` — or setting that back to 5 — is the remedy.
+
+Two other things worth knowing:
+
+* **Only one copy ever runs.** If autostart already has it and you type
+  `dictate run`, the second one tells you which copy is already running and
+  stops, rather than quietly fighting it for the hotkey.
+* **If it cannot start at logon, it says so.** It waits and tries again a few
+  times first — at logon the graphics driver may still be loading — and if it
+  still cannot, it puts a message on screen and writes the reason to
+  `%LOCALAPPDATA%\dictate\autostart.log`. `dictate autostart status` prints that
+  reason back to you. Nothing disappears into a window that closed.
+
+Turning it off is one command and leaves nothing behind: it is a single Windows
+scheduled task, which you can also see and delete in Task Scheduler under the
+name `dictate`.
+
 ### If setup stops part way
 
 It is meant to. Setup never carries on past something that went wrong, and the
@@ -110,8 +155,16 @@ cleanup rules, the whisper-server binary, the model file (including whether the
 download was truncated), the port, the caption model, the Python packages and
 your microphones — and puts what to do about each failure at the bottom.
 
+If it is set to start when you log in and did not, run `dictate autostart status`
+as well: it says whether Windows ran it, what it returned, and what went wrong
+the last time it tried.
+
 The full log, including whisper.cpp's own output, goes to the file named under
-`[logging] file` in your config.
+`[logging] file` in your config. The separate, much shorter record of what
+happened at logon is at `%LOCALAPPDATA%\dictate\autostart.log` — separate on
+purpose, because a config file that will not load is one of the things that can
+go wrong at logon, and the report of that cannot live somewhere the config
+points to.
 
 ---
 
@@ -232,7 +285,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 274 tests, run and passing
+### Verified anywhere — 343 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -275,6 +328,16 @@ python -m unittest discover -s tests -t .
   the source: no geometry call in the caption path, no call anywhere in the
   file that could activate the window, and comfortable rather than maximum
   text contrast.
+* **That only one copy can run**, with a second real process contending for the
+  lock — including that a copy killed outright leaves no lock behind, and that
+  the second one is told which copy is already running rather than failing
+  obscurely.
+* **What the logon task says** — that it triggers on this user's logon, runs in
+  his own session without administrator rights, has no execution time limit, and
+  starts the interpreter that has no console window.
+* **That a logon start that fails writes down why**, retries a bounded number of
+  times first, does not retry a broken config file at all, and stands aside when
+  a copy is already running.
 * That the package ships no test doubles.
 
 ### Verified on real Windows — by CI, on every change
@@ -306,7 +369,14 @@ Windows machines. These are things that used to be on the "never run" list:
 * **That a genuinely absent Vulkan SDK is reported as absent** — CI asserts the
   installer never claims it installed, never asks for a restart, and always
   prints a download address.
-* **The 274 tests above, on Windows** as well as on Linux.
+* **That Windows Task Scheduler accepts the logon task and removing it leaves
+  nothing behind.** CI runs the real `dictate autostart enable`, reads it back
+  with `dictate autostart status`, then `disable`s it and checks Windows agrees
+  it is gone. What that does *not* prove is the part that needs a logon — see
+  below.
+* **The 343 tests above, on Windows** as well as on Linux — which is where the
+  single-instance lock is exercised against Windows' own byte-range locking
+  rather than Linux's `flock`.
 
 ### Still not verified — needs this actual PC
 
@@ -359,6 +429,17 @@ misbehaves.
 * **The global hotkey**, including whether press/release feels right in practice.
 * **Microphone capture** through PortAudio.
 * **Text injection** into real applications — terminals in particular vary.
+* **The logon itself.** CI machines never log on, so nobody has watched the task
+  fire, watched dictate come up in an interactive session, or confirmed that no
+  console window appears on the way. The three things to check the first morning
+  after `dictate autostart enable`: that the hotkey works without you having
+  started anything, that nothing flashed on screen, and that
+  `dictate autostart status` says `last result: 267009 (it is running right
+  now)`.
+* **The message box** that a failed logon start puts on screen. It is one
+  `MessageBoxW` call and it is wrapped so that failing to show it cannot change
+  anything, but it has never been displayed. The log entry behind it is written
+  either way, and that part *is* tested.
 
 If any of it is wrong, `dictate doctor` and the log file are the two things to
 look at, and the failures should be legible rather than silent.

@@ -7,14 +7,15 @@
 # GPU. So this workflow exists to catch everything that can be caught without
 # one, on the same operating system the product actually runs on.
 #
-#   PROVED HERE  the Python package installs on Windows and its 274 tests pass;
+#   PROVED HERE  the Python package installs on Windows and its 343 tests pass;
 #                the installer's own logic works on Windows PowerShell 5.1,
 #                including a download that really is interrupted and resumed;
 #                whisper.cpp compiles from source with the Vulkan backend on
 #                Windows; the binary that comes out really transcribes audio;
 #                dictate's resident-process supervision and HTTP client drive
 #                that real binary end to end; sherpa-onnx loads and produces
-#                live-caption text from real audio.
+#                live-caption text from real audio; Windows Task Scheduler
+#                accepts the logon task and removing it leaves nothing behind.
 #
 #   NOT PROVED   anything about the GPU. GitHub's hosted Windows runners have no
 #                AMD card and no Vulkan driver, so Vulkan legitimately finds zero
@@ -25,7 +26,9 @@
 #                workflow is NOT evidence that the GPU works. Nothing else is
 #                proved about the microphone, the global hotkey, the caption
 #                overlay or pasting into other applications either - those need
-#                a real desktop with a real person at it.
+#                a real desktop with a real person at it. Nor is the LOGON
+#                proved: a runner never logs on, so the task registering is as
+#                far as this can go - nobody here has watched it fire.
 
 name: CI
 
@@ -49,6 +52,12 @@ jobs:
   tests:
     name: Test suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The suite takes about two minutes. This is here so that a test which
+    # HANGS fails in ten rather than sitting for the default six hours: a
+    # blocking Win32 call with nobody to answer it is the way to do that on
+    # Windows, and it happened - a message box on a machine with no one to
+    # click it.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -64,7 +73,10 @@ jobs:
         run: python -m pip install -e .
 
       - name: Run the test suite
-        run: python -m unittest discover -s tests -t . -v
+        # -u so the log names the test that is running rather than holding it in
+        # a buffer. Without it a hang leaves no clue which test hung, because
+        # stdout to a pipe is block-buffered and the last line never arrives.
+        run: python -u -m unittest discover -s tests -t . -v
 
       - name: Command line, on a machine with nothing else installed
         shell: pwsh
@@ -89,12 +101,133 @@ jobs:
           if ($report -notmatch 'What to do:') {
             throw 'dictate doctor did not tell the user what to do about its findings'
           }
+
+          # The commands that answer "is it running?" and "stop it now" have to
+          # work when nothing is running, which is the state someone is in when
+          # they are confused about whether anything is.
+          $status = dictate autostart status 2>&1 | Out-String
+          Write-Host $status
+          if ($status -match 'Traceback') { throw 'autostart status printed a stack trace' }
+          if ($status -notmatch 'running now:') { throw 'autostart status did not say whether dictate is running' }
+          $stop = dictate stop 2>&1 | Out-String
+          Write-Host $stop
+          if ($stop -notmatch 'not running') { throw 'dictate stop did not report that nothing is running' }
           exit 0
+
+  # =========================================================================
+  autostart:
+    name: Logon task (registers on real Windows; nothing here ever logs on)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dictate
+        run: python -m pip install -e .
+
+      - name: Windows Task Scheduler accepts the task dictate registers
+        shell: pwsh
+        run: |
+          # This is the one thing about autostart that cannot be checked off
+          # Windows: whether Task Scheduler will take the XML at all. A typo in
+          # a setting name, a delay in the wrong format or a UserId Windows does
+          # not recognise are all rejected here, and all of them would otherwise
+          # only show up on the product owner's machine.
+          #
+          # It does NOT prove the task fires: a hosted runner never logs on.
+          $ErrorActionPreference = 'Continue'
+          $out = dictate autostart enable 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "dictate autostart enable failed: $out" }
+          if ($out -notmatch '1.6 GB') { throw 'enable did not state what it costs to leave on' }
+
+          # Windows' own view of it, not dictate's. Note that this is NOT the
+          # XML dictate sent: Task Scheduler normalises it, reordering the
+          # document and dropping every element whose value is already the
+          # default - which is why <RunLevel>LeastPrivilege</RunLevel> is not in
+          # what comes back. It is the default, and its absence IS the answer.
+          # So privilege is checked by what must NOT be there instead.
+          $query = schtasks /Query /TN dictate /XML 2>&1 | Out-String
+          Write-Host $query
+          if ($LASTEXITCODE -ne 0) { throw 'the task is not registered with Windows' }
+          foreach ($needed in @('LogonTrigger', 'PT30S', 'InteractiveToken',
+                                'IgnoreNew', 'PT0S', 'pythonw.exe', 'run --autostart')) {
+            if ($query -notmatch [regex]::Escape($needed)) {
+              throw "the registered task lost '$needed' on the way into Windows"
+            }
+          }
+          # The one that would be a real problem: asking for administrator
+          # rights at every logon. Nothing dictate does at run time needs them.
+          if ($query -match 'HighestAvailable') {
+            throw 'the registered task asks to run elevated'
+          }
+
+          # And dictate reading Windows' answer back - the parsing that tells
+          # him "is it on?" and "did it start?".
+          $status = dictate autostart status 2>&1 | Out-String
+          Write-Host $status
+          if ($status -notmatch 'start at logon:  ON') { throw 'status did not report the task as on' }
+          if ($status -match 'could not read') { throw 'status could not parse what schtasks said' }
+          if ($status -notmatch 'pythonw\.exe') { throw 'status did not read back what the task runs' }
+
+      - name: Turning it off leaves nothing behind
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $out = dictate autostart disable 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "dictate autostart disable failed: $out" }
+
+          schtasks /Query /TN dictate 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) { throw 'the task is still registered after disable' }
+
+          $status = dictate autostart status 2>&1 | Out-String
+          Write-Host $status
+          if ($status -notmatch 'start at logon:  OFF') { throw 'status did not report it as off' }
+
+          # Twice must be safe: he will run it again when he is not sure.
+          $again = dictate autostart disable 2>&1 | Out-String
+          Write-Host $again
+          if ($LASTEXITCODE -ne 0) { throw 'disabling something already disabled failed' }
+          if ($again -notmatch 'Nothing to undo') { throw 'a second disable did not say there was nothing to do' }
+
+      - name: Leave no task behind even if a step above failed
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          schtasks /Delete /TN dictate /F 2>&1 | Out-Null
+          exit 0
+
+      - name: Summary
+        if: always()
+        shell: pwsh
+        run: |
+          @'
+          ### Logon task
+
+          **Proved on real Windows:** Task Scheduler accepts the task
+          `dictate autostart enable` builds, and the settings that matter survive
+          into it - the logon trigger, `InteractiveToken`, `LeastPrivilege`,
+          `IgnoreNew`, and the windowless interpreter. `dictate autostart status`
+          reads Windows' own answer back and reports it. `disable` removes it,
+          Windows agrees it is gone, and running it twice is safe.
+
+          **Not proved, and cannot be here:** that it starts at logon. A hosted
+          runner never logs on, so nobody has seen the task fire, seen dictate
+          come up in an interactive session, or confirmed that no console window
+          appears. That is the first morning on the product owner's PC.
+          '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
   # =========================================================================
   installer-logic:
     name: Installer logic (Windows PowerShell 5.1)
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -209,6 +342,7 @@ jobs:
   windows-packages:
     name: Windows packages + live captions (CPU)
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

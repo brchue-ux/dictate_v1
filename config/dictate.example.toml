@@ -203,6 +203,31 @@ clipboard_restore_delay_ms = 300
 trailing_space = true
 
 
+[autostart]
+# These only matter if you have run `dictate autostart enable`, which makes
+# dictate start by itself when you log in. They do nothing to a `dictate run`
+# you type yourself.
+#
+# Leaving it on does NOT mean holding your graphics card's memory all day: the
+# model is handed back after [whisper] idle_release_minutes without dictating
+# and taken again when you next press the hotkey. Set that to 0 and it does stay
+# loaded for as long as you are logged in - about 1.6 GB.
+#
+# How long to wait after you reach the desktop before starting. At logon the
+# graphics driver may still be loading. This one is written into the scheduled
+# task, so if you change it, run `dictate autostart enable` again.
+logon_delay_s = 30
+# If it cannot start - a drive not mounted yet, the port still held by the last
+# session - it waits and tries again this many times before giving up and
+# writing down why. It is bounded on purpose: something that retries forever
+# never tells you anything.
+startup_attempts = 5
+retry_delay_s = 20.0
+# Show a message on screen if it could not start at all. It is written to the
+# log either way; this is so you find out without having to go and look.
+notify_on_failure = true
+
+
 [logging]
 level = "INFO"
 # Where to write the full log, including whisper.cpp's own output. This is the

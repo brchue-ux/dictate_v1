@@ -191,6 +191,26 @@ class PasteConfig:
 
 
 @dataclass
+class AutostartConfig:
+    """Only used when dictate starts itself at logon (`dictate autostart enable`).
+
+    None of it has any effect on a `dictate run` typed at a prompt.
+    """
+
+    #: How long after reaching the desktop to start. At logon the graphics driver
+    #: may still be loading and another drive may not be mounted yet. Baked into
+    #: the scheduled task, so changing it means running `autostart enable` again.
+    logon_delay_s: int = 30
+    #: How many times to try before giving up and reporting. Bounded on purpose:
+    #: something that retries forever never tells anyone anything.
+    startup_attempts: int = 5
+    retry_delay_s: float = 20.0
+    #: Put a dialog on screen if it could not start at all. The log has it either
+    #: way; this is so he finds out without having been told to look.
+    notify_on_failure: bool = True
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     #: Empty string means stderr only.
@@ -206,6 +226,7 @@ class Config:
     whisper: WhisperConfig = field(default_factory=WhisperConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     paste: PasteConfig = field(default_factory=PasteConfig)
+    autostart: AutostartConfig = field(default_factory=AutostartConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     #: Directory the config was loaded from; relative paths resolve against it.
@@ -242,6 +263,7 @@ _SECTIONS: dict[str, type] = {
     "whisper": WhisperConfig,
     "cleanup": CleanupConfig,
     "paste": PasteConfig,
+    "autostart": AutostartConfig,
     "logging": LoggingConfig,
 }
 
@@ -458,6 +480,26 @@ def validate(cfg: Config) -> Config:
         raise ConfigError(
             f"[paste] method must be 'sendinput' or 'clipboard', got {cfg.paste.method!r}.",
             "sendinput is the default and never touches your clipboard.",
+        )
+    if not 0 <= cfg.autostart.logon_delay_s <= 600:
+        raise ConfigError(
+            f"[autostart] logon_delay_s is {cfg.autostart.logon_delay_s}, which is "
+            "outside 0-600.",
+            "30 is the default: long enough for the graphics driver to finish "
+            "loading, short enough that dictate is ready before you are.",
+        )
+    if not 1 <= cfg.autostart.startup_attempts <= 20:
+        raise ConfigError(
+            f"[autostart] startup_attempts is {cfg.autostart.startup_attempts}, "
+            "which is outside 1-20.",
+            "5 is the default. It has to be bounded: something that retries "
+            "forever never reports that it failed.",
+        )
+    if not 1.0 <= cfg.autostart.retry_delay_s <= 300.0:
+        raise ConfigError(
+            f"[autostart] retry_delay_s is {cfg.autostart.retry_delay_s}, which is "
+            "outside 1-300.",
+            "20 is the default.",
         )
     if cfg.logging.level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
         raise ConfigError(
