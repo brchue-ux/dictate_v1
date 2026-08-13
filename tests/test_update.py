@@ -50,11 +50,22 @@ def source_tree(**files: str) -> dict[str, str]:
     return tree
 
 
+def write_file(path: Path, text: str) -> Path:
+    """Write a file the way a source archive holds one: with LF line endings.
+
+    Not a detail. Python on Windows turns every "\\n" into "\\r\\n" on the way
+    out, while a `.tar.gz` from GitHub carries the bytes it was made with - so a
+    tree written the ordinary way here would differ from the identical tree in
+    the archive, in every single file, and only on Windows.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="\n")
+    return path
+
+
 def write_tree(root: Path, files: dict[str, str]) -> Path:
     for relative, text in files.items():
-        path = root / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        write_file(root / relative, text)
     return root
 
 
@@ -212,8 +223,11 @@ class WhichFolderIsTheInstall(unittest.TestCase):
         self.assertTrue((update.find_install_root() / "pyproject.toml").exists())
 
     def test_it_follows_the_module_it_is_given_rather_than_a_constant(self):
+        # Compared against a path resolved the same way: on Windows a
+        # drive-relative "/somewhere" resolves onto the current drive, and the
+        # point here is the three levels up, not the spelling.
         found = update.find_install_root("/somewhere/else/src/dictate/update.py")
-        self.assertEqual(found, Path("/somewhere/else"))
+        self.assertEqual(found, Path("/somewhere/else").resolve())
 
     def test_a_folder_that_is_not_a_source_tree_is_refused_with_a_way_out(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -540,7 +554,7 @@ class WritingFiles(TempState):
         gone afterwards, and the target is whole."""
         target = self.root / "src" / "dictate" / "cli.py"
         source = self.tmp / "new.py"
-        source.write_text("brand new\n", encoding="utf-8")
+        write_file(source, "brand new\n")
         update.copy_file_atomically(source, target)
         self.assertEqual(target.read_text(encoding="utf-8"), "brand new\n")
         self.assertFalse(target.with_name(target.name + update.TEMP_SUFFIX).exists())
@@ -646,7 +660,7 @@ class TheWholeCommand(TempState):
 
     def test_his_edits_stop_it_and_name_the_files(self):
         self.stamp(revision="a" * 40)
-        (self.root / "README.md").write_text("# my own notes\n", encoding="utf-8")
+        write_file(self.root / "README.md", "# my own notes\n")
         new = source_tree()
         new["src/dictate/cli.py"] = "changed\n"
         with self.assertRaises(DictateError) as ctx:
@@ -659,7 +673,7 @@ class TheWholeCommand(TempState):
 
     def test_force_overwrites_his_edits_but_keeps_a_copy_and_says_where(self):
         self.stamp(revision="a" * 40)
-        (self.root / "README.md").write_text("# my own notes\n", encoding="utf-8")
+        write_file(self.root / "README.md", "# my own notes\n")
         new = source_tree()
         new["src/dictate/cli.py"] = "changed\n"
         outcome = self.run_update(Gh(files=new), force=True)
@@ -839,7 +853,7 @@ class WhenItGoesWrong(TempState):
         backup = self.tmp / "state" / "updates" / "backup-20260813-210000-aaaaaaa"
         update.copy_tree(self.root, backup)
         # A half-finished apply: one file is the new version, one is not.
-        (self.root / "src" / "dictate" / "cli.py").write_text("half\n", encoding="utf-8")
+        write_file(self.root / "src" / "dictate" / "cli.py", "half\n")
         update.write_journal(update.Journal(
             root=str(self.root), backup=str(backup), from_revision="a" * 40,
             to_revision="b" * 40, started="2026-08-13 21:00:00"))

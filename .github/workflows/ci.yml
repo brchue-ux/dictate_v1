@@ -226,7 +226,18 @@ jobs:
             taskkill /PID $ids.child /T /F 2>&1 | Out-String | Write-Host
             throw "the child ($($ids.child)) outlived its parent - an orphan is still possible"
           }
-          if (Test-PortHeld 8352) { throw 'the child is gone but something is still holding the port' }
+          # The process is gone; the kernel can take a moment longer to tear its
+          # listening socket down, and asking in that moment used to fail this
+          # job at random. Waiting for the port is what `dictate stop` itself
+          # does (recovery.wait_for_port_free) - the claim being made is "the
+          # port comes free", not "it is free in the same millisecond".
+          $free = $false
+          $deadline = (Get-Date).AddSeconds(10)
+          while ((Get-Date) -lt $deadline) {
+            if (-not (Test-PortHeld 8352)) { $free = $true; break }
+            Start-Sleep -Milliseconds 250
+          }
+          if (-not $free) { throw 'the child is gone but something is still holding the port' }
           Write-Host 'The parent was killed without any cleanup, and Windows ended the child with it.'
           exit 0
 
@@ -425,6 +436,7 @@ jobs:
           if ($loaded -notlike "$install*") {
             throw "python loads dictate from $loaded, not from the copy this job made"
           }
+          exit 0
 
       - name: Make that install stale, the way his ZIP install is stale
         shell: pwsh
@@ -506,6 +518,7 @@ jobs:
           if ($env:GH_TOKEN -and $out.Contains($env:GH_TOKEN)) {
             throw 'the update printed the token'
           }
+          exit 0
 
       - name: Running it again is one second and says so
         shell: pwsh
@@ -519,6 +532,7 @@ jobs:
           $check = dictate update --repo $env:GITHUB_REPOSITORY --branch $env:UPDATE_BRANCH --check 2>&1 | Out-String
           Write-Host $check
           if ($LASTEXITCODE -ne 0) { throw "--check failed: $check" }
+          exit 0
 
       - name: A file he has edited stops it, and --force keeps a copy first
         shell: pwsh
@@ -543,6 +557,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "--force failed: $forced" }
           $now = Get-Content -LiteralPath "$install\README.md" -Raw
           if ($now -match 'notes I typed myself') { throw '--force did not update the file' }
+          exit 0
 
       - name: And there is a way back
         shell: pwsh
@@ -562,6 +577,10 @@ jobs:
           $doctor = dictate doctor 2>&1 | Out-String
           if ($doctor -match 'Traceback') { throw 'doctor printed a stack trace after a restore' }
           if ($doctor -notmatch 'Install folder') { throw 'doctor did not say which folder dictate loads from' }
+          # `dictate doctor` exits 1 on a machine with no model and no
+          # whisper-server, which is the correct answer here and not a failure of
+          # this step - so the step's own result is stated rather than inherited.
+          exit 0
 
       - name: With no sign-in it says what to type, and prints nothing else
         shell: pwsh
