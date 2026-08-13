@@ -16,9 +16,9 @@ if %errorlevel% neq 0 (
     echo Click Yes on the prompt that appears.
     echo.
     if "%~1"=="" (
-        powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+        powershell -NoProfile -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs } catch { Write-Host ''; Write-Host 'Setup cannot install anything without that permission, so it has stopped.' -ForegroundColor Yellow; Write-Host 'Nothing on this PC was changed. Double-click setup.cmd again and click Yes.' -ForegroundColor Yellow; Read-Host 'Press Enter to close this window' }"
     ) else (
-        powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs"
+        powershell -NoProfile -Command "try { Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs } catch { Write-Host ''; Write-Host 'Setup cannot install anything without that permission, so it has stopped.' -ForegroundColor Yellow; Write-Host 'Nothing on this PC was changed. Double-click setup.cmd again and click Yes.' -ForegroundColor Yellow; Read-Host 'Press Enter to close this window' }"
     )
     exit /b 0
 )
