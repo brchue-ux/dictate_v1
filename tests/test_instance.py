@@ -237,29 +237,48 @@ class TheAppStopsWhenAsked(TempState):
 
 
 class StopFromTheCommandLine(TempState):
-    """`dictate stop` against a real process holding the lock. It cannot bring
-    down a whole app here - there is no Windows - but it must find it, ask, and
-    report honestly when it is not obeyed."""
+    """`dictate stop` against a real second process that really holds the lock,
+    driven through the real command line."""
 
     def test_it_says_so_when_nothing_is_running(self):
         code, out = _run_cli(["stop"])
         self.assertEqual(code, 0)
         self.assertIn("not running", out)
 
-    def test_it_reports_a_copy_that_will_not_go(self):
+    def test_a_copy_that_will_not_answer(self):
+        """The state he was reduced to Task Manager for.
+
+        What happens next depends on whether this machine can end a process,
+        and both answers are the honest one:
+
+          on Windows    it is ended - and only ever together with the
+                        whisper-server it owns, because ending the parent alone
+                        is what strands one on the transcription port. On CI
+                        this is the real `taskkill /T /F` ending a real process.
+          anywhere else dictate says plainly that it cannot do that here, names
+                        the process and the whisper-server that has to go with
+                        it, and exits non-zero. It never claims to have done
+                        something it did not do.
+        """
         holder = spawn("hold", instance.lock_path(), "30")
         self.addCleanup(holder.kill)
         self.assertEqual(wait_for_line(holder), "HELD")
 
         code, out = _run_cli(["stop", "--timeout", "1"])
-        self.assertEqual(code, 1)
         self.assertIn("asking dictate to stop", out)
         self.assertIn("did not stop", out)
-        self.assertIn("whisper-server.exe", out)  # it has to go too
+        self.assertIn("whisper-server", out)      # it has to go too, either way
         self.assertNotIn("Traceback", out)
-        # Ending a copy that will not answer is a Windows job (taskkill /T), and
-        # this is not Windows: it has to say so rather than claim it did it.
-        self.assertIn(sys.platform, out)
+
+        if sys.platform == "win32":
+            self.assertEqual(code, 0)
+            self.assertIn("was ended", out)
+            # And it really went: the lock is a lock, not a claim.
+            self.assertIsNone(instance.running_instance())
+        else:
+            self.assertEqual(code, 1)
+            self.assertIn(sys.platform, out)
+            self.assertIsNotNone(instance.running_instance())
 
     def test_it_reports_on_the_transcription_port_even_when_nothing_is_running(self):
         """`dictate stop` is the one command he is asked to remember, so it

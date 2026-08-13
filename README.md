@@ -429,6 +429,12 @@ Windows machines. These are things that used to be on the "never run" list:
   the child surviving, which is what makes the first result mean anything. This
   is the mechanism behind the orphaned `whisper-server`; the exact keystroke
   path (Ctrl+C, then `Y` at "Terminate batch job") is on the list below.
+* **That `dictate stop` really ends a copy that will not answer.** On Windows
+  the suite starts a second process that takes the lock and then ignores every
+  request to stop — the state that used to mean Task Manager — and `dictate
+  stop` ends it for real, through the real `taskkill /T /F`, and the lock comes
+  free. On Linux, where dictate has no way to end it, the same test requires it
+  to say so and exit non-zero rather than claim it did something.
 * **That a blank line from a program is not turned into a .NET type name.**
   PowerShell wraps every stderr line in an error record, and a *blank* one used
   to come out as the text `System.Management.Automation.RemoteException` in the
