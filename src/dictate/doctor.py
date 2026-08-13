@@ -190,19 +190,42 @@ def check_caption_model(cfg: Config) -> CheckResult:
 
 
 def check_port(cfg: Config) -> CheckResult:
+    """Who has the transcription port, and whether that is a problem at all.
+
+    It usually is not. dictate holding its own port while it runs is the correct
+    state, and reporting it as a warning is how an install with nothing wrong
+    with it got called broken. So this asks the lock who is running before it
+    says anything: a port held by the copy that is running is `ok`, a port held
+    by a whisper-server with no dictate behind it is the orphan, and it names
+    the one command that clears it.
+    """
+    from . import instance as instance_mod
     from .engines.whisper_server import WhisperServerClient
 
+    where = f"{cfg.whisper.host}:{cfg.whisper.port}"
     client = WhisperServerClient(cfg.whisper.host, cfg.whisper.port)
     if not client.port_is_open():
-        return CheckResult("Transcription port", Status.OK,
-                           f"{cfg.whisper.host}:{cfg.whisper.port} is free")
+        return CheckResult("Transcription port", Status.OK, f"{where} is free")
+
     healthy = client.is_healthy()
+    holder = instance_mod.running_instance()
+    if holder is not None:
+        return CheckResult(
+            "Transcription port", Status.OK,
+            f"{where} is in use by the copy of dictate that is running "
+            f"({holder.describe()}) - which is where it should be",
+        )
+    what = ("a whisper-server that is loaded and answering"
+            if healthy else "something")
     return CheckResult(
         "Transcription port", Status.WARN,
-        f"{cfg.whisper.host}:{cfg.whisper.port} is already in use"
-        + (" by a healthy whisper-server" if healthy else ""),
-        "Another copy of dictate is probably already running. Close it before\n"
-        "starting a new one, or change [whisper] port in your config.",
+        f"{where} is in use by {what}, and no dictate is running",
+        "An earlier run was ended without being allowed to shut down, and its\n"
+        "transcription process is still holding the port. Clear it with:\n"
+        "  dictate stop\n"
+        "That is the whole fix - it clears a leftover as well as stopping a\n"
+        "copy that is running. If something else on this PC needs that port,\n"
+        "give dictate a different one with [whisper] port in your config.",
     )
 
 

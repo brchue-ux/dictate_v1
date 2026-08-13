@@ -109,6 +109,39 @@ function Stop-Setup {
     throw $Problem
 }
 
+function Get-NativeOutputLine {
+    <# One line of a native program's output, as the program wrote it.
+
+       This exists because of what `2>&1` does to a native command's stderr:
+       every line arrives as an ErrorRecord whose Exception is a RemoteException
+       carrying the line as its Message. `$record.ToString()` gives that Message
+       back - EXCEPT when the line is blank. Then the Message is empty, and
+       ErrorRecord.ToString() falls through to Exception.ToString(), which for an
+       exception that was never thrown is nothing but its type name. So a blank
+       line on stderr came out as:
+
+           System.Management.Automation.RemoteException
+
+       and that is what the product owner was shown, twice, in the middle of an
+       install report - once for each blank line dictate printed around its own
+       error message. The message itself was there; the two blanks framing it
+       were not blank.
+
+       Reading the Message directly is the fix: an empty line stays an empty
+       line. ErrorDetails comes first because that is what PowerShell itself
+       prefers when a cmdlet has supplied a friendlier message. #>
+    param([Parameter(Mandatory = $false)][AllowNull()][object]$Item)
+    if ($null -eq $Item) { return '' }
+    if ($Item -is [System.Management.Automation.ErrorRecord]) {
+        if ($Item.ErrorDetails -and $Item.ErrorDetails.Message) {
+            return [string]$Item.ErrorDetails.Message
+        }
+        if ($Item.Exception) { return [string]$Item.Exception.Message }
+        return ''
+    }
+    return [string]$Item
+}
+
 function Invoke-Tool {
     <# Run an external program, keep every line of its output in the log, and
        give back its exit code.
@@ -148,12 +181,11 @@ function Invoke-Tool {
         # success if the call itself produces no exit code.
         $global:LASTEXITCODE = 0
         & $FilePath @Arguments 2>&1 | ForEach-Object {
-            $text = ''
-            if ($_ -is [System.Management.Automation.ErrorRecord]) {
-                $text = $_.ToString()
-            } else {
-                $text = [string]$_
-            }
+            # Get-NativeOutputLine, never .ToString(): the latter turns a BLANK
+            # stderr line into the text "System.Management.Automation.Remote-
+            # Exception", which is how a .NET type name ended up on the product
+            # owner's screen in the middle of an install report.
+            $text = Get-NativeOutputLine $_
             $lines.Add($text)
             Write-SetupLog "${name}: $text"
             if ($Show -eq 'echo') { Write-Host "      $text" }

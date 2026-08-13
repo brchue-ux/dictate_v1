@@ -212,3 +212,72 @@ class DeferredSubmit:
     def run_all(self) -> None:
         while self.pending:
             self.pending.pop(0)()
+
+
+class RecordingGuard:
+    """Stands in for the Windows job object.
+
+    What it cannot do is contain anything - that needs the operating system, and
+    that half is proved on CI's Windows runners by killing a parent. What it
+    does prove here is the half that IS ours and that a Windows-only test could
+    never cover from Linux: that every single spawn is handed over, including
+    the ones nobody thinks about - a restart after a crash, and a reload after
+    an idle release.
+    """
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.adopted: list[int] = []
+        self.error = error
+        self.closed = False
+
+    def adopt(self, process) -> None:
+        if self.error is not None:
+            raise self.error
+        self.adopted.append(process.pid)
+
+    def close(self) -> None:
+        self.closed = True
+
+    @property
+    def describe(self) -> str:
+        return "a guard that only remembers"
+
+
+class FakeProcessTools:
+    """Stands in for netstat, tasklist and taskkill.
+
+    `recovery.py` makes every decision about what to end; this is the three
+    answers Windows would give, so those decisions can be driven through every
+    branch - including the ones that must NOT end anything.
+    """
+
+    def __init__(self, listeners=None, names=None, *, refuse: Exception | None = None,
+                 lingering: bool = False, on_end=None) -> None:
+        self._listeners = listeners or {}
+        self.names = names or {}
+        self.refuse = refuse
+        #: True: ended processes keep holding the port, as a wedged one would.
+        self.lingering = lingering
+        #: Called when a process is ended, so a test can close the real socket
+        #: that is standing in for the whisper-server being ended.
+        self.on_end = on_end
+        self.ended: list[int] = []
+        self.asked: list[int] = []
+
+    def listeners(self, port: int) -> list:
+        return list(self._listeners.get(port, []))
+
+    def name_of(self, pid: int) -> str:
+        self.asked.append(pid)
+        return self.names.get(pid, "")
+
+    def end(self, pid: int) -> None:
+        if self.refuse is not None:
+            raise self.refuse
+        self.ended.append(pid)
+        if self.lingering:
+            return
+        for port, rows in list(self._listeners.items()):
+            self._listeners[port] = [r for r in rows if r.pid != pid]
+        if self.on_end is not None:
+            self.on_end(pid)

@@ -7,7 +7,7 @@
 # GPU. So this workflow exists to catch everything that can be caught without
 # one, on the same operating system the product actually runs on.
 #
-#   PROVED HERE  the Python package installs on Windows and its 343 tests pass;
+#   PROVED HERE  the Python package installs on Windows and its 393 tests pass;
 #                the installer's own logic works on Windows PowerShell 5.1,
 #                including a download that really is interrupted and resumed;
 #                whisper.cpp compiles from source with the Vulkan backend on
@@ -15,7 +15,10 @@
 #                dictate's resident-process supervision and HTTP client drive
 #                that real binary end to end; sherpa-onnx loads and produces
 #                live-caption text from real audio; Windows Task Scheduler
-#                accepts the logon task and removing it leaves nothing behind.
+#                accepts the logon task and removing it leaves nothing behind;
+#                and a supervised child process is ended by Windows when its
+#                parent is killed outright, which is what makes the orphaned
+#                whisper-server impossible.
 #
 #   NOT PROVED   anything about the GPU. GitHub's hosted Windows runners have no
 #                AMD card and no Vulkan driver, so Vulkan legitimately finds zero
@@ -112,7 +115,146 @@ jobs:
           $stop = dictate stop 2>&1 | Out-String
           Write-Host $stop
           if ($stop -notmatch 'not running') { throw 'dictate stop did not report that nothing is running' }
+          # It is the one command he is asked to remember, so it answers the
+          # whole question - is anything of dictate's left anywhere - rather
+          # than only the part about the lock.
+          if ($stop -notmatch 'transcription port') { throw 'dictate stop did not say anything about the transcription port' }
+          if ($LASTEXITCODE -ne 0) { throw "dictate stop failed on a machine with nothing running: $stop" }
+
+          # What setup.ps1 calls before it tests the install.
+          $stale = dictate stop --stale-only 2>&1 | Out-String
+          Write-Host $stale
+          if ($LASTEXITCODE -ne 0) { throw "dictate stop --stale-only failed with nothing running: $stale" }
           exit 0
+
+  # =========================================================================
+  orphan:
+    name: A child cannot outlive its parent (real Windows, parent killed dead)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dictate
+        run: python -m pip install -e .
+
+      - name: The control - with no containment, the child DOES survive
+        shell: pwsh
+        run: |
+          # This runs first and on purpose. If an orphan could not happen here
+          # either, the next step would prove nothing at all: it would pass on a
+          # machine where something else was killing the child. This is the
+          # behaviour the product owner actually hit, reproduced.
+          $ErrorActionPreference = 'Continue'
+          $report = "$env:RUNNER_TEMP\orphan-control.json"
+          $parent = Start-Process -FilePath python -PassThru -NoNewWindow -ArgumentList @(
+            'scripts\ci\orphan-parent.py', '--port', '8351',
+            '--stub', 'tests\stub_server.py', '--report', $report, '--no-guard')
+
+          $deadline = (Get-Date).AddSeconds(60)
+          while (-not (Test-Path $report) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+          if (-not (Test-Path $report)) { throw 'the control parent never started its child' }
+          Start-Sleep -Milliseconds 300
+          $ids = Get-Content $report -Raw | ConvertFrom-Json
+          Write-Host "control: parent $($ids.parent), child $($ids.child), guarded $($ids.guarded)"
+          if ($ids.guarded) { throw '--no-guard did not remove the containment' }
+
+          Stop-Process -Id $parent.Id -Force
+          Start-Sleep -Seconds 5
+          $survivor = Get-Process -Id $ids.child -ErrorAction SilentlyContinue
+          if (-not $survivor) {
+            throw 'the UNGUARDED child died with its parent, so this test cannot tell whether the job object does anything'
+          }
+          Write-Host "The unguarded child ($($ids.child)) outlived its parent - which is the bug."
+          "ORPHAN_PID=$($ids.child)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          taskkill /PID $ids.child /T /F 2>&1 | Out-String | Write-Host
+          exit 0
+
+      - name: With the job object, killing the parent takes the child with it
+        shell: pwsh
+        run: |
+          # The acceptance criterion, as close as a runner can get to it: the
+          # parent is ended with Stop-Process -Force, which is a
+          # TerminateProcess. No signal handler, no atexit, no `finally` of
+          # dictate's runs - exactly the case that made Ctrl+C at the "Terminate
+          # batch job (Y/N)?" prompt leave whisper-server holding the port.
+          $ErrorActionPreference = 'Continue'
+          function Test-PortHeld([int]$Port) {
+            $client = New-Object System.Net.Sockets.TcpClient
+            try { $client.Connect('127.0.0.1', $Port); return $true }
+            catch { return $false }
+            finally { $client.Dispose() }
+          }
+          $report = "$env:RUNNER_TEMP\orphan-guarded.json"
+          $parent = Start-Process -FilePath python -PassThru -NoNewWindow -ArgumentList @(
+            'scripts\ci\orphan-parent.py', '--port', '8352',
+            '--stub', 'tests\stub_server.py', '--report', $report)
+
+          $deadline = (Get-Date).AddSeconds(60)
+          while (-not (Test-Path $report) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+          if (-not (Test-Path $report)) { throw 'the parent never started its child' }
+          Start-Sleep -Milliseconds 300
+          $ids = Get-Content $report -Raw | ConvertFrom-Json
+          Write-Host "guarded: parent $($ids.parent), child $($ids.child)"
+          Write-Host "containment: $($ids.guard)"
+          if (-not $ids.guarded) { throw 'there was no containment on this run' }
+
+          # It really is up and really is holding the port before anything is killed.
+          if (-not (Get-Process -Id $ids.child -ErrorAction SilentlyContinue)) {
+            throw 'the child was not running before the parent was killed'
+          }
+          if (-not (Test-PortHeld 8352)) { throw 'the child was not holding the port before the parent was killed' }
+
+          Stop-Process -Id $parent.Id -Force
+
+          $gone = $false
+          $deadline = (Get-Date).AddSeconds(20)
+          while ((Get-Date) -lt $deadline) {
+            if (-not (Get-Process -Id $ids.child -ErrorAction SilentlyContinue)) { $gone = $true; break }
+            Start-Sleep -Milliseconds 250
+          }
+          if (-not $gone) {
+            taskkill /PID $ids.child /T /F 2>&1 | Out-String | Write-Host
+            throw "the child ($($ids.child)) outlived its parent - an orphan is still possible"
+          }
+          if (Test-PortHeld 8352) { throw 'the child is gone but something is still holding the port' }
+          Write-Host 'The parent was killed without any cleanup, and Windows ended the child with it.'
+          exit 0
+
+      - name: Leave nothing behind even if a step above failed
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if ($env:ORPHAN_PID) { taskkill /PID $env:ORPHAN_PID /T /F 2>&1 | Out-Null }
+          exit 0
+
+      - name: Summary
+        if: always()
+        shell: pwsh
+        run: |
+          @'
+          ### Orphaned transcription process
+
+          **Proved on real Windows:** a child started through dictate's own
+          `ManagedProcess` is put in a job object, and when its parent is ended
+          with `Stop-Process -Force` - a `TerminateProcess`, so none of dictate's
+          shutdown code runs at all - Windows ends the child too and the port is
+          free within seconds. The same test with the containment removed
+          (`--no-guard`) shows the child surviving, which is the bug being fixed
+          and is what makes the first result mean anything.
+
+          **Not proved, and cannot be here:** the exact keystroke path. Nobody
+          has pressed Ctrl+C in a window running `dictate run` and answered `Y`
+          to "Terminate batch job (Y/N)?" on a machine with a GPU and a real
+          whisper-server. What is proved is the mechanism underneath it - the
+          parent dying with no chance to clean up - which is the only thing that
+          case does differently.
+          '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
   # =========================================================================
   autostart:

@@ -92,6 +92,39 @@ warm-up, an utterance that ends before the load finishes, overlapping
 utterances, shutdown mid-transition). What is **not** verified anywhere is that
 the VRAM is genuinely returned; that needs the card.
 
+### 1b. whisper-server may not outlive dictate — by any death, not just a tidy one
+
+The other half of owning that process. It holds the transcription port and, while
+the model is resident, ~1.6 GB of VRAM, so a copy of it that survives its parent
+makes every later `dictate run` **and** every `setup.ps1 -Only verify` fail on a
+port that nothing appears to be using. That happened twice in one evening: Ctrl+C
+in the window running `dictate run`, `Y` at Windows' "Terminate batch job (Y/N)?"
+prompt, and the parent was gone while the child was not.
+
+**A shutdown handler cannot fix this.** dictate already stops the child cleanly
+on Ctrl+C, on SIGTERM, on `dictate stop` and on a failed start — and the case
+that bit him is exactly the one where the parent runs none of it. Only the
+operating system can end a process on behalf of one that is no longer executing.
+
+**How:** a Windows **job object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+(`platform/windows/job.py`). Every child `ManagedProcess` spawns is assigned to
+it, and Windows empties the job when the last handle to it closes — which
+happens when this process ceases to exist, whatever ended it. Nothing about that
+depends on dictate behaving well on the way out, so the clean shutdown stays as
+the *ordinary* path (a job kill is a `TerminateProcess`, which gives whisper.cpp
+no chance to free the card) and this is the floor underneath it.
+
+CI proves it on real Windows by killing a parent with `Stop-Process -Force` and
+requiring the child to be gone — and proves the test means something by running
+the same thing with the containment removed, where the child survives.
+
+**And the way back for an orphan from an older build:** `dictate stop`, which is
+the one command for every stuck state (`recovery.py`) — a copy that is running, a
+copy that will not answer (ended with its child, never on its own), and a
+whisper-server holding the port with no parent. `setup.ps1` calls the same thing
+with `--stale-only` before it tests the install, and treats a copy that is
+genuinely running as an ordinary situation rather than a broken installation.
+
 ### 2. The caption overlay must never take focus
 
 If it does, the focused window changes and the paste lands in the wrong place —
@@ -247,6 +280,7 @@ are left alone.
 | caption | — | the **only** thread that ever touches a streaming session |
 | finalize | one worker | so two utterances finishing close together paste in the order they were spoken |
 | idle watch | the residency clock | ticks `ResidentModel.check_idle()`; a short-lived worker of its own does the unload and the reload, so neither the hotkey thread nor the timer ever blocks on one |
+| tray | the notification-area icon and its window | a window's messages go to the thread that created it, so the icon is created, updated and destroyed there; `update()` from any other thread stores the state and posts a message |
 
 Caption audio is queued with a bounded queue that drops the oldest block when
 full. Captions are disposable, so dropping them is strictly better than blocking
@@ -283,5 +317,8 @@ as prior art for the Windows mechanics. What was taken from it: the
 (Windows' own `RegisterHotKey` reports key-down only, so it cannot express
 push-to-talk). What was **not** taken: any code, and the overlay — it has no
 caption overlay, using a system tray and a terminal UI instead, so this window is
-built from the Win32 primitives directly. Credited in the source files that
+built from the Win32 primitives directly. (dictate now has a tray icon too, for
+a different reason: it starts at logon with no window at all, and a command you
+cannot see is a command you will not recall. It carries status, stop and restart
+and nothing else — `src/dictate/tray.py`.) Credited in the source files that
 follow it and in the README.

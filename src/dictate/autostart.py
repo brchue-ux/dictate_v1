@@ -761,6 +761,8 @@ def run_at_logon(config_path: str | None = None) -> int:
     gives up after a bounded number of tries and *reports*, rather than retrying
     into eternity.
     """
+    from .app import EXIT_RESTART as _EXIT_RESTART  # noqa: PLC0415
+
     started = time.time()
     settings = _settings_or_default(config_path, AutostartConfig())
     with LogonLog() as log:
@@ -776,6 +778,7 @@ def run_at_logon(config_path: str | None = None) -> int:
             log.write("outcome: nothing to do, dictate is already running.")
             return 0
 
+        restart = False
         try:
             instance.clear_stop_request()
             last: DictateError | None = None
@@ -784,6 +787,12 @@ def run_at_logon(config_path: str | None = None) -> int:
                 log.write(f"attempt {attempt} of {settings.startup_attempts}")
                 try:
                     code = _attempt(config_path, log)
+                    if code == _EXIT_RESTART:
+                        log.write("outcome: a restart was asked for from the "
+                                  "tray icon; a fresh copy starts as soon as "
+                                  "this one has let go of the lock.")
+                        restart = True
+                        break
                     log.write(f"outcome: dictate ran and exited normally (code {code}).")
                     return code
                 except ConfigError as exc:
@@ -816,20 +825,48 @@ def run_at_logon(config_path: str | None = None) -> int:
                           "(at logon, what it needs may not be ready yet)")
                 time.sleep(settings.retry_delay_s)
 
-            log.write(f"outcome: gave up after {attempt} attempt(s). dictate is NOT "
-                      "running. Start it by hand with `dictate run` once the "
-                      "problem above is fixed.")
-            failure = last.report() if last else "dictate could not start."
+            if restart:
+                failure = ""
+            else:
+                log.write(f"outcome: gave up after {attempt} attempt(s). dictate "
+                          "is NOT running. Start it by hand with `dictate run` "
+                          "once the problem above is fixed.")
+                failure = last.report() if last else "dictate could not start."
         finally:
             lock.release()
 
-    # Everything above has let go before this point, and deliberately: the
-    # dialog is modal and waits for a click that may not come until he sits down
-    # tomorrow. Holding the single-instance lock behind it would mean `dictate
-    # run` answering "dictate is already running" for a copy that gave up hours
-    # ago - exactly the baffling failure this whole guard exists to prevent.
+    # Everything above has let go before this point, and deliberately. For the
+    # restart, because the new copy takes the same lock the moment it starts.
+    # For the dialog, because it is modal and waits for a click that may not
+    # come until he sits down tomorrow: holding the single-instance lock behind
+    # it would mean `dictate run` answering "dictate is already running" for a
+    # copy that gave up hours ago - exactly the baffling failure this whole
+    # guard exists to prevent.
+    if restart:
+        return _restart(config_path)
     _notify_failure(settings, failure)
     return 2
+
+
+def _restart(config_path: str | None) -> int:
+    """Start the fresh copy the tray's Restart item asked for.
+
+    Under the logon task there is no console to report to, so the outcome goes
+    in the same log every other logon start writes to.
+    """
+    from . import recovery  # noqa: PLC0415
+
+    with LogonLog() as log:
+        try:
+            # --autostart again, because that is what this copy is: it has no
+            # console, and only that entry point gives the new one somewhere to
+            # write. See `recovery.relaunch_argv`.
+            pid = recovery.relaunch(config_path, autostart=True)
+        except DictateError as exc:
+            log.write(exc.report())
+            return 2
+        log.write(f"a fresh copy of dictate was started (pid {pid}).")
+    return 0
 
 
 def _settings_or_default(config_path: str | None,

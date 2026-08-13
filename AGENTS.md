@@ -62,6 +62,11 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   what was asked for against `Font.actual("family")` and reports the substitution on
   startup. Anything that picks a font must go through it; "it looked wrong and
   nothing said why" is the failure it exists to prevent.
+- **The tray icon is the only visible surface a logon-started copy has.** What it says
+  and offers is pure and tested (`src/dictate/tray.py`, including the icon's own bytes);
+  `platform/windows/tray.py` is the thin Win32 half and is untested by anyone. It must
+  never block the app - a tray that will not start is reported and skipped, like live
+  captions. Every menu item names the command that does the same thing, on purpose.
 - **`dictate overlay`** shows the caption panel with sample text and no dictation.
   It is the only way anyone without Windows can get the look in front of the product
   owner, so keep it working when you change the overlay.
@@ -89,6 +94,11 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **Native commands in PowerShell go through `Invoke-Tool`.** git, cmake and pip write
   ordinary progress to stderr, which Windows PowerShell turns into a terminating error
   under `$ErrorActionPreference = 'Stop'`. Exit codes are what decide success.
+- **Never render a captured stderr line with `.ToString()`** - use
+  `Get-NativeOutputLine`. `2>&1` wraps each line in an ErrorRecord whose exception
+  carries the text; for a BLANK line that text is empty and `ToString()` falls back to
+  the exception's type name, so a blank line printed as
+  `System.Management.Automation.RemoteException` in the middle of an install report.
 - **Downloads are pinned by size AND SHA-256 in `scripts/models.psd1`**, which both the
   installer and CI read. Provenance for each fingerprint is in the comments there; do
   not add an entry you have not verified. The one deliberate exception is the Vulkan
@@ -110,10 +120,24 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   of the process, so the OS releases it on any kind of death and there is no such
   thing as a stale lock. It is plain stdlib and works on Linux too, which is what lets
   `tests/test_instance.py` contend for it with a real second process anywhere.
-- **`dictate stop` asks; it never kills.** dictate owns a whisper-server child that
-  holds the transcription port, and ~1.6 GB of VRAM whenever the model is resident.
-  Killing the parent orphans it. Anything that stops the app has to go through the
-  same clean shutdown Ctrl+C uses.
+- **A child process may never outlive the parent, however the parent dies.**
+  `platform/windows/job.py` puts every child `ManagedProcess` spawns in a job object
+  with `KILL_ON_JOB_CLOSE`, so Windows ends it when dictate ceases to exist - Ctrl+C,
+  the "Terminate batch job" prompt, End Task or a crash. No shutdown handler can cover
+  that case, which is the whole reason it is the OS doing it. `docs/DESIGN.md`
+  constraint 1b, and the CI job `orphan` proves it by killing a parent outright.
+- **`dictate stop` asks first, and if it has to force, it takes the whole tree.**
+  Never the parent alone: it owns a whisper-server holding the transcription port and
+  ~1.6 GB of VRAM, so ending it on its own is what strands one. Everything the rescue
+  decides lives in `src/dictate/recovery.py` (plain, tested anywhere); only netstat,
+  tasklist and taskkill are behind the platform seam. It is also the ONE command every
+  failure message is required to name - he should never have to work out which failure
+  he is looking at.
+- **Nothing may report a healthy system as broken.** `doctor.check_port` asks the lock
+  who is running before it judges the port, and `setup.ps1` records a check it could
+  not RUN (`$script:VerifyDeferred`) separately from a check that failed. Saying "not
+  working yet" to someone whose install is perfect costs the trust of every other
+  message the tool prints.
 - **Nothing under test may reach a blocking Win32 call.** `MessageBoxW` in
   `platform/windows/notify.py` waits for a click, and on a CI runner nobody ever
   clicks: the suite hung for hours instead of failing. `tests/test_autostart.py`

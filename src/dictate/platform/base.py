@@ -1,13 +1,16 @@
 """Platform seams.
 
-Four things in this app can only work on Windows: capturing the microphone,
+Some things in this app can only work on Windows: capturing the microphone,
 hearing a global hotkey held down, drawing a caption overlay that never takes
-focus, and delivering text to another application's window.
+focus, delivering text to another application's window, containing a child
+process so it cannot outlive us, clearing one that already has, and showing an
+icon in the notification area.
 
-They live behind these four interfaces so that the parts that carry the actual
-product logic - the state machine, the cleanup pass, the backend lifecycle - are
-plain Python with no platform in them, and can be tested anywhere. Nobody on this
-build had Windows or an AMD GPU; that constraint is the reason for this file.
+They live behind these interfaces so that the parts that carry the actual
+product logic - the state machine, the cleanup pass, the backend lifecycle, what
+the tray says, what a rescue decides to end - are plain Python with no platform
+in them, and can be tested anywhere. Nobody on this build had Windows or an AMD
+GPU; that constraint is the reason for this file.
 
 There is no fallback implementation. Asking for one of these on a platform that
 does not have it raises `PlatformUnsupportedError` immediately and says so. It
@@ -116,6 +119,75 @@ class HotkeyListener(Protocol):
     def start(self) -> None: ...
 
     def stop(self) -> None: ...
+
+    @property
+    def describe(self) -> str: ...
+
+
+@runtime_checkable
+class ChildGuard(Protocol):
+    """Makes it impossible for a child process to outlive this one.
+
+    Not a tidy-up afterwards and not a shutdown handler: the case that has to be
+    covered is the one where this process does not get to run any code at all -
+    Ctrl+C answered at the "Terminate batch job" prompt, Task Manager's End
+    Task, a crash. Something outside this process has to end the child, which
+    means the operating system. On Windows that is a job object with
+    `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; see `windows/job.py`.
+
+    `adopt` is called once per spawned child, immediately after it is created.
+    """
+
+    def adopt(self, process) -> None:
+        """Tie `process` (a `subprocess.Popen`) to this process's lifetime.
+
+        Raises `DictateError` if it could not, so the caller can say so out
+        loud. It must never silently do nothing: an unguarded child is the whole
+        bug this exists to prevent.
+        """
+
+    def close(self) -> None: ...
+
+    @property
+    def describe(self) -> str: ...
+
+
+@runtime_checkable
+class ProcessTools(Protocol):
+    """The three things a rescue needs to ask the operating system.
+
+    Kept this small on purpose: `recovery.py` decides everything, and this is
+    only the part of it that cannot be answered in plain Python.
+    """
+
+    def listeners(self, port: int) -> list:
+        """Who holds `port`, as `recovery.Listener` rows. May be empty."""
+
+    def name_of(self, pid: int) -> str:
+        """The image name of `pid` ("whisper-server.exe"), or "" if it is gone."""
+
+    def end(self, pid: int) -> None:
+        """End `pid` AND its children. Never the parent on its own - that is
+        what strands a whisper-server holding the port and 1.6 GB of VRAM."""
+
+
+@runtime_checkable
+class TrayIcon(Protocol):
+    """The notification-area icon: dictate's only visible surface at logon.
+
+    With `dictate autostart enable` there is no console window and no way to
+    type anything at the running copy, so this is what carries the status and
+    the way out. It runs its own message loop on its own thread and must never
+    block the app.
+    """
+
+    def start(self) -> None:
+        """Show the icon. Returns once it is on screen or has failed."""
+
+    def update(self, state) -> None:
+        """Re-draw from a `tray.TrayState`. Safe to call from any thread."""
+
+    def close(self) -> None: ...
 
     @property
     def describe(self) -> str: ...

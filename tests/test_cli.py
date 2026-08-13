@@ -132,6 +132,11 @@ class PlatformSeam(unittest.TestCase):
             ("overlay", lambda: factory.make_overlay(cfg)),
             ("audio", lambda: factory.make_audio_capture(cfg)),
             ("hotkey", lambda: factory.make_hotkey_listener(cfg)),
+            # A guard that guarded nothing, or a rescue that ended nothing while
+            # reporting success, would be the same lie as a no-op overlay.
+            ("child guard", lambda: factory.make_child_guard()),
+            ("process tools", lambda: factory.make_process_tools()),
+            ("tray icon", lambda: factory.make_tray_icon(None, icon_dir=".")),
         ]
         for name, build in cases:
             with self.subTest(component=name):

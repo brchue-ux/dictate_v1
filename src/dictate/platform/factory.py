@@ -2,9 +2,9 @@
 
 There is exactly one implementation - Windows - and no fallbacks. On any other
 platform every constructor here raises `PlatformUnsupportedError` explaining
-which component is missing and why. That is deliberate: a no-op overlay or a
-paste that silently does nothing would let the app look like it worked, and the
-build brief rules that out.
+which component is missing and why. That is deliberate: a no-op overlay, a paste
+that silently does nothing, or a child guard that guards nothing would let the
+app look like it worked, and the build brief rules that out.
 
 The tests do not call this. They construct `Pipeline` with their own doubles,
 which is the whole point of the seam.
@@ -79,3 +79,33 @@ def make_hotkey_listener(cfg: Config):
     from .windows.hotkey import WindowsHotkeyListener  # noqa: PLC0415
 
     return WindowsHotkeyListener(cfg.hotkey.combination, cfg.hotkey.mode)
+
+
+def make_child_guard():
+    """The thing that makes an orphaned whisper-server impossible.
+
+    A Windows job object; see `windows/job.py` for why nothing inside this
+    process can do the same job. There is no equivalent here, so this raises
+    like everything else in this file rather than returning something that would
+    contain nothing while looking like it contained something.
+    """
+    _require_windows("child-process containment")
+    from .windows.job import WindowsJobGuard  # noqa: PLC0415
+
+    return WindowsJobGuard()
+
+
+def make_process_tools():
+    """Finding and ending a process that a previous run left behind."""
+    _require_windows("finding and ending a stuck process")
+    from .windows.processes import WindowsProcessTools  # noqa: PLC0415
+
+    return WindowsProcessTools()
+
+
+def make_tray_icon(actions, *, icon_dir, state=None):
+    """The icon in the notification area."""
+    _require_windows("the notification-area icon")
+    from .windows.tray import WindowsTrayIcon  # noqa: PLC0415
+
+    return WindowsTrayIcon(actions, icon_dir=icon_dir, state=state)

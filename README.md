@@ -148,6 +148,36 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Only build,verify -Ref v1.9.
 still do what their names say; they now run the same code as the step of setup
 that does that job, rather than a second copy of it.
 
+### If anything is ever stuck
+
+```
+dictate stop
+```
+
+That is the whole answer, and it is the only command worth remembering. It does
+not matter what went wrong — dictate will not start, a window was closed with
+the X, something says the transcription port is already in use, a copy is
+running that you cannot see. `dictate stop` looks at each thing dictate can
+leave behind and clears whichever of them is there:
+
+- a copy that is running is asked to shut down, exactly the way Ctrl+C asks;
+- one that will not answer is ended, **together with the whisper-server it
+  owns** — never the parent on its own, because that is what strands a
+  transcription process holding your graphics card's memory;
+- a whisper-server left over from an earlier run is ended too;
+- and if something that is *not* dictate is holding the port, it says which
+  program, and prints the exact command to type. It never ends anything that is
+  not ours.
+
+You can also right-click **the dictate icon by the clock** — it is there
+whenever dictate is running, including when it started by itself at logon and
+there is no window anywhere. It shows what dictate is doing (grey while it
+waits, gold while it is listening to you, red if something needs reading), and
+carries **Stop**, **Restart** and **Open the log folder**. Each one is labelled
+with the command that does the same thing, so the icon teaches you the commands
+rather than replacing them. Turn it off with `[tray] enabled = false` if you
+would rather not have it.
+
 ### If something is wrong later
 
 `dictate doctor` first. It checks the operating system, Python, the hotkey, the
@@ -285,7 +315,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 343 tests, run and passing
+### Verified anywhere — 393 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -338,6 +368,20 @@ python -m unittest discover -s tests -t .
 * **That a logon start that fails writes down why**, retries a bounded number of
   times first, does not retry a broken config file at all, and stands aside when
   a copy is already running.
+* **That `dictate stop` gets out of every stuck state**, without being told
+  which one it is looking at: a copy that is running, a copy that will not
+  answer (ended with its whisper-server, never on its own), a whisper-server
+  left holding the transcription port with no parent, one that will not die, a
+  process id that has been reused by something else since, and a port held by a
+  program that is not ours — which it names and refuses to touch. Also that
+  every one of those answers names the exact command to type.
+* **That every child process is handed to the guard that contains it** — the
+  first one, the one that replaces a crash, and the one an idle release brings
+  back. The containment itself is Windows' job and is proved on Windows; that
+  nothing slips past it is proved here.
+* **What the tray icon says and offers**: the tooltip, the status line, the four
+  menu items, that each names the command that does the same thing, and that the
+  icon's own bytes are an icon Windows can read whose colour is the status.
 * That the package ships no test doubles.
 
 ### Verified on real Windows — by CI, on every change
@@ -374,15 +418,44 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
-* **The 343 tests above, on Windows** as well as on Linux — which is where the
+* **The 393 tests above, on Windows** as well as on Linux — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.
+* **That a supervised child process cannot outlive its parent.** CI starts a
+  parent that starts a child through dictate's own `ManagedProcess`, then ends
+  the parent with `Stop-Process -Force` — a `TerminateProcess`, so *none* of
+  dictate's shutdown code gets to run — and requires the child to be gone and
+  its port free within seconds. The same test with the containment removed shows
+  the child surviving, which is what makes the first result mean anything. This
+  is the mechanism behind the orphaned `whisper-server`; the exact keystroke
+  path (Ctrl+C, then `Y` at "Terminate batch job") is on the list below.
+* **That `dictate stop` really ends a copy that will not answer.** On Windows
+  the suite starts a second process that takes the lock and then ignores every
+  request to stop — the state that used to mean Task Manager — and `dictate
+  stop` ends it for real, through the real `taskkill /T /F`, and the lock comes
+  free. On Linux, where dictate has no way to end it, the same test requires it
+  to say so and exit non-zero rather than claim it did something.
+* **That a blank line from a program is not turned into a .NET type name.**
+  PowerShell wraps every stderr line in an error record, and a *blank* one used
+  to come out as the text `System.Management.Automation.RemoteException` in the
+  middle of the install report. Both halves of that are tested on the real
+  Windows PowerShell 5.1 that ships with Windows.
 
 ### Still not verified — needs this actual PC
 
 Nothing below has been run anywhere. It is where to look first if something
 misbehaves.
 
+* **Ctrl+C, then `Y` at "Terminate batch job (Y/N)?"** — the keystrokes that
+  produced the orphaned `whisper-server` in the first place. What is proved on
+  CI is the mechanism underneath that case, a parent dying with no chance to
+  clean up; nobody has typed those two keys at a real `dictate run` with a real
+  whisper-server holding a real 1.6 GB of VRAM.
+* **The icon by the clock.** Whether it appears, what it looks like at the size
+  Windows draws it, whether the menu opens and closes properly, and whether
+  Stop and Restart do what they say. A hosted runner has no notification area
+  and no one to click anything in it. The `[tray] enabled = false` line in your
+  config turns it off if it misbehaves; nothing else depends on it.
 * **Anything GPU.** CI machines have no graphics card, so every transcription
   above ran on a processor. No timing figure here is measured. The 0.4–1.0 s
   estimate comes from a published RX 6750 GRE (RDNA2, Windows, Vulkan) encode of

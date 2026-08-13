@@ -6,9 +6,19 @@ on its own. So the app owns that process's whole life: it starts it, waits for i
 to report healthy, watches it, restarts it if it dies, and shuts it down cleanly
 on exit.
 
-This module is deliberately generic and free of anything whisper-specific, so it
-can be tested on Linux against a stand-in server. `tests/test_process.py` starts
-a real child process, kills it, and asserts it comes back.
+**And it owns the end of that life even when it does not get to run.** Every
+child started here is handed to a `platform.base.ChildGuard` the moment it
+exists, which on Windows puts it in a job object that Windows itself empties
+when this process ends - however it ends. Ctrl+C answered at the "Terminate
+batch job" prompt used to leave whisper-server holding the transcription port
+forever; nothing below that line runs in that case, and that is precisely why
+the containment cannot be code that runs here. See `platform/windows/job.py`.
+
+This module is otherwise deliberately generic and free of anything
+whisper-specific, so it can be tested on Linux against a stand-in server:
+`tests/test_engines.py` starts a real child process, kills it, and asserts it
+comes back, and asserts that every spawn - the first, a restart, and a reload
+after an idle release - is handed to the guard.
 """
 
 from __future__ import annotations
@@ -22,13 +32,36 @@ import time
 from collections import deque
 from collections.abc import Callable, Sequence
 
-from ..errors import BackendUnavailableError
+from ..errors import BackendUnavailableError, DictateError
 
 log = logging.getLogger(__name__)
 
 #: Lines of child output kept for diagnostics. whisper.cpp is chatty at startup
 #: and the useful line (which backend it chose) is near the top, so keep plenty.
 LOG_TAIL_LINES = 200
+
+
+def _platform_guard():
+    """The operating system's own way of ending our children with us, or `None`.
+
+    On Windows this is a job object, and it is what makes the orphaned
+    whisper-server impossible. On the Linux and macOS machines this project is
+    developed on there is no equivalent in dictate, and this returns `None`
+    rather than something that would look like containment and provide none -
+    the product does not run here, and the tests that care inject a guard of
+    their own. What the real one does is proved on CI's Windows runners, by
+    killing a parent without letting it clean up.
+    """
+    if sys.platform != "win32":
+        return None
+    from ..platform import factory  # noqa: PLC0415
+
+    try:
+        return factory.make_child_guard()
+    except DictateError:
+        log.exception("no child guard on this machine; a whisper-server could "
+                      "outlive dictate if it is ever killed")
+        return None
 
 
 class ManagedProcess:
@@ -49,6 +82,11 @@ class ManagedProcess:
         healthy_reset_s: float = 120.0,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        #: Ties each child's life to ours. `None` means "ask the platform", and
+        #: the platform answers with nothing on the machines this is developed
+        #: on - see `_platform_guard`.
+        guard=None,
+        notify: Callable[[str, str], None] | None = None,
     ) -> None:
         self.argv = list(argv)
         self.name = name
@@ -60,6 +98,8 @@ class ManagedProcess:
         self.healthy_reset_s = healthy_reset_s
         self.cwd = cwd
         self.env = env
+        self.guard = guard if guard is not None else _platform_guard()
+        self.notify = notify
 
         self._proc: subprocess.Popen[str] | None = None
         self._lock = threading.RLock()
@@ -152,12 +192,32 @@ class ManagedProcess:
                 "blocked by Windows or by your antivirus.",
             ) from exc
 
+        self._contain(self._proc)
         self._last_started_at = time.monotonic()
         self._reader = threading.Thread(
             target=self._drain, args=(self._proc,), name=f"{self.name}-log", daemon=True
         )
         self._reader.start()
         log.info("%s started (pid %s)", self.name, self._proc.pid)
+
+    def _contain(self, proc: subprocess.Popen[str]) -> None:
+        """Hand the new child to the guard, before anything else happens to it.
+
+        A guard that refuses does NOT stop the start: the app works perfectly
+        well with an unguarded child, it is only the crash case that gets worse.
+        But it is said out loud, with the command that clears up afterwards,
+        rather than being discovered as a port nothing appears to be using.
+        """
+        if self.guard is None:
+            return
+        try:
+            self.guard.adopt(proc)
+        except DictateError as exc:
+            log.error("%s is not contained: %s", self.name, exc.message)
+            if self.notify:
+                self.notify("warning", exc.report())
+        except Exception:
+            log.exception("%s could not be handed to the child guard", self.name)
 
     def _drain(self, proc: subprocess.Popen[str]) -> None:
         stream = proc.stdout

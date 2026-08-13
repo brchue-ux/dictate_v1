@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 class WhisperVulkanBackend:
     """Implements `engines.base.BatchTranscriber`."""
 
-    def __init__(self, cfg: WhisperConfig, *, resolve=Path) -> None:
+    def __init__(self, cfg: WhisperConfig, *, resolve=Path, notify=None) -> None:
         self.cfg = cfg
         self.exe = Path(resolve(cfg.server_exe))
         self.model = Path(resolve(cfg.model))
@@ -44,6 +44,7 @@ class WhisperVulkanBackend:
             health_check=self.client.is_healthy,
             startup_timeout_s=cfg.startup_timeout_s,
             max_restarts=cfg.max_restarts,
+            notify=notify,
         )
         self._started = False
 
@@ -93,10 +94,22 @@ class WhisperVulkanBackend:
                 "re-run scripts/fetch-models.ps1.",
             )
         if self.client.port_is_open():
+            # This is the message he read twice in one evening, so it names the
+            # one command that clears every version of this - a copy that is
+            # running, a copy that is wedged, and the whisper-server an earlier
+            # one left behind - rather than describing the situation.
+            healthy = self.client.is_healthy()
+            what = ("a transcription server that is already running and healthy"
+                    if healthy else "something")
             raise BackendUnavailableError(
-                f"Something is already listening on {self.cfg.host}:{self.cfg.port}.",
-                "Another copy of dictate may already be running. Close it, or "
-                "change [whisper] port in your config.",
+                f"{self.cfg.host}:{self.cfg.port} is already in use by {what}, "
+                f"so dictate cannot start its own.",
+                "Type this - it stops a copy that is running and clears one that "
+                "an earlier run left behind:\n"
+                "  dictate stop\n"
+                "then start dictate again. If you want two copies on this PC, "
+                "give this one a different port with [whisper] port in your "
+                "config.",
             )
 
     def start(self) -> None:
