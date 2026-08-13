@@ -1,9 +1,11 @@
 """Live captions: the streaming Zipformer, on the CPU, via sherpa-onnx.
 
-Everything this produces is DISPLAY ONLY. It is drawn on the caption overlay
-while the hotkey is held and thrown away the moment it is released - it never
-reaches the clipboard, the keyboard, or the document. That is what makes a fast,
-ALL-CAPS, unpunctuated model acceptable here (docs/DESIGN.md, decision 4).
+Everything this produces is DISPLAY ONLY. It is drawn on the caption overlay and
+nowhere else - it never reaches the clipboard, the keyboard, or the document.
+The decoder is closed the moment the hotkey is released, so nothing more can be
+produced; the words already on screen stay up, greyed, until the real text lands.
+That is what makes a fast, ALL-CAPS, unpunctuated model acceptable here
+(docs/DESIGN.md, decision 4).
 
 Threads: 2. The prior measurements found this model gets *worse* with more - six
 threads was three times slower than two, because the per-chunk work is tiny and

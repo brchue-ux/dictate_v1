@@ -73,13 +73,23 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   hard error by design, so a key that disappears from `[overlay]` makes the product
   owner's existing `dictate.toml` — written by `dictate init` from the example —
   fail to load on startup. Add keys; deprecate by ignoring, never by deleting.
-  `tests/test_overlay.py` asserts every key in the shipped example still exists.
+  `tests/test_config.py::ShippedExample` asserts every key of every section in the
+  shipped example still exists.
 - **The overlay lays itself out once per appearance, never per caption.** Text and
   colour are all `_apply` may touch; `geometry()`, `SetWindowPos` and
   `update_idletasks` belong in `_show()`. A window that re-measures every 320 ms is
   visibly restless in peripheral vision, and re-measuring is also the slower option.
   `tests/test_overlay.py::TheLooksOwnRules` greps for this, against source with the
   comments stripped — that file discusses the calls it must not make, at length.
+- **The caption stays on screen from press until the pasted text lands**, greyed
+  once the hotkey is released. Constraint 4 (caption text never reaches the
+  document) is therefore held by the *shape* of the code, not by when the screen is
+  cleared: the pipeline never holds caption text, so the release passes
+  `platform.base.KEEP` (no text) rather than re-sending it; `Utterance` has no
+  string field; `injector.send` has one call site. Keep all four true —
+  `tests/test_pipeline.py::CaptionsCanNeverBePasted` is where each is held. `KEEP`
+  may only ever keep text that is on screen *now*, or a previous utterance's words
+  reappear under a new one.
 - **Everything in `[overlay]` is a pixel value at 100% display scaling**, multiplied
   by the chosen monitor's DPI in `geometry.plan_slab`. Fonts are sized in pixels
   (Tk's negative-size form), not points, so scaling is decided here rather than
@@ -109,6 +119,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `platform/windows/tray.py` is the thin Win32 half and is untested by anyone. It must
   never block the app - a tray that will not start is reported and skipped, like live
   captions. Every menu item names the command that does the same thing, on purpose.
+- **The dictation history is a file of everything he says, so it is his.** All of
+  `src/dictate/history.py`, pure and tested anywhere. Three things are load-bearing:
+  every line of his text is indented, which is what makes splitting the file back
+  into entries on the rule line exact; the write is `os.replace` of a temp file, so
+  an interrupted one cannot leave half a history; and `[history] enabled = false`
+  stops new writes but never deletes what is there — that stays his decision, via
+  `dictate history --delete` or the tray. It also must never cost him a dictation:
+  `Pipeline._remember` and the store both swallow, and the store complains once.
 - **`dictate overlay`** shows the caption panel with sample text and no dictation.
   It is the only way anyone without Windows can get the look in front of the product
   owner, so keep it working when you change the overlay.

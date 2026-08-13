@@ -37,6 +37,8 @@ CHECK = "check"
 UPDATE = "update"
 LOG = "log"
 STATUS = "status"
+HISTORY = "history"
+HISTORY_DELETE = "history-delete"
 
 
 class TrayStatus(Enum):
@@ -92,6 +94,10 @@ class TrayState:
     #: the one thing that could hurt, so while this is true the menu will not
     #: offer to.
     updating: bool = False
+    #: Whether a dictation history is being kept. It decides whether the menu
+    #: mentions one at all: a feature he has turned off has no business being on
+    #: the only surface he can see.
+    history: bool = False
 
     @property
     def colour(self) -> str:
@@ -147,18 +153,29 @@ def status_line(state: TrayState) -> str:
 def menu(state: TrayState) -> list[MenuItem]:
     """What right-clicking the icon offers.
 
-    Six lines, in three groups: what it is doing, the two that change whether it
-    is running, and the two that change which version it is. None of them needs
-    him to have worked out what went wrong first - Stop clears a stuck copy as
-    well as a healthy one, because `dictate stop` does.
+    Six lines, in four groups: what it is doing, the two that change whether it
+    is running, the two that change which version it is, and the log - plus two
+    more when a dictation history is being kept. None of them needs him to have
+    worked out what went wrong first - Stop clears a stuck copy as well as a
+    healthy one, because `dictate stop` does.
 
     **Check for updates changes nothing, ever**, which is why it is offered even
     while an update is already running: it is a report and cannot make anything
     worse. **Update now** is the one item that can, and there is exactly one
     thing it must not do, which is start twice - the second copy would race the
     first over the same folder. So it goes grey the moment one is running.
+
+    The two history lines are the answer to "where is it" and "get rid of it",
+    which are the only two things anyone needs from a personal record they did
+    not have to ask for. Delete does it there and then, with no dialog asking
+    whether he meant it - a running dictate holds the single-instance lock, and
+    a modal dialog behind that lock can sit unanswered until the next morning
+    while `dictate run` answers "already running" (`autostart.run_at_logon`
+    carries the whole reasoning). The price of that is an item that says exactly
+    what it does; what a mis-click costs is a reading copy of text that already
+    reached his documents.
     """
-    return [
+    items = [
         MenuItem(STATUS, status_line(state), enabled=False, separator_after=True),
         MenuItem(STOP, "Stop dictate", "dictate stop", default=True),
         MenuItem(RESTART, "Restart dictate", "dictate stop, dictate run",
@@ -168,6 +185,13 @@ def menu(state: TrayState) -> list[MenuItem]:
                  enabled=not state.updating, separator_after=True),
         MenuItem(LOG, "Open the log folder"),
     ]
+    if state.history:
+        items += [
+            MenuItem(HISTORY, "Open what you have dictated", "dictate history"),
+            MenuItem(HISTORY_DELETE, "Delete what you have dictated",
+                     "dictate history --delete"),
+        ]
+    return items
 
 
 @dataclass
@@ -180,12 +204,21 @@ class TrayActions:
     open_log: Callable[[], None]
     check_updates: Callable[[], None]
     update_now: Callable[[], None]
+    open_history: Callable[[], None] | None = None
+    delete_history: Callable[[], None] | None = None
     handlers: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.handlers = {STOP: self.stop, RESTART: self.restart,
                          CHECK: self.check_updates, UPDATE: self.update_now,
                          LOG: self.open_log}
+        # Only what was supplied. An action that is not here does nothing rather
+        # than raising - which is the right answer for a menu id from a copy of
+        # the menu built before the history was turned off.
+        for key, action in ((HISTORY, self.open_history),
+                            (HISTORY_DELETE, self.delete_history)):
+            if action is not None:
+                self.handlers[key] = action
 
     def invoke(self, key: str) -> bool:
         """Run the action for `key`. False if there is nothing to run, which is

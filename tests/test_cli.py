@@ -107,6 +107,65 @@ class InitCommand(unittest.TestCase):
             self.assertIn("hotkey", target.read_text(encoding="utf-8"))
 
 
+class HistoryCommand(unittest.TestCase):
+    """`dictate history` has to work when the app does not - a record of
+    everything he has said must not be trapped behind a copy that will not
+    start. So it runs on any platform, and so does deleting it."""
+
+    def config_with_history(self, tmp: str) -> Path:
+        path = Path(tmp) / "dictate.toml"
+        path.write_text("[history]\nkeep = 3\n", encoding="utf-8")
+        return path
+
+    def test_it_says_where_the_file_is_and_how_to_delete_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.config_with_history(tmp)
+            code, out, _ = run(["--config", str(cfg), "history"])
+        self.assertEqual(code, 0)
+        self.assertIn("history.txt", out)
+        self.assertIn("dictate history --delete", out)
+
+    def test_it_counts_what_is_in_there(self):
+        from dictate import config as config_mod, history as history_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.config_with_history(tmp)
+            store = history_mod.HistoryStore(
+                history_mod.path_for(config_mod.load(cfg)), keep=3)
+            store.record("One.")
+            store.record("Two.")
+            code, out, _ = run(["--config", str(cfg), "history"])
+        self.assertEqual(code, 0)
+        self.assertIn("2 of the last 3", out)
+
+    def test_delete_removes_the_file_and_says_so(self):
+        from dictate import config as config_mod, history as history_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.config_with_history(tmp)
+            path = history_mod.path_for(config_mod.load(cfg))
+            history_mod.HistoryStore(path).record("Something.")
+            self.assertTrue(path.exists())
+
+            code, out, _ = run(["--config", str(cfg), "history", "--delete"])
+            self.assertEqual(code, 0)
+            self.assertIn("deleted", out)
+            self.assertFalse(path.exists())
+
+            # And again, with nothing there: a message, not a failure.
+            code, out, _ = run(["--config", str(cfg), "history", "--delete"])
+            self.assertEqual(code, 0)
+            self.assertIn("nothing to delete", out)
+
+    def test_it_says_when_the_history_is_turned_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dictate.toml"
+            path.write_text("[history]\nenabled = false\n", encoding="utf-8")
+            code, out, _ = run(["--config", str(path), "history"])
+        self.assertEqual(code, 0)
+        self.assertIn("nothing new is being kept", out)
+
+
 class Parser(unittest.TestCase):
     def test_no_arguments_prints_help_and_succeeds(self):
         code, out, _ = run([])

@@ -16,13 +16,15 @@ per-use charges.
    hold hotkey ──► mic ──► the whole take, kept in memory
                      │
                      ├──► live captions on screen  (fast, rough, DISPLAY ONLY —
-                     │    they are thrown away when you let go)
+                     │    they never reach your document)
                      │
    release ──────────┴──► Whisper large-v3-turbo on your GPU
-                                ▼
-                          strip the "um"s
+                                ▼         (the captions stay on screen, greyed,
+                          strip the "um"s  while this runs)
                                 ▼
                           paste into the window you were in
+                                ▼
+                          the captions go, the panel says "pasted"
 ```
 
 The captions and the pasted text come from two different models, on purpose. The
@@ -362,7 +364,7 @@ dictate punctuate --explain "hello comma world"
 
 The words that appear while you are speaking come up in a panel at the bottom of
 the screen. To look at it without dictating — it shows sample text and runs the
-whole appear, fill, clear and fade cycle:
+whole appear, fill, hold, clear and fade cycle:
 
 ```powershell
 dictate overlay
@@ -373,7 +375,23 @@ see the result in about two seconds instead of a record-speak-release round trip
 `dictate overlay --error` shows the failure state, `--repeat 3` loops it, and
 `--rate 150` runs the words in faster than real dictation does.
 
-Three things about it are worth knowing:
+**What it shows, at each moment:**
+
+| While you | The panel says | And shows |
+|---|---|---|
+| hold the hotkey | `listening`, in gold | your words, arriving as you speak |
+| have let go, and it is transcribing | `thinking`, in grey | *the same words*, now grey too |
+| have had the text pasted | `pasted`, in grey | nothing — the words go as the text lands |
+| are looking at a failure | `error`, in red | what went wrong, for six seconds |
+
+The words staying up through the middle row is the point: that is the second or
+so where the graphics card is working and there used to be an empty panel. They
+go grey the moment you let go — that is how you can tell it registered — and
+they are still the caption model's ALL CAPS, so they can never be mistaken for
+the text that is about to be pasted. What ends them is the text actually
+arriving in your document.
+
+Three other things about it are worth knowing:
 
 * **It appears on the screen you are working on.** Not always the primary one —
   it uses the monitor holding the window you were in when you pressed the
@@ -423,6 +441,46 @@ idle_release_minutes = 0
 `dictate doctor` tells you what it is set to and whether a model is loaded at
 this moment.
 
+### What you have dictated, kept so you can look back over it
+
+Every dictation that actually gets pasted is written to a plain text file,
+newest first. To read it — or to get rid of it:
+
+```powershell
+dictate history            # opens it
+dictate history --delete   # deletes the whole thing, there and then
+```
+
+Both are on the icon by the clock too, which is where to find them when dictate
+started itself at logon and there is no window to type in.
+
+It lives beside your config, as `%APPDATA%\dictate\history.txt`. Each entry is:
+
+* **the text that was pasted**,
+* **when you said it, and how long you spoke for**,
+* and **what Whisper heard before dictate changed anything** — but only when it
+  did. Two things can: the cleanup rules, which delete, and spoken punctuation,
+  which substitutes. So that line always means "look, this is what dictate did
+  to it" rather than repeating the same sentence twice.
+
+It does not record how long transcription took, which window the text went to,
+or a dictation that failed and was never pasted. Every line in it is text you
+said that landed somewhere.
+
+**It is bounded.** The last **200** dictations, with the older ones dropping off
+the end. Change that, or turn the whole thing off, in your config:
+
+```toml
+[history]
+enabled = true
+keep = 200
+```
+
+It is yours and it stays on this machine: nothing about it is sent anywhere,
+nothing else reads it, and there is no code in dictate that could. Turning it
+off stops anything new being written — a file that is already there is left
+alone, deliberately, so delete it first if you want it gone.
+
 ### Your clipboard is not touched
 
 The default paste method synthesises the characters as keystrokes and never uses
@@ -442,7 +500,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 597 tests, run and passing
+### Verified anywhere — NNN tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -453,8 +511,21 @@ python -m unittest discover -s tests -t .
   (transcription failure, paste failure, unexpected exception, captions failing
   to start, captions crashing mid-sentence, an unreadable focused window, an
   overlong utterance, a tap of the hotkey, silence, overlapping utterances).
-* That caption text never reaches the injector, and is cleared and destroyed on
-  release.
+* **That caption text can never be pasted, whatever is on screen and whenever.**
+  It is not held anywhere in the pipeline, the value handed to the paste worker
+  has no field a string could travel in, the injector is called from exactly one
+  place, and the decoder that produced the words is shut on release. Including
+  the case the new timing creates: the caption still up, in front of you, at the
+  moment the real text is delivered — and still not what is delivered.
+* **That the words stay up until the text lands, and not a moment longer**: on
+  screen while the graphics card works, gone as the text arrives, gone
+  immediately on a mis-press, and replaced by the message when something fails.
+  Nothing carries over from one dictation to the next.
+* **What the dictation history keeps, and what it will not do**: newest first,
+  the raw text only when the cleanup rules changed something, capped so the file
+  cannot grow without limit, written atomically, deleted completely, nothing at
+  all written when it is off, and a disk that will not take it costing one
+  message rather than the dictation.
 * That the target window is captured at press and not at paste time.
 * The resident-backend lifecycle against a **real child process**: start, wait
   for health, slow start, crash → restart, repeated crashes → give up with a
@@ -516,8 +587,10 @@ python -m unittest discover -s tests -t .
   back. The containment itself is Windows' job and is proved on Windows; that
   nothing slips past it is proved here.
 * **What the tray icon says and offers**: the tooltip, the status line, the six
-  menu items, that each names the command that does the same thing, and that the
-  icon's own bytes are an icon Windows can read whose colour is the status.
+  menu items — eight when a dictation history is being kept, and neither of the
+  two extra ones when it is off — that each names the command that does the same
+  thing, and that the icon's own bytes are an icon Windows can read whose colour
+  is the status.
 * **That an update chosen from the icon runs somewhere else** — a separate
   process, with a console of its own, breaking out of the job that would take it
   down when this copy stops. Doing the work inside the copy being replaced is
@@ -568,7 +641,7 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
-* **The 597 tests above, on Windows** as well as on Linux — which is where the
+* **The NNN tests above, on Windows** as well as on Linux — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.
 * **That a supervised child process cannot outlive its parent.** CI starts a
@@ -658,6 +731,17 @@ misbehaves.
   always-on-top window is built from the documented Win32 extended styles, but
   no one has watched it fail to steal focus. This is the highest-risk unverified
   piece, because if it does steal focus the paste lands in the wrong window.
+* **The caption held on screen while it thinks, on a real screen.** That the
+  words stay, that they go grey and read as "not final yet", that a second of it
+  looks like waiting rather than like something stuck, and that the moment they
+  disappear reads as the text landing. What is tested here is the decision — the
+  panel is told to keep the words, told what colour to draw them, and told to
+  clear them exactly when the paste happens — never how any of it looks.
+  `dictate overlay` shows the whole cycle in about ten seconds.
+* **The two history items on the tray menu**, like the rest of that menu: whether
+  they appear, and whether clicking Delete really removes the file on his
+  machine. The store underneath is tested here; `os.startfile` opening the file
+  for him has run nowhere, and `dictate history` from a prompt is the fallback.
 * **What the overlay looks like.** Nobody here has run it. The colours, the type
   and the layout arithmetic were checked by rendering the panel at exactly the
   sizes the code uses, with the real Fira Code file, against a white document, a

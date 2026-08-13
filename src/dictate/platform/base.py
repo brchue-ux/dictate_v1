@@ -52,6 +52,20 @@ class OverlayState(Enum):
     ERROR = "error"              # something the user needs to read
 
 
+#: `set_state(state, KEEP)` changes the state and leaves the words that are
+#: already on screen exactly where they are. It is what the hotkey release does,
+#: so the caption he was reading stays up while the GPU works instead of the
+#: panel emptying at the moment he most wants to see something.
+#:
+#: It is spelled as "no text supplied" rather than as a string on purpose. The
+#: caller cannot put caption text back on screen this way, because the caller
+#: never had the caption text: only the streaming session and the overlay's own
+#: label ever hold it (`pipeline.pump_captions`). That is what keeps constraint 4
+#: - caption text is display-only and never reaches the document - a property of
+#: the shape of the code rather than of when the text happens to be cleared.
+KEEP = None
+
+
 @runtime_checkable
 class WindowTracker(Protocol):
     def foreground(self) -> TargetWindow | None:
@@ -81,9 +95,17 @@ class CaptionOverlay(Protocol):
     equivalent) and must never call a focus or activate API.
     """
 
-    def set_state(self, state: OverlayState, text: str = "",
+    def set_state(self, state: OverlayState, text: str | None = KEEP,
                   target: TargetWindow | None = None) -> None:
         """Update what is on screen. Safe to call from any thread.
+
+        `text` is what the big line should say; `""` empties it. `KEEP` (the
+        default, which is `None`) means "leave what is on screen alone" - see
+        the note on `KEEP` above for why that is spelled as an absence.
+
+        An implementation must not carry text across appearances: when the
+        panel is not up there is nothing to keep, and a caption from a previous
+        utterance must never come back with it.
 
         `target` is the window captured at hotkey press, passed so the overlay
         can appear on the display that window is on - which is the display the

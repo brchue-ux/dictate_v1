@@ -55,6 +55,13 @@ is the condition this thing is looked at in most.
 3. **The caption thread is never made to wait.** `set_state()` still only
    enqueues. The fade runs on its own `after` chain on the UI thread, holds no
    lock, and does no work per frame beyond one attribute set.
+4. **The words stay until the text lands, and change colour rather than
+   moving.** The release keeps them on screen (`base.KEEP`) and greys them; the
+   paste clears them. Nothing about that resizes or repositions anything, which
+   is rule 1 again: the slab is the same object throughout, lit differently.
+   What it must never do is let the held caption read as the finished text -
+   see docs/DESIGN.md constraint 4, which is also where the guarantee that it
+   can never BE the finished text now lives.
 """
 
 from __future__ import annotations
@@ -98,7 +105,8 @@ class TkCaptionOverlay:
 
     def __init__(self, cfg: OverlayConfig, *, notify=None) -> None:
         self.cfg = cfg
-        self._queue: queue.Queue[tuple[OverlayState, str, TargetWindow | None]] = queue.Queue()
+        self._queue: queue.Queue[
+            tuple[OverlayState, str | None, TargetWindow | None]] = queue.Queue()
         self._notify = notify
         self._root = None
         self._frame = None
@@ -111,6 +119,10 @@ class TkCaptionOverlay:
         self._visible = False
         self._layout: SlabLayout | None = None
         self._state = OverlayState.HIDDEN
+        #: What the big line currently says. Held so that a state change can
+        #: keep it (see `_apply`); the only copy of a caption anywhere in
+        #: dictate, and it is a string on its way to a Tk label and nowhere else.
+        self._text = ""
         self._target: TargetWindow | None = None
         self._hide_job = None
         self._fade_job = None
@@ -122,9 +134,12 @@ class TkCaptionOverlay:
 
     # -- public, thread-safe ---------------------------------------------
 
-    def set_state(self, state: OverlayState, text: str = "",
+    def set_state(self, state: OverlayState, text: str | None = None,
                   target: TargetWindow | None = None) -> None:
         """Update what is on screen. Safe to call from any thread.
+
+        `text` of `None` (`platform.base.KEEP`) leaves the words that are on
+        screen alone; `""` clears them.
 
         `target` is the window captured at hotkey press. It decides which
         monitor the captions appear on, and is only read when the overlay is
@@ -313,19 +328,30 @@ class TkCaptionOverlay:
             self._root.quit()
             return
         latest = None
+        newest_text = None
         while True:
             try:
                 latest = self._queue.get_nowait()
             except queue.Empty:
                 break
+            if latest[1] is not None:
+                newest_text = latest[1]
         if latest is not None:
+            state, text, target = latest
+            # Only the newest state is drawn - three updates in one 30 ms tick
+            # are one redraw. But a state that KEEPS the words must keep the
+            # newest words, not the ones from the last tick: if the final
+            # caption arrived in the same tick as the release, collapsing them
+            # would freeze the panel a word or two behind what he said.
+            if text is None and newest_text is not None:
+                text = newest_text
             try:
-                self._apply(*latest)
+                self._apply(state, text, target)
             except Exception:
                 log.exception("overlay update failed")
         self._root.after(30, self._poll)
 
-    def _apply(self, state: OverlayState, text: str,
+    def _apply(self, state: OverlayState, text: str | None,
                target: TargetWindow | None) -> None:
         if self._hide_job is not None:
             self._root.after_cancel(self._hide_job)
@@ -333,12 +359,43 @@ class TkCaptionOverlay:
 
         if state is OverlayState.HIDDEN:
             self._state = state
+            self._text = ""
             self._hide()
             return
 
+        # KEEP (None) means "leave the words where they are": the release does
+        # this, so what he was reading stays up while the GPU works. It can only
+        # ever keep something that is on screen NOW - with the panel down there
+        # is nothing to keep, and the previous utterance's caption reappearing
+        # under a new one is exactly the confusion this must not create.
+        if text is None:
+            text = self._text if self._visible else ""
+        self._text = text
+
+        label, tone = _LABELS[state]
+        colour = {
+            "live": self.cfg.accent,
+            "idle": self.cfg.muted,
+            "bad": self.cfg.error,
+        }[tone]
+        self._bar.configure(bg=colour)
+        self._status.configure(text=label, fg=colour)
+        # The big line carries the caption while he speaks and while the GPU
+        # thinks, and the message when something went wrong. Two things say
+        # which of those he is looking at, and both are colour rather than
+        # movement: the bar goes from accent to muted, and the words themselves
+        # go grey the moment he lets go. They are still there to read; they are
+        # visibly no longer live; and they are still the caption model's ALL
+        # CAPS, so they cannot be taken for the finished text. What ends them is
+        # the text landing - DONE arrives with an empty string.
+        self._label.configure(text=text, fg=self._text_colour(state))
+        self._state = state
+
         if not self._visible:
             # The one place geometry is decided. Everything after this point in
-            # the utterance only ever changes text and colour.
+            # the utterance only ever changes text and colour. It runs after the
+            # text has been set, so the first frame is this utterance's words
+            # rather than a flash of the last one's.
             self._target = target
             self._show()
         else:
@@ -351,25 +408,19 @@ class TkCaptionOverlay:
             if self._fade.target < self.cfg.opacity:
                 self._fade_to(self.cfg.opacity, self.cfg.fade_in_ms)
 
-        label, tone = _LABELS[state]
-        colour = {
-            "live": self.cfg.accent,
-            "idle": self.cfg.muted,
-            "bad": self.cfg.error,
-        }[tone]
-        self._bar.configure(bg=colour)
-        self._status.configure(text=label, fg=colour)
-        # The big line carries the caption while listening and the message when
-        # something went wrong; it is empty for THINKING and DONE, which is what
-        # makes the caption text visibly disappear the moment the key is
-        # released. The slab itself does not go with it - that is the point.
-        self._label.configure(text=text)
-        self._state = state
-
         if state is OverlayState.DONE:
             self._hide_job = self._root.after(DONE_LINGER_MS, self._hide)
         elif state is OverlayState.ERROR:
             self._hide_job = self._root.after(ERROR_LINGER_MS, self._hide)
+
+    def _text_colour(self, state: OverlayState) -> str:
+        """Only the caption held through the thinking phase is greyed.
+
+        ERROR keeps the reading colour: that line is a message he has to be able
+        to read, and the bar and the state word are already carrying the red.
+        """
+        return self.cfg.muted if state is OverlayState.THINKING \
+            else self.cfg.foreground
 
     # -- geometry, once per appearance -----------------------------------
 

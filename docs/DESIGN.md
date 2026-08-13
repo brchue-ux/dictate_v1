@@ -38,7 +38,7 @@ Post-release budget: **2–4 s**. Estimated GPU pass: **0.4–1.0 s**.
 | 1 | **GPU route: whisper.cpp + Vulkan** | Vulkan ships with the ordinary Adrenalin driver. The ROCm alternative is not merely riskier — it is blocked on this exact card: AMD ships rocBLAS kernels for gfx1100+ only, and **zero** files for gfx1030, in all of ROCm 7.1.1 / 7.2 / 7.2.1. Whisper is almost entirely matrix multiplies, so that path has nothing to run them with. `scripts/check-rocm-gfx1030.py` re-checks this in 30 seconds. |
 | 2 | **Build whisper.cpp from source** | No official Windows Vulkan binary exists (whisper.cpp #3673, #3691, both open). The alternative was a stranger's zip. Building it also yields `parakeet-cli.exe`, and — the part that matters operationally — lets you roll back when a Vulkan regression ships, which has happened before on this exact architecture (llama.cpp #22992). `scripts/build-whisper-vulkan.ps1` prints the commit it built and tells you to write it down. |
 | 3 | **Keep Whisper `large-v3-turbo`** | Parakeet was only ever on the table because turbo missed the budget *on CPU*. Moving the batch pass to the GPU removes that reason, and keeping Whisper honours what was originally asked for. |
-| 4 | **Streaming Zipformer for captions, display-only** | Whisper structurally cannot do live captions — it has no partial-audio mode, and every "streaming Whisper" fakes it by re-running on overlapping chunks and rewriting words already shown. The accepted cost is that the caption text visibly differs from the pasted text (ALL CAPS, unpunctuated, occasionally wrong). That cost is contained *by the architecture*: the caption never reaches the document. |
+| 4 | **Streaming Zipformer for captions, display-only** | Whisper structurally cannot do live captions — it has no partial-audio mode, and every "streaming Whisper" fakes it by re-running on overlapping chunks and rewriting words already shown. The accepted cost is that the caption text visibly differs from the pasted text (ALL CAPS, unpunctuated, occasionally wrong). That cost is contained *by the architecture*: the caption never reaches the document. Constraint 4 below is where that is enforced — and where the timing of what is on screen, which is not the same question, is set out. |
 
 **These are closed.** Decision 4 in particular is load-bearing: it is the only
 reason a sloppy caption model is acceptable at all.
@@ -194,13 +194,50 @@ and restored, and if the clipboard holds something that cannot be faithfully put
 back (an image, a file list) it falls back to keystrokes for that paste rather
 than destroying it.
 
-### 4. Caption text is discarded on release
+### 4. Caption text is display-only — it can never reach the document
 
-`Pipeline.finish_utterance` clears the overlay text, drops the session reference
-and bumps a generation counter that invalidates every queued and in-flight
-caption block, then hands the session to the caption thread to close (which also
-empties its text). Four tests in `CaptionsAreDiscarded` cover this, including
-"audio queued before release never updates the screen after it".
+`Pipeline.finish_utterance` drops the session reference and bumps a generation
+counter that invalidates every queued and in-flight caption block, then hands the
+session to the caption thread to close (which also empties its text). So from the
+release onwards, no caption text can be *produced*. What makes it unpasteable is
+separate and structural:
+
+* **The pipeline never holds it.** `pump_captions` reads a session's text and
+  hands it straight to the overlay without keeping a reference. The only copy
+  anywhere is the overlay's own Tk label.
+* **The value that crosses into the paste path carries audio.** `Utterance` has
+  PCM, a sample rate, a window handle and two numbers — no field a string could
+  travel in.
+* **`injector.send` is called from exactly one place**, in `_finalize`, with
+  what came out of `batch.transcribe`.
+
+`tests/test_pipeline.py::CaptionsCanNeverBePasted` holds each of those, plus the
+awkward case: the caption still on screen at the moment the real text is
+delivered, and still not what is delivered.
+
+**Amended once it was in daily use.** Clearing the screen at release was one
+*implementation* of this constraint, and it left him watching an empty panel for
+the 0.4–1.0 s the GPU takes — the moment he is most likely to wonder whether
+anything is happening. So the words now stay up from press until the text lands:
+
+| Stage | State word | The big line |
+|---|---|---|
+| hotkey held | `listening`, accent | the caption, arriving |
+| released, GPU running | `thinking`, muted | the same caption, drawn in `muted` |
+| text delivered | `pasted`, muted | empty — the words go as the text lands |
+| failed | `error` | the message |
+
+Three things make the held caption safe to look at. It goes grey the moment he
+lets go, so the panel visibly registered the release and the words visibly stop
+being live. It is still ALL CAPS and unpunctuated, so it cannot be read as the
+finished text. And what removes it is the paste itself, so "the words went" means
+"it landed" rather than "a timer expired".
+
+The release passes `platform.base.KEEP` rather than any text, which is the point:
+the pipeline could not re-send the caption if it wanted to, because it does not
+have it. The overlay only ever keeps text that is on screen *now* — nothing
+survives the panel being hidden, so a previous utterance's caption cannot
+reappear under a new one.
 
 ### 5. Live captions run on 2 CPU threads
 
@@ -320,6 +357,53 @@ the word "period" out of his sentences. One line in `dictate.toml` turns it on.
 
 ---
 
+## The dictation history
+
+He asked to "keep a history just for review". That framing is the whole
+specification, and it settles more than it looks like it does: a thing to open
+and read, not analytics, not telemetry, and nothing that leaves the machine.
+
+`history.py` holds all of it and is plain standard library, so it is tested off
+Windows like `recovery.py` and `tray.py`. The only platform call involved is the
+one that opens the file for him.
+
+* **What it keeps**: the text that was pasted, when he said it, how long he
+  spoke for, and — only when dictate changed something on the way — what Whisper
+  heard before the cleanup rules and spoken punctuation ran. That last pair is
+  the evidence for "it ate a word" and for what a mark substituted, which is the
+  argument a history has to be able to settle; when neither stage changed
+  anything it would be the same sentence twice, so it is not written.
+* **What it deliberately does not keep**: how long transcription took (a
+  developer's question, already in the log), which window the text went to (that
+  would make it a record of his day rather than of his words), and anything
+  about a dictation that failed. Every line in the file is text that landed.
+* **Where**: `history.txt` beside his `dictate.toml`, in the folder he already
+  knows. Plain text, newest first, wrapped to 76 columns because Notepad opens
+  with word wrap off and a dictation is one paragraph however long it is.
+* **Bounded** by entry count — `[history] keep`, 200 by default — because
+  newest-first means the file is rewritten whole each time, so the rewrite has
+  to stay cheap. `config.validate()` refuses a cap high enough to make that
+  rewrite something he would notice.
+* **Deleting it** is one item on the tray menu and one command,
+  `dictate history --delete`, and it removes the file. There is no confirmation
+  dialog: a running dictate holds the single-instance lock, and a modal dialog
+  behind that lock can sit unanswered until the next morning while `dictate run`
+  answers "already running" — the reasoning is in `autostart.run_at_logon`, and
+  it applies to any dialog this app might show, not only that one. So the item
+  says exactly what it does instead. A mis-click costs a reading copy of text
+  that already reached his documents.
+* **Turning it off** stops anything new being written. It does *not* delete what
+  is already there: data disappearing as a side effect of editing a config file
+  is the wrong kind of surprise, and the config comment next to `enabled` says
+  so and names the command.
+
+The pipeline's share of this is one call, after the text has been delivered,
+guarded so that a history that cannot be written can never turn a dictation that
+worked into a reported failure. The store says so once and then stops going on
+about it.
+
+---
+
 ## Threading
 
 | Thread | Owns | Rule |
@@ -352,6 +436,9 @@ the audio callback; the utterance buffer feeding the GPU pass is never dropped.
   logon is a **per-user Task Scheduler logon task** running in his own session -
   see `src/dictate/autostart.py`, which carries the rest of the reasoning.
 * **No installer, no Windows CI.** Separate follow-up task.
+* **Nothing on top of the dictation history but opening it.** No re-pasting from
+  it, no search, no window of its own. It is a text file he reads; each of those
+  is a separate thing to ask for, and none of them was asked for.
 * **No ROCm path.** Blocked on this card; kept only as the diagnostic in
   `scripts/check-rocm-gfx1030.py`.
 * **`dictate update` does not adopt the install folder as a git clone.** The

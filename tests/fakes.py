@@ -161,8 +161,19 @@ class FakeWindows:
 
 
 class FakeOverlay:
+    """A screen that remembers everything it was ever asked to show.
+
+    It implements `KEEP` the way the real overlay does - a state change with no
+    text leaves the words alone, and nothing survives the panel being hidden -
+    so a test can ask what he would actually be looking at at any point, not
+    just what the pipeline said.
+    """
+
     def __init__(self) -> None:
-        self.history: list[tuple[OverlayState, str]] = []
+        #: Exactly what was passed, `KEEP` (None) included.
+        self.history: list[tuple[OverlayState, str | None]] = []
+        #: What was on screen after each call, with `KEEP` resolved.
+        self.screen: list[tuple[OverlayState, str]] = []
         #: Every target handed to set_state, so tests can hold in place that the
         #: window captured at press is what decides which monitor is used.
         self.targets: list[TargetWindow | None] = []
@@ -171,14 +182,25 @@ class FakeOverlay:
         #: app. An Event rather than a flag so a test can wait for it.
         self.closed = threading.Event()
 
-    def set_state(self, state: OverlayState, text: str = "",
+    def set_state(self, state: OverlayState, text: str | None = None,
                   target: TargetWindow | None = None) -> None:
         with self._lock:
+            showing = self.showing
+            if state is OverlayState.HIDDEN:
+                showing = ""
+            elif text is not None:
+                showing = text
             self.history.append((state, text))
+            self.screen.append((state, showing))
             self.targets.append(target)
 
     def close(self) -> None:
         self.closed.set()
+
+    @property
+    def showing(self) -> str:
+        """The words on screen right now."""
+        return self.screen[-1][1] if self.screen else ""
 
     @property
     def states(self) -> list[OverlayState]:
@@ -186,7 +208,7 @@ class FakeOverlay:
 
     @property
     def captions(self) -> list[str]:
-        return [t for s, t in self.history if s is OverlayState.LISTENING and t]
+        return [t for s, t in self.screen if s is OverlayState.LISTENING and t]
 
 
 class InlineSubmit:
