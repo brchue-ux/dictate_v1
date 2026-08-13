@@ -97,6 +97,24 @@ class HappyPath(PipelineTestCase):
         self.assertEqual(target, pressed_window)
         self.assertNotEqual(target.handle, 999)
 
+    def test_the_overlay_is_told_which_window_the_text_is_going_to(self):
+        """It is the same handle the paste will use, and it is what decides which
+        monitor the captions appear on - so the words come up on the screen he is
+        working on rather than always on the primary one."""
+        p = self.build()
+        pressed_window = self.windows.window
+        p.start_utterance()
+        self.windows.window = TargetWindow(handle=999, title="Something Else")
+        p.push_audio(audio(600))
+        p.finish_utterance()
+
+        listening = [t for (state, _), t in zip(self.overlay.history,
+                                                self.overlay.targets)
+                     if state is OverlayState.LISTENING]
+        self.assertEqual(listening[0], pressed_window)
+        _, pasted_into = self.injector.sent[0]
+        self.assertEqual(listening[0], pasted_into)
+
     def test_captions_appear_while_recording(self):
         p = self.build()
         p.start_utterance()

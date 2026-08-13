@@ -168,7 +168,10 @@ class Pipeline:
                 except Exception:
                     self._session = None
                     log.exception("live captions failed to start")
-        self.overlay.set_state(OverlayState.LISTENING, "")
+        # The target goes with the state: it is what tells the overlay which
+        # monitor to appear on, and the window it names is the one the text will
+        # be pasted into, so the captions come up where he is already looking.
+        self.overlay.set_state(OverlayState.LISTENING, "", self._target)
         log.info("recording started, target = %s", self._target or "unknown")
         return True
 

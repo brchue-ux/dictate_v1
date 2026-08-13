@@ -112,6 +112,41 @@ And separately: **the target window handle is captured at hotkey press**
 overlay appears, a notification may pop, and the user may alt-tab.
 `test_target_window_is_captured_at_press_not_at_paste` holds this in place.
 
+That same handle is passed to `overlay.set_state()`, because it answers a second
+question as well: **which monitor the captions belong on.** The window the text
+is about to be pasted into is the window the user is looking at, so the captions
+go on its display rather than always on the primary one — falling back to the
+mouse pointer's monitor, then the primary. Nothing in that path can activate
+anything: `MonitorFromWindow`, `GetMonitorInfoW`, `GetCursorPos` and
+`GetDpiForMonitor` are read-only queries.
+
+### 2b. The overlay is laid out once per appearance, not once per caption
+
+Size and position are decided in `_show()` and then left alone. The caption path
+(`_apply`) sets text and colour and touches nothing else — no `geometry()`, no
+`SetWindowPos`, no `update_idletasks`. Two things follow from that, and both
+matter:
+
+* A window that re-measures itself every 320 ms is *restless* in peripheral
+  vision, which is most of what "the box the text comes up in is ugly" was. The
+  slab reserves two caption lines whether or not there are two to show, so it
+  never grows mid-sentence.
+* It is also strictly less work than re-measuring, so the nicer version is the
+  cheaper one. `tests/test_overlay.py::TheLooksOwnRules` greps `_apply` for
+  those calls, because this is the kind of rule an innocuous edit undoes.
+
+Everything in `[overlay]` is a measurement **at 100% display scaling**, scaled by
+the chosen monitor's DPI in `geometry.plan_slab`. The process declares itself
+per-monitor DPI aware before any window exists (`windows/monitors.py`) — without
+that Windows virtualises this process's coordinates, and the monitor rectangles
+stop being in the same space as the rectangle Tk is asked to occupy, which puts
+the overlay on the wrong screen on a mixed-DPI desktop.
+
+Fading is a cubic ease on the window's own opacity (`platform/fade.py`), out
+slower than in, resuming from the current alpha if it is interrupted. The fade
+out runs after the text has already been pasted, so its length costs nothing.
+`fade = false` restores the old snap.
+
 ### 3. The clipboard is preserved — by not touching it
 
 Default paste method is `sendinput`: the text is synthesised as Unicode
@@ -154,12 +189,18 @@ influence on the structure, and it is deliberate rather than apologetic:
   component that cannot work says so and stops. `tests/test_cli.py` asserts that
   `src/` contains no test doubles at all.
 * **The pipeline, cleanup, config, process supervision, model residency and HTTP
-  client are plain Python** and are tested for real, here — 207 tests, on Linux
+  client are plain Python** and are tested for real, here — 274 tests, on Linux
   and on Windows.
 * **The fiddly bits of the platform code were factored out into pure functions**
-  so they could be tested anyway: `platform/geometry.py` (overlay placement),
-  `platform/injection_plan.py` (UTF-16 surrogate pairs, Return vs Unicode),
-  `platform/hotkey_spec.py` (hotkey parsing).
+  so they could be tested anyway: `platform/geometry.py` (overlay placement and
+  the slab's per-monitor layout), `platform/fade.py` (the opacity ramp),
+  `platform/fonts.py` (which font actually resolved, and the fallback when one
+  did not), `platform/injection_plan.py` (UTF-16 surrogate pairs, Return vs
+  Unicode), `platform/hotkey_spec.py` (hotkey parsing).
+* **`dictate overlay`** exists because the one thing that genuinely cannot be
+  tested from here is what the overlay *looks* like. It runs the real overlay
+  through the real interface with sample text, so a look-and-react loop is
+  seconds rather than a record-speak-release round trip.
 
 What that leaves genuinely unverified is listed in the README under
 "What has not been verified".
