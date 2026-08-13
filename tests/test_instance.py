@@ -45,7 +45,10 @@ def wait_for_line(proc: subprocess.Popen, timeout: float = 20.0) -> str:
 
 class TempState(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors: on Windows a child process that has just
+        # been killed can still have the lock file open for a moment, and a
+        # temporary directory that outlives a test is not a test failure.
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.dir = Path(self._tmp.name)
         self._previous = os.environ.get("DICTATE_STATE_DIR")
         os.environ["DICTATE_STATE_DIR"] = str(self.dir)

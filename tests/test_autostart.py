@@ -277,7 +277,10 @@ class TheLogonLog(unittest.TestCase):
 
 class TempState(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors: on Windows a child process that has just
+        # been killed can still have the lock file open for a moment, and a
+        # temporary directory that outlives a test is not a test failure.
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.dir = Path(self._tmp.name)
         self._previous = os.environ.get("DICTATE_STATE_DIR")
         os.environ["DICTATE_STATE_DIR"] = str(self.dir)
@@ -298,6 +301,15 @@ class TempState(unittest.TestCase):
 
 class TheLogonStart(TempState):
     """`dictate run --autostart` - the entry point the task calls."""
+
+    def setUp(self):
+        super().setUp()
+        # A logon start configures logging, and while it is running stderr IS
+        # the logon log - which is right there and wrong here, where the file
+        # goes away at the end of the test. Put the root logger back afterwards.
+        import logging
+
+        self.addCleanup(logging.getLogger().handlers.clear)
 
     def test_it_stands_aside_for_a_copy_that_is_already_running(self):
         from dictate import instance
@@ -324,8 +336,11 @@ class TheLogonStart(TempState):
         self.assertIn("attempt 3 of 3", text)
         self.assertIn("gave up after 3 attempt(s)", text)
         self.assertIn("dictate is NOT", text)
-        # And the reason itself, not merely that there was one.
-        self.assertIn("Operating system", text)
+        # And the reason itself, not merely that there was one. The Whisper
+        # model is missing on any machine these tests run on, Windows included -
+        # unlike the platform check, which only fails off Windows.
+        self.assertIn("cannot start yet", text)
+        self.assertIn("Whisper model", text)
 
     def test_a_broken_config_is_not_retried_forever(self):
         """A config file that will not parse is not going to fix itself while we
@@ -359,7 +374,7 @@ class TheLogonStart(TempState):
 
 
 class TheStatusReport(TempState):
-    def test_it_answers_all_three_questions_without_windows(self):
+    def test_it_answers_all_three_questions(self):
         lines = "\n".join(autostart.status_lines())
         self.assertIn("start at logon:", lines)
         self.assertIn("running now:     NO", lines)
