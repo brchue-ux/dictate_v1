@@ -447,6 +447,35 @@ class TheCommands(TempState):
             autostart.disable()
 
 
+class WhatItSaysItCosts(unittest.TestCase):
+    """`enable` tells him what leaving this on costs the graphics card, and the
+    honest answer depends on `[whisper] idle_release_minutes` - so it reads that
+    rather than asserting a number. It said "1.6 GB for as long as you are
+    logged in" until the idle release made that untrue."""
+
+    def lines(self, **whisper) -> str:
+        cfg = config_mod.from_mapping({"whisper": whisper} if whisper else {})
+        return "\n".join(autostart._memory_cost_lines(cfg))
+
+    def test_by_default_it_says_the_memory_comes_back_on_its_own(self):
+        text = self.lines()
+        self.assertIn("1.6 GB", text)
+        self.assertIn("5 minutes", text)
+        self.assertIn("hands it back", text)
+        self.assertNotIn("as long as you are logged in", text)
+
+    def test_it_uses_the_release_time_that_is_actually_configured(self):
+        self.assertIn("20 minutes", self.lines(idle_release_minutes=20.0))
+        self.assertIn("1 minute", self.lines(idle_release_minutes=1.0))
+
+    def test_with_the_release_turned_off_it_says_so_plainly(self):
+        text = self.lines(idle_release_minutes=0)
+        self.assertIn("as long as you are logged in", text)
+        self.assertIn("1.6 GB", text)
+        # And the cheaper remedy before the drastic one.
+        self.assertIn("idle_release_minutes", text)
+
+
 class TheConfigSection(unittest.TestCase):
     def test_the_defaults_are_the_ones_the_task_is_built_from(self):
         cfg = config_mod.load(None)

@@ -65,6 +65,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **`dictate overlay`** shows the caption panel with sample text and no dictation.
   It is the only way anyone without Windows can get the look in front of the product
   owner, so keep it working when you change the overlay.
+- **Model residency is bounded by use, not by process lifetime.**
+  `engines/residency.py` (`ResidentModel`) wraps the batch backend and unloads
+  whisper-server after `[whisper] idle_release_minutes` so the GPU memory goes back.
+  Two things about it are load-bearing: the reload starts at hotkey **press**
+  (`app.Application._on_hotkey_press`), not at release, which is what hides the load
+  behind the speaking; and nothing whisper-specific lives in the wrapper, so a reload
+  is an ordinary `start()` and the health wait, restart budget and clean shutdown all
+  still apply. `docs/DESIGN.md` constraint 1 carries the reasoning.
 - **The Vulkan SDK's winget id is `KhronosGroup.VulkanSDK`**, not
   `LunarG.VulkanSDK` — winget files it under that publisher and only *displays*
   "LunarG Inc.". The wrong id returns "No package found matching input criteria"
@@ -102,9 +110,15 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   of the process, so the OS releases it on any kind of death and there is no such
   thing as a stale lock. It is plain stdlib and works on Linux too, which is what lets
   `tests/test_instance.py` contend for it with a real second process anywhere.
-- **`dictate stop` asks; it never kills.** dictate owns a whisper-server child holding
-  ~1.6 GB of VRAM and the port, and killing the parent orphans it. Anything that stops
-  the app has to go through the same clean shutdown Ctrl+C uses.
+- **`dictate stop` asks; it never kills.** dictate owns a whisper-server child that
+  holds the transcription port, and ~1.6 GB of VRAM whenever the model is resident.
+  Killing the parent orphans it. Anything that stops the app has to go through the
+  same clean shutdown Ctrl+C uses.
+- **What autostart costs is `[whisper] idle_release_minutes`, not "1.6 GB all day".**
+  Since the idle release, leaving the logon task on holds no VRAM between dictation
+  sessions. Anything that states the cost — the README, `autostart enable`'s output,
+  the example config — reads that setting rather than asserting a number, because
+  the honest answer is different when it is 0.
 
 ## Maintaining this file
 

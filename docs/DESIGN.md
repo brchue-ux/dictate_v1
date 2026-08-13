@@ -17,7 +17,9 @@ them — the things that will break the product if a later change ignores them.
                      │            discarded on release, never pasted
                      │
    release hotkey ───┴──► Whisper large-v3-turbo (f16), GPU, whisper.cpp Vulkan
-                                │   model RESIDENT in VRAM between utterances
+                                │   model RESIDENT in VRAM between utterances,
+                                │   released after 5 idle minutes and reloaded
+                                │   from the next hotkey PRESS (constraint 1)
                                 ▼
                           rule-based cleanup  (<10 ms)
                                 ▼
@@ -45,7 +47,7 @@ reason a sloppy caption model is acceptable at all.
 
 ## The five constraints that break the product if ignored
 
-### 1. The Whisper model stays resident in VRAM
+### 1. The Whisper model stays resident in VRAM *while he is dictating*
 
 Model load is ~2 s and ~1.6 GB. Spawning `whisper-cli.exe` per utterance pays
 that every single time and blows the 2–4 s budget before any audio is looked at.
@@ -63,6 +65,32 @@ and the deadlock where `stop()` races a restart in flight.
 > Where to look if latency is bad: the log line `transcribed Xs of audio in Ys`,
 > and whether whisper.cpp printed a Vulkan line at startup. `_log_backend_choice`
 > warns explicitly if it did not.
+
+**Amended once it was in daily use.** The same card runs games and GPU compute,
+and holding 1.6 GB for hours in which nothing was said is not a cost residency
+was meant to buy. So residency is now bounded by *use* rather than by process
+lifetime: after `[whisper] idle_release_minutes` (default 5) without dictation
+the server is shut down cleanly and the memory really goes back;
+`engines/residency.py` (`ResidentModel`) owns that.
+
+What makes it nearly free is **the warm-up starts at hotkey PRESS, not at
+release**. He holds the key and speaks for several seconds before letting go —
+which is the same order of magnitude as the load — so `app.Application.
+_on_hotkey_press` asks for the load first and starts recording second. Live
+captions come from the CPU Zipformer and are untouched, so words keep appearing
+while the GPU model loads behind them; that is decision 4 paying for itself a
+second time.
+
+The constraint above is intact where it matters: within a dictation session the
+model is resident and no utterance reloads it. `idle_release_minutes = 0` is the
+way back to the old behaviour, and `config.validate()` refuses values small
+enough to unload the model between one sentence and the next.
+
+`tests/test_residency.py` covers the state machine off Windows — the timer, the
+press-triggered warm-up, and the collisions (press during shutdown, press during
+warm-up, an utterance that ends before the load finishes, overlapping
+utterances, shutdown mid-transition). What is **not** verified anywhere is that
+the VRAM is genuinely returned; that needs the card.
 
 ### 2. The caption overlay must never take focus
 
@@ -160,8 +188,9 @@ influence on the structure, and it is deliberate rather than apologetic:
   any other platform. There is no no-op overlay and no pretend paste — a
   component that cannot work says so and stops. `tests/test_cli.py` asserts that
   `src/` contains no test doubles at all.
-* **The pipeline, cleanup, config, process supervision and HTTP client are plain
-  Python** and are tested for real, here — 299 tests, on Linux and on Windows.
+* **The pipeline, cleanup, config, process supervision, model residency and HTTP
+  client are plain Python** and are tested for real, here — 342 tests, on Linux
+  and on Windows.
 * **The fiddly bits of the platform code were factored out into pure functions**
   so they could be tested anyway: `platform/geometry.py` (overlay placement and
   the slab's per-monitor layout), `platform/fade.py` (the opacity ramp),
@@ -217,6 +246,7 @@ are left alone.
 | audio | PortAudio | calls `push_audio` only, which appends and enqueues — it never runs a model |
 | caption | — | the **only** thread that ever touches a streaming session |
 | finalize | one worker | so two utterances finishing close together paste in the order they were spoken |
+| idle watch | the residency clock | ticks `ResidentModel.check_idle()`; a short-lived worker of its own does the unload and the reload, so neither the hotkey thread nor the timer ever blocks on one |
 
 Caption audio is queued with a bounded queue that drops the oldest block when
 full. Captions are disposable, so dropping them is strictly better than blocking

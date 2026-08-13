@@ -163,6 +163,20 @@ max_restarts = 3
 # Push a second of silence through at startup so your first real sentence does
 # not pay for the GPU warming up.
 warmup = true
+# HOW LONG THE MODEL SITS IN YOUR GRAPHICS CARD WHEN YOU ARE NOT DICTATING.
+#
+# The model takes about 1.6 GB of your card's memory. After this many minutes
+# without dictating, dictate hands that memory back, so games and anything else
+# using the card get the whole 16 GB.
+#
+# You get it back by dictating: the moment you PRESS the hotkey dictate starts
+# loading the model again, while you are still speaking, so most of the time it
+# is ready before you let go. The words on screen while you talk come from a
+# different model on the processor and are not affected at all.
+#
+# Set this to 0 to keep the model loaded for as long as dictate is running,
+# which is how dictate used to behave.
+idle_release_minutes = 5
 
 
 [cleanup]
@@ -194,10 +208,10 @@ trailing_space = true
 # dictate start by itself when you log in. They do nothing to a `dictate run`
 # you type yourself.
 #
-# Leaving it on costs about 1.6 GB of graphics memory for as long as you are
-# logged in, because the transcription model stays loaded - that is what makes
-# your first sentence as fast as the rest. `dictate autostart disable` gives it
-# back.
+# Leaving it on does NOT mean holding your graphics card's memory all day: the
+# model is handed back after [whisper] idle_release_minutes without dictating
+# and taken again when you next press the hotkey. Set that to 0 and it does stay
+# loaded for as long as you are logged in - about 1.6 GB.
 #
 # How long to wait after you reach the desktop before starting. At logon the
 # graphics driver may still be loading. This one is written into the scheduled

@@ -230,6 +230,39 @@ class ProcessLifecycle(unittest.TestCase):
         self.assertIn("stub-server: listening", ctx.exception.message)
         self.assertFalse(proc.is_running())
 
+    def test_supervision_is_intact_after_a_release_and_a_reload(self):
+        """The idle release stops the server and the next hotkey press starts it
+        again. The health wait, the crash restart and its budget have to apply
+        to that second process exactly as they did to the first - a reload must
+        not leave the supervisor half-owning something.
+        """
+        port = free_port()
+        proc = self.make(port)
+        proc.start()
+        first_pid = proc.pid
+
+        proc.stop()                                   # the idle release
+        self.assertFalse(proc.is_running())
+        self.assertTrue(wait_for(
+            lambda: not WhisperServerClient("127.0.0.1", port).port_is_open()))
+
+        proc.start()                                  # the next hotkey press
+        reloaded_pid = proc.pid
+        self.assertIsNotNone(reloaded_pid)
+        self.assertNotEqual(reloaded_pid, first_pid)
+        self.assertTrue(WhisperServerClient("127.0.0.1", port).is_healthy())
+        self.assertEqual(proc._restarts, 0)           # a fresh start, a fresh budget
+
+        # Now kill the reloaded process the way a driver fault would, and check
+        # the monitor that stop() disposed of has really been put back.
+        proc._proc.kill()
+        self.assertTrue(wait_for(lambda: proc.pid not in (None, reloaded_pid),
+                                 timeout=25),
+                        "the reloaded server was not being supervised")
+        self.assertTrue(wait_for(WhisperServerClient("127.0.0.1", port).is_healthy,
+                                 timeout=15))
+        self.assertIsNone(proc.gave_up_reason)
+
     def test_stop_is_safe_to_call_twice_and_before_start(self):
         proc = self.make(free_port())
         proc.stop()
@@ -370,6 +403,42 @@ class BackendAgainstAStubServer(unittest.TestCase):
             finally:
                 backend.stop()
             self.assertFalse(backend._proc.is_running())
+
+    def test_the_backend_can_be_released_and_brought_back(self):
+        """What an idle release and the next hotkey press actually do to the
+        backend. The reload runs the whole preflight again, including the
+        "is something already on that port" check - so this also proves the
+        release genuinely gave the port back rather than orphaning a server."""
+        import tempfile
+
+        port = free_port()
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "server.py"
+            exe.write_text(STUB.read_text(encoding="utf-8"), encoding="utf-8")
+            model = Path(tmp) / "model.bin"
+            sparse_file(model, 200 * 1024 * 1024)
+
+            cfg = WhisperConfig(server_exe=str(exe), model=str(model), port=port,
+                                warmup=True, startup_timeout_s=20.0)
+            backend = WhisperVulkanBackend(cfg)
+            backend._proc.argv = [sys.executable, str(exe), "--port", str(port)]
+            self.addCleanup(backend.stop)
+
+            backend.start()
+            first_pid = backend._proc.pid
+            self.assertEqual(backend.transcribe(wav.silence(0.5), 16000),
+                             "Hello from the stub.")
+
+            backend.stop()                       # idle: give the memory back
+            self.assertFalse(backend._proc.is_running())
+            self.assertFalse(backend.is_healthy())
+
+            backend.start()                      # he dictates again
+            self.assertNotEqual(backend._proc.pid, first_pid)
+            self.assertTrue(backend.is_healthy())
+            # Same model, same server, same text - only its residency changed.
+            self.assertEqual(backend.transcribe(wav.silence(0.5), 16000),
+                             "Hello from the stub.")
 
     def test_transcribe_reports_clearly_when_the_server_is_down(self):
         cfg = WhisperConfig(server_exe="w.exe", model="m.bin", port=free_port())

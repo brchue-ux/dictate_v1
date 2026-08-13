@@ -457,10 +457,9 @@ def enable(cfg: Config, *, config_path: str | None = None,
         f"  task:      Task Scheduler Library -> {TASK_NAME}",
         f"  its log:   {log_path()}",
         "",
-        "It costs about 1.6 GB of graphics memory for as long as you are logged",
-        "in, because the transcription model stays loaded - that is what makes",
-        "your first sentence as fast as the rest. If you want that memory back",
-        "for a game, turn this off again:",
+    ]
+    lines += _memory_cost_lines(cfg)
+    lines += [
         "",
         "  dictate autostart disable",
         "",
@@ -468,6 +467,34 @@ def enable(cfg: Config, *, config_path: str | None = None,
         "that is running now with `dictate stop`.",
     ]
     return lines
+
+
+def _memory_cost_lines(cfg: Config) -> list[str]:
+    """What leaving this on actually costs the graphics card.
+
+    Which depends on `[whisper] idle_release_minutes`, so it is read rather than
+    assumed: dictate gives the model's ~1.6 GB back on its own after that long
+    without dictating, and only with the release turned off does leaving this on
+    mean holding that memory all day.
+    """
+    from .engines.residency import minutes_text  # noqa: PLC0415
+
+    idle = cfg.whisper.idle_release_minutes
+    if idle > 0:
+        return [
+            "The transcription model takes about 1.6 GB of graphics memory, but",
+            f"dictate hands it back after {minutes_text(idle * 60)} without dictating and "
+            "takes it",
+            "again when you next press the hotkey. So leaving this on costs your",
+            "card nothing between dictation sessions, and there is no reason to",
+            "turn it off for a game. If you want it gone anyway:",
+        ]
+    return [
+        "[whisper] idle_release_minutes is 0 in your config, so the model stays",
+        "loaded for as long as you are logged in - about 1.6 GB of graphics",
+        "memory a game cannot have. Setting it to 5 gives that memory back by",
+        "itself after five idle minutes. Otherwise, to stop starting at logon:",
+    ]
 
 
 def disable() -> list[str]:
@@ -500,11 +527,8 @@ def disable() -> list[str]:
     if holder is not None:
         lines += [
             "",
-            f"The copy running now ({holder.describe()}) keeps running, and with "
-            "it the 1.6 GB",
-            "of graphics memory the model is in. To have that back now rather "
-            "than at your",
-            "next logon:",
+            f"The copy running now ({holder.describe()}) keeps running until you",
+            "stop it or log out:",
             "  dictate stop",
         ]
     return lines

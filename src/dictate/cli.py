@@ -113,9 +113,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
-    """Ask the running copy to shut down - politely, because it owns a child
-    process holding 1.6 GB of VRAM and the transcription port, and killing it
-    outright would strand both."""
+    """Ask the running copy to shut down - politely, because it owns a
+    whisper-server child that holds the transcription port, and 1.6 GB of VRAM
+    whenever the model is resident. Killing the parent strands it."""
     holder = instance_mod.running_instance()
     if holder is None:
         _out("dictate is not running.")
@@ -124,7 +124,8 @@ def cmd_stop(args: argparse.Namespace) -> int:
     _out(f"asking dictate to stop ({holder.describe()})…")
     instance_mod.request_stop()
     if instance_mod.wait_until_stopped(args.timeout):
-        _out("dictate has stopped. Your graphics memory is free again.")
+        _out("dictate has stopped, and whisper-server with it - nothing of it is "
+             "left running.")
         if holder.started_by == "logon":
             _out("")
             _out("It will start again the next time you log in. To prevent that:")

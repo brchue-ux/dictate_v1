@@ -9,10 +9,17 @@ Thread layout:
     caption thread   the only thread that touches a streaming session.
     finalize worker  ONE worker, so that if two utterances finish close
                      together their text is pasted in the order it was spoken.
+    idle watcher     ticks the clock for `ResidentModel`; a short-lived worker
+                     of its own does the actual unload/reload (residency.py).
 
 Startup order matters and is deliberate: the whisper server is brought up and
 warmed *before* the hotkey is registered, so the very first press already has a
 resident model behind it and nobody discovers a missing model file mid-sentence.
+
+After that the model's residency follows use rather than process lifetime: it is
+unloaded after `[whisper] idle_release_minutes` without dictation so the card is
+genuinely free, and reloaded from `_on_hotkey_press` - at key DOWN, so the load
+runs while he is speaking rather than after he stops. See engines/residency.py.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from pathlib import Path
 from . import instance
 from .cleanup.service import CleanupService
 from .config import Config
+from .engines.residency import ResidentModel
 from .engines.sherpa_stream import SherpaStreamingTranscriber
 from .engines.whisper_backend import WhisperVulkanBackend
 from .errors import DictateError
@@ -52,7 +60,14 @@ class Application:
         self.audio = factory.make_audio_capture(cfg)
         self.hotkey = factory.make_hotkey_listener(cfg)
 
-        self.batch = WhisperVulkanBackend(cfg.whisper, resolve=cfg.resolve)
+        # The backend is wrapped, not replaced: it still owns the process, the
+        # health wait, the restart budget and the clean shutdown. The wrapper
+        # only decides how long the model stays loaded between dictations.
+        self.batch = ResidentModel(
+            WhisperVulkanBackend(cfg.whisper, resolve=cfg.resolve),
+            idle_release_s=cfg.whisper.idle_release_minutes * 60.0,
+            wait_timeout_s=cfg.whisper.startup_timeout_s + 60.0,
+        )
         self.cleaner = CleanupService(
             cfg.resolve(cfg.cleanup.rules_file) if cfg.cleanup.enabled else None,
             enabled=cfg.cleanup.enabled,
@@ -98,8 +113,8 @@ class Application:
                      if self.cfg.cleanup.enabled else "dictate: cleanup disabled")
         self.cleaner.load()
 
-        self.console("dictate: starting whisper-server (the model stays loaded "
-                     "from here on)…")
+        self.console("dictate: starting whisper-server (loading the model into "
+                     "the graphics card)…")
         self.batch.start()
         self.console(f"dictate: batch engine   {self.batch.describe}")
 
@@ -122,11 +137,24 @@ class Application:
 
         self._spawn(self._caption_loop, "dictate-captions")
         self._spawn(self._stop_request_loop, "dictate-stop-watch")
-        self.hotkey.register(self.pipeline.start_utterance, self.pipeline.finish_utterance)
+        self.hotkey.register(self._on_hotkey_press, self.pipeline.finish_utterance)
         self.hotkey.start()
         self.console(f"dictate: hotkey         {self.hotkey.describe}")
         self.console("dictate: ready. Hold the hotkey and speak. Ctrl+C here to quit,")
         self.console("dictate: or `dictate stop` from any other window.")
+
+    def _on_hotkey_press(self) -> bool:
+        """Hotkey down.
+
+        The warm-up is asked for FIRST and returns straight away. If the model
+        was released while he was not dictating, it starts loading now, while he
+        is still holding the key and speaking - which is exactly as long as the
+        load takes. Waiting until he let go would spend that time twice.
+        `note_press` never raises and never blocks, so the recording below
+        starts either way.
+        """
+        self.batch.note_press()
+        return self.pipeline.start_utterance()
 
     def _warm_captions(self) -> None:
         """Load the Zipformer now, not on the first hotkey press."""

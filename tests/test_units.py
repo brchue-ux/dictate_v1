@@ -256,6 +256,26 @@ class DoctorReport(unittest.TestCase):
         self.assertIn("[warn]", report)
         self.assertIn("download", report)
 
+    def test_the_graphics_card_check_answers_am_i_using_your_vram_right_now(self):
+        from dictate import config as config_mod
+        from dictate.doctor import check_idle_release
+
+        # A port nothing is listening on: dictate is not holding any memory.
+        cfg = config_mod.from_mapping({"whisper": {"port": 65533}})
+        result = check_idle_release(cfg)
+        self.assertIs(result.status, Status.OK)
+        self.assertIn("5 minute", result.detail)
+        self.assertIn("no transcription model is loaded right now", result.detail)
+
+    def test_the_graphics_card_check_says_when_release_is_switched_off(self):
+        from dictate import config as config_mod
+        from dictate.doctor import check_idle_release
+
+        cfg = config_mod.from_mapping({"whisper": {"idle_release_minutes": 0}})
+        detail = check_idle_release(cfg).detail
+        self.assertIn("stays loaded", detail)
+        self.assertIn("idle_release_minutes = 0", detail)
+
     def test_worst_ranks_correctly(self):
         self.assertEqual(worst([CheckResult("a", Status.OK)]), Status.OK)
         self.assertEqual(worst([CheckResult("a", Status.OK),
