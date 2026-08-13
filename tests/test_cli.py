@@ -13,9 +13,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from dictate import cli
-from dictate.errors import PlatformUnsupportedError
+from dictate.errors import DictateError, PlatformUnsupportedError
 from dictate.platform import factory
 
 REPO = Path(__file__).resolve().parent.parent
@@ -125,6 +126,39 @@ class Parser(unittest.TestCase):
         self.assertFalse(args.force)
         self.assertEqual(args.branch, "main")
         self.assertTrue(cli.build_parser().parse_args(["update", "--restore"]).restore)
+
+    def test_the_window_the_tray_opens_is_held_open_until_it_is_read(self):
+        """`--pause` is how the notification area runs an update. That window
+        is the only place its report - and any failure - is ever shown, so it
+        may not close on the last line."""
+        self.assertTrue(cli.build_parser().parse_args(["update", "--pause"]).pause)
+        self.assertFalse(cli.build_parser().parse_args(["update"]).pause)
+
+    def test_the_wait_happens_after_a_failure_has_been_printed_not_instead(self):
+        waited: list[str] = []
+
+        def fail(_args):
+            raise DictateError("it went wrong", "type something else")
+
+        with mock.patch.object(cli, "cmd_update", fail), \
+             mock.patch.object(cli, "wait_for_enter",
+                               lambda: waited.append("waited")):
+            code, _out, err = run(["update", "--pause"])
+        self.assertEqual(code, 2)
+        self.assertIn("it went wrong", err)
+        self.assertEqual(waited, ["waited"])
+
+    def test_a_window_with_no_keyboard_behind_it_is_not_a_traceback(self):
+        """Stdin redirected, closed, or absent entirely means nobody is
+        waiting - which is a reason to return, not to end a command that has
+        already done its work with a stack trace."""
+        for boom in (EOFError, OSError, RuntimeError):
+            with self.subTest(boom=boom):
+                def read(exc=boom):
+                    raise exc("no stdin")
+
+                with contextlib.redirect_stdout(io.StringIO()):
+                    cli.wait_for_enter(read=read)
 
 
 class PlatformSeam(unittest.TestCase):

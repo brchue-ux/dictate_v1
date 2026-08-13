@@ -375,6 +375,14 @@ the audio callback; the utterance buffer feeding the GPU pass is never dropped.
   publishes whether it is busy from the same place that keeps the tray icon
   honest (`instance.publish_activity`), so nothing in the hotkey or
   transcription path had to change to make that answerable.
+* **The tray does not update dictate; it starts the command that does.** The
+  process showing the menu is the process being replaced and restarted, so the
+  work cannot happen inside it - the thread doing it would be killed part way
+  through. `app._start_update` starts `dictate update` as a separate process
+  with a console of its own, and that process stops this copy and brings it
+  back through the ordinary path. The alternative, doing the writing in a
+  worker thread and hoping to outrun our own shutdown, is not a design; it is
+  a race with a corrupted install folder as the prize.
 
 ---
 

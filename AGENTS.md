@@ -88,6 +88,22 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   what was asked for against `Font.actual("family")` and reports the substitution on
   startup. Anything that picks a font must go through it; "it looked wrong and
   nothing said why" is the failure it exists to prevent.
+- **An update chosen from the tray runs in another process, with a console.**
+  The copy running the tray is the copy being replaced and restarted, so a
+  thread doing the work inside it would be killed part way through writing
+  files. `app._start_update` therefore starts `dictate update` through
+  `update.start_in_console` - a new console (a logon-started copy is under
+  `pythonw.exe` and cannot print), `--pause` so the window is still readable
+  after it ends, and `recovery.spawn_detached` so it breaks out of the job
+  Task Scheduler runs us in and survives the stop it is about to ask for. The
+  icon goes when this copy stops and comes back with the new one; that window
+  is the whole user interface in between. A failure to *start* it has no window
+  to appear in, so it goes through `notify("error")` - the icon turns red - and
+  never a `MessageBoxW`, which would block the thread that owns the icon.
+- **`dictate update --check` repairs nothing, including an interrupted update.**
+  It names one and says to run `dictate update`. A check is what the tray's
+  "Check for updates" runs, and the promise there is that choosing it cannot
+  leave the folder different.
 - **The tray icon is the only visible surface a logon-started copy has.** What it says
   and offers is pure and tested (`src/dictate/tray.py`, including the icon's own bytes);
   `platform/windows/tray.py` is the thin Win32 half and is untested by anyone. It must

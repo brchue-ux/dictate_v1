@@ -464,6 +464,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_up.add_argument("--timeout", type=float, default=30.0,
                       help="seconds to wait for a running dictate to stop "
                            "before giving up and changing nothing (default: 30)")
+    p_up.add_argument("--pause", action="store_true",
+                      help="wait for Enter before the window closes. The "
+                           "notification area's Update now uses this, because "
+                           "that window is the only place its report - and any "
+                           "failure - is ever shown")
     p_up.set_defaults(func=cmd_update)
 
     p_auto = sub.add_parser("autostart", help="start dictate when you log in")
@@ -517,6 +522,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def wait_for_enter(read=input) -> None:
+    """Hold a window open until what is in it has been read.
+
+    `dictate update --pause` is how the notification area runs an update, and
+    that window is the whole of the user interface for it: there is no console
+    behind it and no other copy of what it said. A window that closed the
+    instant the command ended would take a failure and its remedy with it.
+
+    Nothing here may raise. A stdin that is not a keyboard - redirected, closed,
+    or the `pythonw.exe` case where there is none at all - means nobody is
+    waiting, and the right answer to that is to return, not to end a command
+    that has already done its work with a traceback.
+    """
+    try:
+        _out("")
+        _out("Press Enter to close this window.")
+        read()
+    except (EOFError, KeyboardInterrupt, OSError, RuntimeError, AttributeError):
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -531,6 +557,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         _err("")
         return 130
+    finally:
+        # Outside the `except` blocks on purpose: the message a failure prints
+        # is the thing the window is being held open for, so the wait has to
+        # come after it rather than instead of it.
+        if getattr(args, "pause", False):
+            wait_for_enter()
 
 
 if __name__ == "__main__":  # pragma: no cover

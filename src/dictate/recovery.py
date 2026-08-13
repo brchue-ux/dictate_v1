@@ -458,6 +458,54 @@ def relaunch_argv(config_path: str | None = None,
     return argv
 
 
+#: DETACHED_PROCESS | NEW_PROCESS_GROUP, and the same with a console instead of
+#: none. CREATE_BREAKAWAY_FROM_JOB is added to both and is the load-bearing one.
+_DETACHED = 0x00000008 | 0x00000200
+_NEW_CONSOLE = 0x00000010 | 0x00000200
+_BREAKAWAY = 0x01000000
+
+
+def spawn_detached(argv: list[str], *, console: bool = False,
+                   spawn=subprocess.Popen):
+    """Start `argv` as a process that outlives this one, and return it.
+
+    The process rather than its pid, because a pid is not a handle: asking
+    "is it still going?" of a number is guesswork, and on Windows the obvious
+    way of asking (`os.kill(pid, 0)`) ends the process instead of answering.
+    Callers that only want the number take `.pid` from it.
+
+    One place, because there is one answer and getting it wrong is invisible
+    until it matters. `CREATE_BREAKAWAY_FROM_JOB` is the reason this is not two
+    lines at each call site: a copy started by the logon task lives inside Task
+    Scheduler's own job object, which ends when the task ends and takes
+    everything in it along - so a process started to OUTLIVE dictate has to
+    leave that job first. A job that does not permit breakaway refuses the call
+    outright, and then the plain form is correct: there is no job to escape.
+
+    `console` picks between DETACHED_PROCESS - no window, for a fresh copy of
+    the app - and CREATE_NEW_CONSOLE, for something whose output is the whole
+    point and which is started from a process that may have no console at all.
+
+    Raises the `OSError` that stopped it; the caller says what that means.
+    """
+    kwargs: dict = {"close_fds": True}
+    if sys.platform == "win32":
+        flags = _NEW_CONSOLE if console else _DETACHED
+        attempts: list[dict] = [{"creationflags": flags | _BREAKAWAY},
+                                {"creationflags": flags}]
+    else:
+        attempts = [{"start_new_session": True}]
+
+    last: OSError | None = None
+    for extra in attempts:
+        try:
+            return spawn(argv, **extra, **kwargs)
+        except OSError as exc:
+            last = exc
+            log.info("could not start %s with %s: %s", argv[:1], extra, exc)
+    raise last if last is not None else OSError("nothing was tried")
+
+
 def relaunch(config_path: str | None = None, *, executable: str | None = None,
              autostart: bool = False, spawn=subprocess.Popen) -> int:
     """Start a fresh copy of dictate, detached from this one.
@@ -470,30 +518,10 @@ def relaunch(config_path: str | None = None, *, executable: str | None = None,
     to type instead.
     """
     argv = relaunch_argv(config_path, executable, autostart=autostart)
-    kwargs: dict = {"close_fds": True}
-    attempts: list[dict] = []
-    if sys.platform == "win32":
-        # DETACHED_PROCESS so it does not die with the console this one was
-        # started from, and CREATE_BREAKAWAY_FROM_JOB because a copy started by
-        # the logon task lives inside Task Scheduler's own job object - which
-        # ends when the task ends, taking the new copy with it. A job that does
-        # not permit breakaway refuses the call outright, and then the plain
-        # form is correct: there is no job to escape.
-        detached = 0x00000008 | 0x00000200      # DETACHED_PROCESS | NEW_PROCESS_GROUP
-        breakaway = 0x01000000                  # CREATE_BREAKAWAY_FROM_JOB
-        attempts = [{"creationflags": detached | breakaway},
-                    {"creationflags": detached}]
-    else:
-        attempts = [{"start_new_session": True}]
-
-    last: OSError | None = None
-    for extra in attempts:
-        try:
-            return spawn(argv, **extra, **kwargs).pid
-        except OSError as exc:
-            last = exc
-            log.info("could not start the new copy with %s: %s", extra, exc)
-    raise DictateError(
-        f"dictate could not start itself again: {last}",
-        "Start it by hand:\n  dictate run",
-    )
+    try:
+        return spawn_detached(argv, spawn=spawn).pid
+    except OSError as exc:
+        raise DictateError(
+            f"dictate could not start itself again: {exc}",
+            "Start it by hand:\n  dictate run",
+        ) from exc

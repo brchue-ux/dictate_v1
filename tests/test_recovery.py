@@ -326,6 +326,64 @@ class StartingAFreshCopy(unittest.TestCase):
             recovery.relaunch(None, spawn=spawn)
         self.assertIn("dictate run", ctx.exception.remedy)
 
+    def test_something_started_to_replace_us_gets_a_console_and_leaves_the_job(self):
+        """The other caller: `dictate update` started from the notification
+        area. It has to outlive this process - stopping it is the second thing
+        it does - and it has to be able to speak, because the process that
+        started it may be running under pythonw.exe with no console at all."""
+        seen: list[dict] = []
+
+        class Started:
+            pid = 77
+
+        def spawn(argv, **kwargs):
+            seen.append(kwargs)
+            return Started()
+
+        recovery.spawn_detached(["python", "-m", "dictate", "update"],
+                                console=True, spawn=spawn)
+        if sys.platform == "win32":
+            self.assertTrue(seen[0]["creationflags"] & 0x00000010)   # NEW_CONSOLE
+            self.assertFalse(seen[0]["creationflags"] & 0x00000008)  # not DETACHED
+            self.assertTrue(seen[0]["creationflags"] & 0x01000000)   # BREAKAWAY
+        else:
+            self.assertTrue(seen[0]["start_new_session"])
+
+    def test_a_job_that_refuses_breakaway_is_tried_again_without_it(self):
+        """A job object that does not permit breakaway refuses the call
+        outright, and then the plain form is right: there is no job to escape.
+
+        Windows' half of the decision, driven from here: `sys.platform` is what
+        chooses it, so that is what is supplied.
+        """
+        from unittest import mock
+
+        seen: list[dict] = []
+
+        class Started:
+            pid = 88
+
+        def spawn(argv, **kwargs):
+            seen.append(kwargs)
+            if len(seen) == 1:
+                raise OSError("access is denied")
+            return Started()
+
+        with mock.patch.object(recovery.sys, "platform", "win32"):
+            started = recovery.spawn_detached(["python", "-m", "dictate", "run"],
+                                              spawn=spawn)
+        self.assertEqual(started.pid, 88)
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(seen[0]["creationflags"] & 0x01000000)    # tried it
+        self.assertFalse(seen[1]["creationflags"] & 0x01000000)   # then did not
+
+    def test_it_raises_what_stopped_it_and_lets_the_caller_say_what_that_means(self):
+        def spawn(argv, **kwargs):
+            raise OSError("nope")
+
+        with self.assertRaises(OSError):
+            recovery.spawn_detached(["python"], spawn=spawn)
+
 
 if __name__ == "__main__":
     unittest.main()
