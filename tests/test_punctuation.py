@@ -593,6 +593,19 @@ class RulesFileValidation(unittest.TestCase):
             rules_mod.load(self.tmp / "nope.toml")
         self.assertIn("enabled = false", ctx.exception.remedy)
 
+    def test_the_new_section_example_in_the_comments_really_works(self):
+        """The file ends with a copy-and-edit block for "new section", because
+        adding one without asking anyone is the point of it being a data file.
+        A worked example that does not work is worse than none, so it is taken
+        out of the comments and run."""
+        text = SHIPPED.read_text(encoding="utf-8")
+        block = text.split("# [[marks]]\n", 1)[1].split("#\n", 1)[0]
+        example = "[[marks]]\n" + "\n".join(
+            line.removeprefix("# ") for line in block.splitlines())
+        rules = rules_from(example, self.tmp)
+        self.assertEqual(apply("one new section two", rules).text,
+                         "one\n\n---\n\nTwo")
+
     def test_the_toml_trap_is_documented_in_the_shipped_file(self):
         """A plain setting written after a [[marks]] block silently becomes a
         field of it - the same trap as cleanup-rules.toml."""
