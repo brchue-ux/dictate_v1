@@ -185,6 +185,22 @@ def updates_dir() -> Path:
     return instance.state_dir() / "updates"
 
 
+def _working_dir() -> Path:
+    """The same folder, made sure of. Nothing here may end in a traceback, and
+    a state folder that cannot be created is a sentence, not a stack."""
+    path = updates_dir()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DictateError(
+            f"dictate could not create the folder it keeps its downloads and "
+            f"backups in: {path} ({exc})",
+            "Nothing has been changed. Check that folder is writable, or set "
+            "DICTATE_STATE_DIR to\none that is, and run `dictate update` again.",
+        ) from exc
+    return path
+
+
 # ---------------------------------------------------------------------------
 # What this copy is
 # ---------------------------------------------------------------------------
@@ -1342,8 +1358,7 @@ def update(*, say: Say, root: Path | None = None, repo: str = DEFAULT_REPO,
     outcome = Outcome()
     root = Path(root) if root else find_install_root()
     check_install_root(root)
-    updates = updates_dir()
-    updates.mkdir(parents=True, exist_ok=True)
+    updates = _working_dir()
 
     say(f"install folder:  {root}")
     say("                 (this is the folder Python loads dictate from)")
