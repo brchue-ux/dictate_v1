@@ -8,11 +8,12 @@
     dictate init          write a config file you can edit
     dictate devices       list the microphones dictate can see
     dictate clean         run the cleanup rules over text on stdin
+    dictate punctuate     turn spoken marks ("comma") into marks (",")
     dictate overlay       show the caption overlay with sample text
     dictate transcribe    push a .wav through the resident GPU pass and time it
 
-`doctor`, `init` and `clean` all work on any platform, on purpose: they are the
-commands you want when the app will not start.
+`doctor`, `init`, `clean` and `punctuate` all work on any platform, on purpose:
+they are the commands you want when the app will not start.
 
 Exit codes: 0 fine, 1 something is missing, 2 an error with a remedy attached,
 3 a copy of dictate is already running (and `stop --stale-only` left it alone),
@@ -217,6 +218,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     pairs = [
         (templates / "dictate.example.toml", target),
         (templates / "cleanup-rules.toml", target.parent / "cleanup-rules.toml"),
+        (templates / "voice-punctuation.toml", target.parent / "voice-punctuation.toml"),
     ]
     for src, dst in pairs:
         if dst.exists() and not args.force:
@@ -266,6 +268,39 @@ _PREVIEW_WORDS = (
     "SO THE THING I WANTED TO SAY IS THAT THE OVERLAY SHOULD BE CALM ENOUGH TO "
     "READ WITHOUT LOOKING STRAIGHT AT IT WHILE I AM STILL TALKING"
 ).split()
+
+
+def cmd_punctuate(args: argparse.Namespace) -> int:
+    """Spoken punctuation over text you type, with no dictating and no Windows.
+
+    This is how the rules get argued with. `--explain` prints every substitution
+    the stage made, which is the same list that goes into the log every time it
+    runs - a mark in the wrong place has to be traceable back to the words that
+    produced it.
+    """
+    from .punctuation import rules as rules_mod
+    from .punctuation.engine import apply
+
+    cfg = _load_config(args)
+    path = Path(args.rules) if args.rules else cfg.resolve(cfg.punctuation.rules_file)
+    rules = rules_mod.load(path)
+    text = " ".join(args.text) if args.text else sys.stdin.read()
+    result = apply(text, rules)
+    _out(result.text)
+    if args.explain:
+        _err("")
+        _err(f"rules file: {path}")
+        if not cfg.punctuation.enabled:
+            _err("NOTE:       [punctuation] enabled = false, so dictation itself "
+                 "is not doing this yet.")
+        if result.applied:
+            for line in result.applied:
+                _err(f"applied:    {line}")
+        else:
+            _err("applied:    (nothing - no spoken mark was found)")
+        if result.rejected_reason:
+            _err(f"REJECTED:   {result.rejected_reason}")
+    return 0
 
 
 def cmd_overlay(args: argparse.Namespace) -> int:
@@ -457,6 +492,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--rules", help="a rules file to use instead of the configured one")
     p_clean.add_argument("--explain", action="store_true", help="say which rules fired")
     p_clean.set_defaults(func=cmd_clean)
+
+    p_punct = sub.add_parser(
+        "punctuate",
+        help='turn spoken marks into marks ("hello comma world")')
+    p_punct.add_argument("text", nargs="*", help="text to punctuate (default: read stdin)")
+    p_punct.add_argument("--rules", help="a rules file to use instead of the configured one")
+    p_punct.add_argument("--explain", action="store_true",
+                         help="say which mark each substitution came from")
+    p_punct.set_defaults(func=cmd_punctuate)
 
     p_ov = sub.add_parser("overlay",
                           help="show the caption overlay with sample text, "

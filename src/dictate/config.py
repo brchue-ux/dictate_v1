@@ -175,6 +175,25 @@ class CleanupConfig:
 
 
 @dataclass
+class PunctuationConfig:
+    """Spoken punctuation: "hello comma world" -> "hello, world".
+
+    OFF by default, and that is a decision rather than an oversight. Every
+    phrase in the rules file is a phrase he can no longer dictate literally, so
+    installing a new version of dictate must not start eating the word "period"
+    out of his sentences without him having asked for it. One line turns it on.
+
+    It is a stage of its own, after the cleanup pass and never inside it: the
+    cleanup pass may only delete words, and this substitutes them. See
+    `src/dictate/punctuation/engine.py` and `docs/DESIGN.md`.
+    """
+
+    enabled: bool = False
+    #: Relative paths resolve against the config file's own directory.
+    rules_file: str = "voice-punctuation.toml"
+
+
+@dataclass
 class PasteConfig:
     #: "sendinput" synthesises the characters directly and never touches the
     #: clipboard. "clipboard" copies, sends Ctrl+V, then restores the previous
@@ -238,6 +257,7 @@ class Config:
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     whisper: WhisperConfig = field(default_factory=WhisperConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
+    punctuation: PunctuationConfig = field(default_factory=PunctuationConfig)
     paste: PasteConfig = field(default_factory=PasteConfig)
     tray: TrayConfig = field(default_factory=TrayConfig)
     autostart: AutostartConfig = field(default_factory=AutostartConfig)
@@ -276,6 +296,7 @@ _SECTIONS: dict[str, type] = {
     "overlay": OverlayConfig,
     "whisper": WhisperConfig,
     "cleanup": CleanupConfig,
+    "punctuation": PunctuationConfig,
     "paste": PasteConfig,
     "tray": TrayConfig,
     "autostart": AutostartConfig,

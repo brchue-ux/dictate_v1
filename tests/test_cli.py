@@ -89,6 +89,7 @@ class InitCommand(unittest.TestCase):
             self.assertIn("wrote", out)
             self.assertTrue(target.exists())
             self.assertTrue((target.parent / "cleanup-rules.toml").exists())
+            self.assertTrue((target.parent / "voice-punctuation.toml").exists())
 
             cfg = config_mod.load(target)
             rules_mod.load(cfg.resolve(cfg.cleanup.rules_file))
