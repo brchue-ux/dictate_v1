@@ -46,7 +46,7 @@ class Application:
         self._threads: list[threading.Thread] = []
         self._started_at = time.time()
 
-        self.overlay = factory.make_overlay(cfg)
+        self.overlay = factory.make_overlay(cfg, notify=self.notify)
         self.tracker = factory.make_window_tracker()
         self.injector = factory.make_injector(cfg, self.tracker)
         self.audio = factory.make_audio_capture(cfg)

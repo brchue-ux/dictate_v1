@@ -109,6 +109,60 @@ user32.GetParent.restype = wintypes.HWND
 user32.IsIconic.argtypes = (wintypes.HWND,)
 user32.IsIconic.restype = wintypes.BOOL
 
+# -- monitors and per-monitor DPI --------------------------------------------
+#
+# The caption overlay has to appear on the display the user is working on, which
+# means asking Windows which monitor a given window is on and how big that
+# monitor's usable area is. `rcWork` rather than `rcMonitor`, so a bottom-centred
+# overlay clears the taskbar instead of hiding under it.
+
+
+class RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", wintypes.LONG),
+        ("top", wintypes.LONG),
+        ("right", wintypes.LONG),
+        ("bottom", wintypes.LONG),
+    ]
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", RECT),
+        ("rcWork", RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
+user32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
+user32.MonitorFromWindow.restype = wintypes.HANDLE
+user32.MonitorFromPoint.argtypes = (wintypes.POINT, wintypes.DWORD)
+user32.MonitorFromPoint.restype = wintypes.HANDLE
+user32.GetMonitorInfoW.argtypes = (wintypes.HANDLE, ctypes.POINTER(MONITORINFO))
+user32.GetMonitorInfoW.restype = wintypes.BOOL
+user32.GetCursorPos.argtypes = (ctypes.POINTER(wintypes.POINT),)
+user32.GetCursorPos.restype = wintypes.BOOL
+
+MONITOR_DEFAULTTONULL = 0x0
+MONITOR_DEFAULTTOPRIMARY = 0x1
+MONITOR_DEFAULTTONEAREST = 0x2
+MONITORINFOF_PRIMARY = 0x1
+
+#: MDT_EFFECTIVE_DPI - the scale factor the user chose for that display.
+MDT_EFFECTIVE_DPI = 0
+USER_DEFAULT_SCREEN_DPI = 96
+
+#: DPI_AWARENESS_CONTEXT values, passed to SetProcessDpiAwarenessContext. They
+#: are sentinel handle values rather than an enum, which is why they are negative.
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = wintypes.HANDLE(-4)
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE = wintypes.HANDLE(-3)
+DPI_AWARENESS_CONTEXT_SYSTEM_AWARE = wintypes.HANDLE(-2)
+
+#: PROCESS_DPI_AWARENESS, for the Windows 8.1 route.
+PROCESS_SYSTEM_DPI_AWARE = 1
+PROCESS_PER_MONITOR_DPI_AWARE = 2
+
 kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
 kernel32.OpenProcess.restype = wintypes.HANDLE
