@@ -467,10 +467,19 @@ class EverySubstitutionIsVisibleInTheLog(unittest.TestCase):
         self.assertIn('"comma" -> \',\'', joined)
         self.assertIn('"period" -> \'.\'', joined)
 
+    def test_the_log_line_is_ascii(self):
+        """It goes to the console too, and a Windows console redirected to a
+        file encodes with the local code page. A decorative bracket there is a
+        UnicodeEncodeError in the middle of a report."""
+        result = apply("Hello, comma, world. Are you sure? Question mark.", shipped())
+        for line in result.applied:
+            with self.subTest(line=line):
+                line.encode("cp1252")
+
     def test_the_log_line_carries_whispers_own_text_around_it(self):
         with self.assertLogs("dictate.punctuation.engine", level=logging.INFO) as caught:
             punctuate("Hello, comma, world.")
-        self.assertIn("⟦comma⟧", caught.output[0])
+        self.assertIn("[[comma]]", caught.output[0])
         self.assertIn("Hello,", caught.output[0])
 
     def test_the_same_lines_are_on_the_result_for_dictate_punctuate(self):

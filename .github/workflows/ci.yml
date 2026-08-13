@@ -97,6 +97,15 @@ jobs:
           dictate --version
           dictate clean --explain "Um, so I was, you know, thinking about it."
 
+          # Spoken punctuation, through the shipped rules. `--explain` is piped
+          # on purpose: a redirected Windows console encodes with the local code
+          # page rather than UTF-8, so a non-ASCII character in that report is a
+          # UnicodeEncodeError here and nowhere a Linux machine would find it.
+          $marks = dictate punctuate --rules config/voice-punctuation.toml --explain "hello comma world" 2>&1 | Out-String
+          Write-Host $marks
+          if ($marks -match 'Traceback') { throw 'dictate punctuate printed a stack trace' }
+          if ($marks -notmatch 'hello, world') { throw "dictate punctuate did not punctuate: $marks" }
+
           # `doctor` is meant to report missing pieces, so a non-zero exit here
           # is the correct answer on a bare CI machine. What must never happen
           # is a stack trace: this whole command exists to be readable by

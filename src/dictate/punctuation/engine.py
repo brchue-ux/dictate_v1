@@ -260,7 +260,7 @@ def _splice(text: str, hits: list[_Hit]) -> tuple[str, list[str]]:
             # a phrase. A space takes the escape word's place so "the literal
             # comma" does not come out as "thecomma".
             pending_sep = " "
-            applied.append(f'"{hit.spoken} …" escape: the words after it were '
+            applied.append(f'"{hit.spoken} ..." escape: the words after it were '
                            f"left as words")
             continue
 
@@ -361,10 +361,15 @@ def _describe(text: str, hit: _Hit) -> str:
     output, so the pasted text cannot be read backwards to find it. The context
     is Whisper's text verbatim, punctuation and all, because Whisper's own
     fencing is usually the thing that explains a surprising result.
+
+    Deliberately ASCII. This line goes to the console as well as to the log, and
+    a Windows console redirected to a file encodes with the local code page, not
+    UTF-8 - a decorative bracket there is a UnicodeEncodeError in the middle of
+    `dictate punctuate --explain > out.txt`.
     """
     lo, hi = max(0, hit.start - _CONTEXT), min(len(text), hit.end + _CONTEXT)
-    context = (("…" if lo else "") + text[lo:hit.start]
-               + "⟦" + text[hit.start:hit.end] + "⟧"
-               + text[hit.end:hi] + ("…" if hi < len(text) else ""))
+    context = (("..." if lo else "") + text[lo:hit.start]
+               + "[[" + text[hit.start:hit.end] + "]]"
+               + text[hit.end:hi] + ("..." if hi < len(text) else ""))
     return (f'"{hit.spoken}" -> {hit.mark.insert!r} ({hit.mark.name}) in '
             f"{context.replace(chr(10), ' ')!r}")
