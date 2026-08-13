@@ -30,13 +30,15 @@
 name: CI
 
 on:
+  # Pull requests cover the feature branches, so pushing to one does not also
+  # start a second, identical run of a build that takes a quarter of an hour.
   push:
-    branches: ['**']
+    branches: [main, 'fm/dictate-core-app']
   pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:

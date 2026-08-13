@@ -820,10 +820,7 @@ function Invoke-Verify {
     } else {
         Write-Detail 'Starting the transcription process and putting an 11-second test clip through it.'
         Write-Detail 'The first run is slower than normal: the graphics driver compiles its shaders once.'
-        $clock = [Diagnostics.Stopwatch]::StartNew()
         $run = Invoke-Dictate -Arguments @('transcribe', $TestClip, '--repeat', '1')
-        $clock.Stop()
-        Write-SetupLog $run.Output
 
         if ($run.ExitCode -ne 0) {
             Add-VerifyProblem 'The transcription process would not run the test clip.'
@@ -848,10 +845,20 @@ function Invoke-Verify {
                     Write-Detail "  $(Join-Path $Root 'dictate.log')"
                 }
             }
-            if ($run.Output -match '(?i)vulkan') {
+            # Look for what whisper.cpp actually prints, not merely for the word
+            # "Vulkan" - dictate's own warning that it could NOT find Vulkan
+            # contains that word too, and matching on it would report the
+            # opposite of the truth. (The CI run is where that showed up.)
+            if ($run.Output -match '(?i)did not mention Vulkan') {
+                Write-Note 'It ran on the processor, not the graphics card, so it will be far slower than the 2-4 second budget.'
+                Write-Detail 'Update AMD Adrenalin, restart, and run this again:'
+                Write-Detail '  powershell -ExecutionPolicy Bypass -File setup.ps1 -Only verify'
+            } elseif ($run.Output -match '(?i)using Vulkan\d+ backend' -or
+                      $run.Output -match '(?i)ggml_vulkan:\s*Found\s*[1-9]') {
                 Write-Ok 'It used the graphics card (whisper.cpp reported its Vulkan backend).'
             } else {
-                Write-Note 'It did not say it was using Vulkan, which may mean it ran on the processor. Look for a "using Vulkan0 backend" line in the log.'
+                Write-Note 'It did not say either way whether the graphics card was used. Look for a "using Vulkan0 backend" line in the log:'
+                Write-Detail "  $(Join-Path $Root 'dictate.log')"
             }
         }
     }
