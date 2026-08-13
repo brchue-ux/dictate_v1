@@ -14,6 +14,7 @@ observed from here any other way.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import unittest
 from pathlib import Path
@@ -423,8 +424,7 @@ class OverlayConfigValidation(unittest.TestCase):
             encoding="utf-8")
         block = example.split("[overlay]", 1)[1].split("\n[", 1)[0]
         keys = set(re.findall(r"^(\w+)\s*=", block, re.MULTILINE))
-        known = {f.name for f in __import__("dataclasses").fields(
-            config_mod.OverlayConfig)}
+        known = {f.name for f in dataclasses.fields(config_mod.OverlayConfig)}
         self.assertTrue(keys)
         self.assertEqual(keys - known, set())
 
