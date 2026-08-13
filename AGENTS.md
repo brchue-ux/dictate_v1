@@ -39,6 +39,15 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `cleanup/engine.clean()` re-checks that the output words are a subsequence of the
   input words, discarding the whole cleanup if not. Do not add a rule type that can
   substitute text.
+- **The one fault the guarantee cannot catch is a rule that deletes real speech**,
+  because deleting is what the pass is permitted to do. `filler_phrases` in
+  `config/cleanup-rules.toml` has no guard at all - it removes the phrase anywhere -
+  and it shipped holding "you know", "I mean", "sort of", "kind of", "like I said"
+  and "if that makes sense", so "Do you know the answer?" was pasted as "Do the
+  answer?". The list is empty now and every one of those is a `[[deletions]]` rule
+  requiring Whisper's comma fencing. `tests/test_cleanup.py::PhrasesThatAreAlsoRealSpeech`
+  holds the line, list included; a phrase belongs in `filler_phrases` only if no
+  sentence exists where it is meant literally.
 - **`config/cleanup-rules.toml` is TOML**: plain settings must come *before* the
   `[[deletions]]` blocks, or they silently become fields of the last one.
 - **Caption threads are capped at 4 in `config.validate()`** because more threads were

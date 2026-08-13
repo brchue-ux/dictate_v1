@@ -114,6 +114,13 @@ def clean(text: str, rules: CleanupRules) -> CleanResult:
             applied.append("sentence capitals")
         out = recased
 
+    # Every word was a filler and only punctuation is left. Pasting a lone full
+    # stop into his document is worse than pasting nothing, and the pipeline
+    # already has a "did not hear any words in that" path for exactly this.
+    if out and not words(out):
+        applied.append("nothing but punctuation left")
+        out = ""
+
     # --- the guarantee ------------------------------------------------
     if not words_are_subsequence(words(out), words(original)):
         return CleanResult(
@@ -214,6 +221,15 @@ def _repair_punctuation(text: str) -> str:
     """
     # ", ," or ",." left by removing the word between two marks.
     text = re.sub(r"([,;:])[ \t]*(?=[,;:.!?])", "", text)
+    # ". ." left by removing a filler that stood as its own sentence ("...I had.
+    # Um." -> "...I had. ."). The SECOND mark is the one dropped, so "Really?
+    # Um." keeps its question mark - swapping a "?" for a "." would be
+    # re-punctuating, which this pass does not do. Whitespace between the two is
+    # required, which is what keeps a real ellipsis ("...") intact.
+    text = re.sub(r"([.!?])[ \t]+[.!?]+", r"\1", text)
+    # The same thing at the very start ("Um. That is all." -> ". That is all."),
+    # matching what the line below already does for a leading comma.
+    text = re.sub(r"^[ \t]*[.!?]+[ \t]*", "", text)
     # Space before a closing mark.
     text = re.sub(r"[ \t]+([,;:.!?])", r"\1", text)
     # A mark at the very start, or right after an opening bracket/quote.

@@ -38,20 +38,33 @@ fillers = [
 
 
 # ---------------------------------------------------------------------------
-# Filler phrases. Removed wherever the whole phrase appears.
+# Filler phrases. Removed wherever the whole phrase appears - ANYWHERE, with no
+# regard for what is around them.
 #
-# Careful here: "I mean" and "you know" can both be meant literally ("you know
-# the answer"). They are included because in dictation they are overwhelmingly
-# filler - delete a line if you find it eating real speech.
+# THIS LIST IS EMPTY ON PURPOSE, and it is the most dangerous setting in the
+# file. It used to hold "you know", "I mean", "sort of", "kind of", "like I
+# said" and "if that makes sense", and every one of them ate real speech:
+#
+#   "Do you know the answer?"          -> "Do the answer?"
+#   "That is the kind of thing I mean." -> "That is the thing."
+#   "It is a sort of hybrid."           -> "It is a hybrid."
+#   "What I mean is different."         -> "What is different."
+#   "Do it like I said."                -> "Do it."
+#   "If that makes sense, ship it."     -> "Ship it."
+#
+# Nothing warned about any of that. Deleting words is exactly what this pass is
+# allowed to do, so the safety check below could not fire and never will for a
+# fault of this shape - the only defence is not writing the rule.
+#
+# All six now live in [[deletions]] at the bottom of the file, where each one
+# requires the comma fencing Whisper writes when it hears the phrase as filler.
+# They are still removed when they really are filler.
+#
+# Only put a phrase here if it is NEVER meaningful speech. If you can think of
+# one sentence where you would mean it literally, it belongs in [[deletions]]
+# with a guard instead.
 # ---------------------------------------------------------------------------
-filler_phrases = [
-    "you know",
-    "i mean",
-    "sort of",
-    "kind of",
-    "like i said",
-    "if that makes sense",
-]
+filler_phrases = []
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +135,79 @@ name = "leading so"
 comment = """A sentence-opening "So," that carries no meaning. Requires the
 comma - "So we went home" keeps its "So", because there it is a real connective."""
 pattern = "(?:^|(?<=[.!?] ))so,[ \\t]*"
+
+
+# --- the six phrases that used to be deleted unconditionally ---------------
+# Each is real speech somewhere ("do you know", "the kind of thing", "do it like
+# I said"), so each is only removed where Whisper fenced it with commas, which is
+# how Whisper punctuates a phrase it heard as filler. Same reasoning, and the
+# same shape, as "comma-wrapped like" above. Delete any of these if you would
+# rather keep the filler than risk the fence being wrong.
+
+[[deletions]]
+name = "comma-wrapped you know"
+comment = """"It is, you know, mostly fine." -> "It is mostly fine." Both commas
+go with it, exactly as in "comma-wrapped like"."""
+pattern = ",[ \\t]*you know[ \\t]*,"
+
+[[deletions]]
+name = "clause-leading you know"
+comment = """"You know, it is mostly fine." -> "It is mostly fine." Only at the
+start of the text or of a new sentence, and only with the trailing comma."""
+pattern = "(?:^|(?<=[.!?] ))you know,[ \\t]*"
+
+[[deletions]]
+name = "clause-trailing you know"
+comment = """"It is mostly fine, you know." -> "It is mostly fine." The full stop
+is left alone - this pass does not punctuate."""
+pattern = ",[ \\t]*you know(?=[.!?]|$)"
+
+[[deletions]]
+name = "comma-wrapped i mean"
+pattern = ",[ \\t]*i mean[ \\t]*,"
+
+[[deletions]]
+name = "clause-leading i mean"
+comment = """"I mean, it is mostly fine." -> "It is mostly fine". There is
+deliberately no trailing form: "that is the thing I mean" is ordinary speech and
+a comma in front of it is not enough to tell the two apart."""
+pattern = "(?:^|(?<=[.!?] ))i mean,[ \\t]*"
+
+[[deletions]]
+name = "comma-wrapped sort of"
+comment = """"It was, sort of, enormous." -> "It was enormous." No leading or
+trailing form: "a sort of hybrid" is ordinary speech and the comma-fenced
+reading is the only one that is reliably filler."""
+pattern = ",[ \\t]*sort of[ \\t]*,"
+
+[[deletions]]
+name = "comma-wrapped kind of"
+comment = """As "comma-wrapped sort of": "the kind of thing" is ordinary
+speech."""
+pattern = ",[ \\t]*kind of[ \\t]*,"
+
+[[deletions]]
+name = "comma-wrapped like i said"
+pattern = ",[ \\t]*like i said[ \\t]*,"
+
+[[deletions]]
+name = "clause-trailing like i said"
+comment = """"We should ship it, like I said." -> "We should ship it." Without
+the comma it is a real subordinate clause - "do it like I said" - so the fence
+is what separates them."""
+pattern = ",[ \\t]*like i said(?=[.!?]|$)"
+
+[[deletions]]
+name = "comma-wrapped if that makes sense"
+pattern = ",[ \\t]*if that makes sense[ \\t]*,"
+
+[[deletions]]
+name = "clause-trailing if that makes sense"
+comment = """"We should ship it, if that makes sense." -> "We should ship it."
+There is no leading form on purpose: "If that makes sense, ship it" is a real
+conditional and deleting it takes the condition away."""
+pattern = ",[ \\t]*if that makes sense(?=[.!?]|$)"
+
 
 # OFF by default, and here so you can decide for yourself. A tag question at the
 # end of a sentence - "we should ship it, right?" - is a real verbal tic, and

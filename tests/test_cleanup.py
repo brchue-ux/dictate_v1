@@ -86,8 +86,11 @@ class ShippedRules(unittest.TestCase):
             self.clean("I think, uh, we should go."), "I think, we should go.")
 
     def test_strips_filler_phrase(self):
+        # Both commas go with it, as for "comma-wrapped like". Until the guarded
+        # rules replaced the unconditional phrase list this left "It is, quite
+        # hard." - the phrase went and its fence did not.
         self.assertEqual(
-            self.clean("It is, you know, quite hard."), "It is, quite hard.")
+            self.clean("It is, you know, quite hard."), "It is quite hard.")
 
     def test_collapses_doubled_word(self):
         self.assertEqual(self.clean("The the cat sat."), "The cat sat.")
@@ -148,6 +151,141 @@ class ShippedRules(unittest.TestCase):
         text = ("The quick brown fox jumps over the lazy dog. It was the best of "
                 "times, it was the worst of times.")
         self.assertEqual(self.clean(text), text)
+
+
+class PhrasesThatAreAlsoRealSpeech(unittest.TestCase):
+    """The regression that made these rules guarded.
+
+    "you know", "I mean", "sort of", "kind of", "like I said" and "if that makes
+    sense" were once in `filler_phrases`, which deletes a phrase wherever it
+    appears with no regard for what is around it. They are all ordinary English
+    somewhere, so ordinary sentences lost their middle - silently, because a
+    deletion is exactly what the pass is permitted to do and the subsequence
+    guarantee therefore cannot fire on a fault of this shape.
+
+    These are the sentences that were measured coming out wrong, and the filler
+    forms that must still be removed. A rule that goes back to deleting one of
+    these phrases unconditionally fails the first half of this class.
+    """
+
+    def setUp(self):
+        self.rules = load_shipped()
+
+    def clean(self, text: str) -> str:
+        return clean(text, self.rules).text
+
+    #: Left exactly as Whisper wrote them. The first four are the measured
+    #: report cases; what dictate used to paste is in the comment.
+    REAL_SPEECH = [
+        "Do you know the answer?",                 # was "Do the answer?"
+        "That is the kind of thing I mean.",       # was "That is the thing."
+        "It is a sort of hybrid.",                 # was "It is a hybrid."
+        "What I mean is different.",               # was "What is different."
+        "You know what I mean.",                   # was "What."
+        "Do you know if it works like I said?",    # was "Do if it works?"
+        "If that makes sense to you, ship it.",    # was "To you, ship it."
+        "Do it like I said.",                      # was "Do it."
+        "I sort of remember it.",
+        "What kind of file is it?",
+        "I know what you mean by that.",
+        "Tell me what you know.",
+        "It depends on the kind of hardware he has.",
+    ]
+
+    #: Genuine filler, still removed - and now without the stray comma the
+    #: unconditional deletion used to leave behind.
+    FILLER = [
+        ("It is, you know, mostly fine.", "It is mostly fine."),
+        ("You know, it is mostly fine.", "It is mostly fine."),
+        ("It is fine. You know, really fine.", "It is fine. Really fine."),
+        ("It is mostly fine, you know.", "It is mostly fine."),
+        ("It is, I mean, mostly fine.", "It is mostly fine."),
+        ("I mean, it is mostly fine.", "It is mostly fine."),
+        ("It was, sort of, enormous.", "It was enormous."),
+        ("It was, kind of, enormous.", "It was enormous."),
+        ("We should ship it, like I said, on Friday.", "We should ship it on Friday."),
+        ("We should ship it, like I said.", "We should ship it."),
+        ("We should ship it, if that makes sense.", "We should ship it."),
+        ("The kind of thing, you know, that breaks.", "The kind of thing that breaks."),
+    ]
+
+    def test_real_speech_survives_untouched(self):
+        for text in self.REAL_SPEECH:
+            with self.subTest(text=text):
+                self.assertEqual(self.clean(text), text)
+
+    def test_the_filler_forms_are_still_removed(self):
+        for text, expected in self.FILLER:
+            with self.subTest(text=text):
+                self.assertEqual(self.clean(text), expected)
+
+    def test_the_shipped_phrase_list_is_empty(self):
+        """`filler_phrases` has no guard of any kind - it deletes the phrase
+        anywhere it appears. Every phrase that was ever in it turned out to be
+        real speech somewhere, and all six now live in [[deletions]] with the
+        comma fencing Whisper writes when it hears one as filler.
+
+        If you are here because you added a phrase and this failed: it is only
+        safe if you cannot think of one sentence where you would mean it
+        literally. If you can, write a guarded [[deletions]] rule instead, and
+        add the sentence to REAL_SPEECH above.
+        """
+        self.assertEqual(load_shipped().filler_phrases, [])
+
+    def test_the_guarantee_holds_over_all_of_it(self):
+        for text in self.REAL_SPEECH + [t for t, _ in self.FILLER]:
+            with self.subTest(text=text):
+                result = clean(text, self.rules)
+                self.assertIsNone(result.rejected_reason, result.rejected_reason)
+                self.assertTrue(
+                    words_are_subsequence(words(result.text), words(text)),
+                    f"{text!r} -> {result.text!r}",
+                )
+
+
+class NothingButPunctuationIsPastedAsNothing(unittest.TestCase):
+    """A cleanup that deleted every word must not paste the leftover marks.
+
+    "Um." used to come out as ".", and "That is all I had. Um." as "..". The
+    pipeline already has a "did not hear any words in that" path; an empty
+    result is what sends it there.
+    """
+
+    def setUp(self):
+        self.rules = load_shipped()
+
+    def clean(self, text: str) -> str:
+        return clean(text, self.rules).text
+
+    def test_a_filler_sentence_leaves_nothing(self):
+        self.assertEqual(self.clean("Um."), "")
+        self.assertEqual(self.clean("Um, um, um."), "")
+        self.assertEqual(self.clean("Hmm."), "")
+
+    def test_a_trailing_filler_sentence_does_not_leave_a_second_full_stop(self):
+        self.assertEqual(self.clean("That is all I had. Um."), "That is all I had.")
+
+    def test_the_kept_mark_is_the_one_that_was_already_there(self):
+        # Dropping the FIRST mark would turn this into "Really." - swapping a
+        # question mark for a full stop is re-punctuating, which this pass does
+        # not do.
+        self.assertEqual(self.clean("Really? Um."), "Really?")
+
+    def test_a_leading_filler_sentence_does_not_leave_a_full_stop_in_front(self):
+        self.assertEqual(self.clean("Um. That is all."), "That is all.")
+
+    def test_a_real_ellipsis_is_left_alone(self):
+        self.assertEqual(self.clean("Wait... I mean it."), "Wait... I mean it.")
+
+    def test_the_check_fires_even_when_punctuation_repair_cannot_help(self):
+        # The repair only tidies marks it recognises; the quotes here defeat it,
+        # so this is the engine's own last look at the result.
+        result = clean('"Um."', self.rules)
+        self.assertEqual(result.text, "")
+        self.assertIn("nothing but punctuation left", result.applied)
+
+    def test_ordinary_text_is_not_emptied(self):
+        self.assertEqual(self.clean("Ship it."), "Ship it.")
 
 
 class RulesFileValidation(unittest.TestCase):

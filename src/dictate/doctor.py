@@ -295,6 +295,17 @@ def check_install() -> CheckResult:
     return CheckResult("Install folder", Status.OK, where)
 
 
+#: Phrases that are ordinary speech somewhere, so removing them wherever they
+#: appear eats real sentences. All six shipped in `filler_phrases`, which has no
+#: guard of any kind, and the subsequence guarantee cannot catch it - a deletion
+#: is exactly what the pass is allowed to do. They are guarded [[deletions]]
+#: rules now, but the rules file is the user's copy and `dictate init` will not
+#: overwrite it, so a copy taken before the fix is still doing this. Saying so is
+#: the only way he finds out.
+_UNGUARDED_PHRASES = ("you know", "i mean", "sort of", "kind of",
+                      "like i said", "if that makes sense")
+
+
 def check_cleanup_rules(cfg: Config) -> CheckResult:
     if not cfg.cleanup.enabled:
         return CheckResult("Cleanup rules", Status.OK, "cleanup disabled in config")
@@ -305,6 +316,20 @@ def check_cleanup_rules(cfg: Config) -> CheckResult:
         loaded = rules_mod.load(path)
     except DictateError as exc:
         return CheckResult("Cleanup rules", Status.FAIL, exc.message, exc.remedy)
+    unguarded = [p for p in loaded.filler_phrases
+                 if " ".join(p.lower().split()) in _UNGUARDED_PHRASES]
+    if unguarded:
+        listed = ", ".join(f'"{p}"' for p in unguarded)
+        return CheckResult(
+            "Cleanup rules", Status.WARN,
+            f"{path}: filler_phrases still has {listed}, which is deleted "
+            'wherever it appears - "Do you know the answer?" becomes "Do the '
+            'answer?" and nothing warns you at the time',
+            "Take the cleanup-rules.toml that ships beside dictate (it removes "
+            "those phrases only where Whisper fenced them with commas, which is "
+            "how it writes them when it hears them as filler), or delete those "
+            "entries from filler_phrases yourself.",
+        )
     return CheckResult(
         "Cleanup rules", Status.OK,
         f"{path} ({len(loaded.fillers)} filler words, "

@@ -282,6 +282,15 @@ order. If a rule ever breaks that, the whole cleanup is thrown away and Whisper'
 text is pasted exactly as it came out. So the worst a mistake in there can do is
 remove something you wanted to keep.
 
+That is also the one thing the check cannot catch, because deleting is what the
+pass is for: a rule that eats a phrase you actually said is, to the check, a rule
+working correctly. So the rules for phrases that are sometimes real speech —
+"you know", "I mean", "sort of", "kind of", "like I said", "if that makes sense"
+— require the commas Whisper writes around a phrase when it hears it as filler.
+"It is, you know, mostly fine" loses it; "Do you know the answer?" keeps it. If
+you add a phrase of your own to `filler_phrases`, it is removed *everywhere*,
+with no such guard — the comments in the file say when that is safe.
+
 Try a rule without dictating:
 
 ```powershell
@@ -372,7 +381,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 475 tests, run and passing
+### Verified anywhere — 488 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -483,7 +492,7 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
-* **The 475 tests above, on Windows** as well as on Linux — which is where the
+* **The 488 tests above, on Windows** as well as on Linux — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.
 * **That a supervised child process cannot outlive its parent.** CI starts a
