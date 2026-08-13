@@ -581,7 +581,7 @@ Then run setup again with -Rebuild to compile it from scratch:
     if (Test-Path -LiteralPath (Join-Path $binDir 'parakeet-cli.exe')) {
         Write-Detail 'parakeet-cli.exe was built too - that is the thing the prebuilt downloads do not have.'
     }
-    Set-Content -LiteralPath (Join-Path $Root 'whisper-build.txt') -Encoding UTF8 -Value @(
+    Write-TextFileNoBom -Path (Join-Path $Root 'whisper-build.txt') -Lines @(
         "whisper.cpp commit: $script:BuiltCommit",
         "built:              $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))",
         "server:             $server",
@@ -702,10 +702,13 @@ The full installer output is in:
     $scriptsDir = Get-LastLine (Invoke-Tool -FilePath $python.Path `
             -Arguments @('-c', "import sysconfig; print(sysconfig.get_path('scripts'))")).Output
     if ($scriptsDir -and (Test-Path -LiteralPath $scriptsDir)) {
-        $onPath = @($env:PATH -split ';' | Where-Object { $_.TrimEnd('\') -ieq $scriptsDir.TrimEnd('\') }).Count -gt 0
-        if (-not $onPath) {
-            $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
-            if (-not $userPath) { $userPath = '' }
+        $wanted = $scriptsDir.TrimEnd('\')
+        $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+        if (-not $userPath) { $userPath = '' }
+        # Check both, so running setup twice cannot put it in the PATH twice.
+        $known = @(($env:PATH + ';' + $userPath) -split ';' |
+            Where-Object { $_ -and $_.TrimEnd('\') -ieq $wanted })
+        if ($known.Count -eq 0) {
             [Environment]::SetEnvironmentVariable('PATH', ($userPath.TrimEnd(';') + ';' + $scriptsDir).TrimStart(';'), 'User')
             Update-SessionEnvironment
             Write-Detail "Added $scriptsDir to your PATH so you can type 'dictate' in any new window."
@@ -713,7 +716,10 @@ The full installer output is in:
     }
 
     # -- The config file ----------------------------------------------------
-    $configPath = Join-Path $env:APPDATA 'dictate\dictate.toml'
+    # The same place dictate itself looks: DICTATE_CONFIG if it is set,
+    # otherwise %APPDATA%\dictate\dictate.toml (config.default_config_path).
+    $configPath = $env:DICTATE_CONFIG
+    if (-not $configPath) { $configPath = Join-Path $env:APPDATA 'dictate\dictate.toml' }
     $existed = Test-Path -LiteralPath $configPath
     $init = Invoke-Dictate -Arguments @('init')
     if ($init.ExitCode -ne 0) {

@@ -605,6 +605,28 @@ function Get-FileResumable {
 # The config file
 # ---------------------------------------------------------------------------
 
+function Write-TextFileNoBom {
+    <# Write a text file as UTF-8 with NO byte order mark.
+
+       `Set-Content -Encoding UTF8` cannot be used for this. In Windows
+       PowerShell 5.1 - the version that ships with Windows, and the one this
+       installer runs under - that writes a three-byte mark at the front of the
+       file, and Python's TOML parser reports the mark as a syntax error on line
+       1. The config would look fine in any editor and dictate would refuse to
+       start. #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        # A config file has blank lines in it, and a mandatory string array
+        # rejects empty elements unless it is told not to.
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [AllowEmptyCollection()]
+        [string[]]$Lines
+    )
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllLines($Path, $Lines, $utf8NoBom)
+}
+
 function ConvertTo-TomlString {
     <# A Windows path as a TOML string. Literal (single-quoted) form, which
        needs no backslash escaping - unless the value itself contains a single
@@ -666,7 +688,7 @@ function Set-TomlValue {
             $out.Add($replacement)
         }
     }
-    Set-Content -LiteralPath $Path -Value $out.ToArray() -Encoding UTF8
+    Write-TextFileNoBom -Path $Path -Lines $out.ToArray()
 }
 
 function Get-TomlValue {

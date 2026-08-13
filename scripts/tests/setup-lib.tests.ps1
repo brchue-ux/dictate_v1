@@ -185,6 +185,21 @@ Test-Case 'setting a key in a section that is not there adds the section' {
     Assert-Equal '8178' (Get-TomlValue -Path $file -Section 'whisper' -Key 'port') 'whisper survived'
 }
 
+Test-Case 'the config is written without a byte order mark' {
+    # Windows PowerShell's Set-Content -Encoding UTF8 puts a three-byte mark at
+    # the front of the file, and Python's TOML parser calls that a syntax error
+    # on line 1. The config would look perfect in an editor and dictate would
+    # refuse to start.
+    $file = New-TempPath 'no-bom.toml'
+    Set-Content -LiteralPath $file -Encoding UTF8 -Value @('[whisper]', 'port = 8178')
+    Set-TomlValue -Path $file -Section 'whisper' -Key 'model' -Value 'C:\models\m.bin'
+    $bytes = [IO.File]::ReadAllBytes($file)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        throw 'the config was written with a UTF-8 byte order mark'
+    }
+    Assert-Equal 'C:\models\m.bin' (Get-TomlValue -Path $file -Section 'whisper' -Key 'model') 'value'
+}
+
 Test-Case 'the real shipped config can be pointed at real paths' {
     if (-not (Test-Path -LiteralPath $exampleConfig)) { throw "cannot find $exampleConfig" }
     $file = New-TempPath 'dictate.toml'
