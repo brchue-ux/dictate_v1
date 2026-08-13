@@ -8,6 +8,7 @@ hardware, which is exactly why they were factored out of the platform code.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from dictate.audio.buffer import UtteranceBuffer
 from dictate.audio import wav
@@ -275,6 +276,37 @@ class DoctorReport(unittest.TestCase):
         detail = check_idle_release(cfg).detail
         self.assertIn("stays loaded", detail)
         self.assertIn("idle_release_minutes = 0", detail)
+
+    def test_the_rules_check_notices_an_old_copy_that_still_eats_real_speech(self):
+        """`dictate init` never overwrites a rules file that already exists, so
+        fixing the shipped one does not reach a copy taken before the fix. The
+        cleanup pass cannot notice - deleting is what it is for - so this is the
+        only thing that tells him his sentences are losing their middle."""
+        import tempfile
+
+        from dictate import config as config_mod
+        from dictate.doctor import check_cleanup_rules
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cleanup-rules.toml"
+            path.write_text('filler_phrases = ["you know", "kind of"]\n', encoding="utf-8")
+            cfg = config_mod.from_mapping({"cleanup": {"rules_file": str(path)}})
+            result = check_cleanup_rules(cfg)
+            self.assertIs(result.status, Status.WARN)
+            self.assertIn('"you know"', result.detail)
+            self.assertIn('"kind of"', result.detail)
+            self.assertIn("Do the answer?", result.detail)
+            self.assertIn("filler_phrases", result.remedy or result.detail)
+
+    def test_the_rules_check_is_quiet_about_the_rules_that_ship(self):
+        # Nothing may report a healthy system as broken: the shipped file is
+        # exactly what the warning above tells him to move to.
+        from dictate import config as config_mod
+        from dictate.doctor import check_cleanup_rules
+
+        shipped = Path(__file__).resolve().parent.parent / "config" / "cleanup-rules.toml"
+        cfg = config_mod.from_mapping({"cleanup": {"rules_file": str(shipped)}})
+        self.assertIs(check_cleanup_rules(cfg).status, Status.OK)
 
     def test_worst_ranks_correctly(self):
         self.assertEqual(worst([CheckResult("a", Status.OK)]), Status.OK)

@@ -33,7 +33,7 @@ class CleanCommand(unittest.TestCase):
         code, out, _ = run(["clean", "--rules", str(REPO / "config" / "cleanup-rules.toml"),
                             "Um, so we should, you know, ship it."])
         self.assertEqual(code, 0)
-        self.assertEqual(out.strip(), "So we should, ship it.")
+        self.assertEqual(out.strip(), "So we should ship it.")
 
     def test_explain_names_the_rules_that_fired(self):
         code, _, err = run(["clean", "--rules", str(REPO / "config" / "cleanup-rules.toml"),

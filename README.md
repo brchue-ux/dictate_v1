@@ -225,6 +225,15 @@ order. If a rule ever breaks that, the whole cleanup is thrown away and Whisper'
 text is pasted exactly as it came out. So the worst a mistake in there can do is
 remove something you wanted to keep.
 
+That is also the one thing the check cannot catch, because deleting is what the
+pass is for: a rule that eats a phrase you actually said is, to the check, a rule
+working correctly. So the rules for phrases that are sometimes real speech —
+"you know", "I mean", "sort of", "kind of", "like I said", "if that makes sense"
+— require the commas Whisper writes around a phrase when it hears it as filler.
+"It is, you know, mostly fine" loses it; "Do you know the answer?" keeps it. If
+you add a phrase of your own to `filler_phrases`, it is removed *everywhere*,
+with no such guard — the comments in the file say when that is safe.
+
 Try a rule without dictating:
 
 ```powershell
