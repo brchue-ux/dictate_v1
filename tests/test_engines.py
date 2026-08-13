@@ -182,7 +182,7 @@ class ProcessLifecycle(unittest.TestCase):
             marker = Path(tmp) / "died-once"
             # The first process crashes; the restarted one stays up, which is
             # the behaviour a transient whisper.cpp crash should produce.
-            proc = self.make(port, "--die-after", "0.6",
+            proc = self.make(port, "--die-after-health", "1",
                              "--die-once-marker", str(marker))
             proc.start()
             first_pid = proc.pid
@@ -198,7 +198,7 @@ class ProcessLifecycle(unittest.TestCase):
 
     def test_it_gives_up_after_max_restarts_and_says_why(self):
         port = free_port()
-        proc = self.make(port, "--die-after", "0.2", max_restarts=2)
+        proc = self.make(port, "--die-after-health", "1", max_restarts=2)
         proc.start()
         self.assertTrue(wait_for(lambda: proc.gave_up_reason is not None, timeout=30),
                         "never gave up")
@@ -241,18 +241,26 @@ class ProcessLifecycle(unittest.TestCase):
     def test_stop_returns_promptly_even_while_a_restart_is_in_flight(self):
         """Regression guard: the monitor thread holds the lock across a restart,
         so stop() has to signal before it takes that lock or it blocks for the
-        whole startup timeout."""
+        whole startup timeout.
+
+        The stub comes up, dies as soon as it has been asked whether it is
+        healthy, and is then slow to come back - which parks the monitor inside
+        the restart, holding the lock, which is the state this is about.
+        """
+        import tempfile
+
         port = free_port()
-        proc = self.make(port, "--die-after", "0.3", "--ready-after", "600",
-                         startup_timeout_s=30.0)
-        try:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "died-once"
+            proc = self.make(port, "--die-after-health", "1",
+                             "--die-once-marker", str(marker),
+                             "--slow-after-marker", "600",
+                             startup_timeout_s=30.0)
             proc.start()
-        except BackendUnavailableError:
-            self.skipTest("stub never became ready at all")
-        wait_for(lambda: not proc.is_running(), timeout=10)
-        started = time.monotonic()
-        proc.stop(timeout_s=5)
-        self.assertLess(time.monotonic() - started, 10.0)
+            wait_for(lambda: not proc.is_running(), timeout=10)
+            started = time.monotonic()
+            proc.stop(timeout_s=5)
+            self.assertLess(time.monotonic() - started, 10.0)
 
 
 # ---------------------------------------------------------------------------

@@ -150,7 +150,10 @@ def check_whisper_server(cfg: Config) -> CheckResult:
     exe = cfg.resolve(cfg.whisper.server_exe)
     return check_file(
         "whisper-server binary", exe, min_bytes=10_000,
-        remedy="Build whisper.cpp with Vulkan:\n"
+        remedy="Run setup again - it builds whisper.cpp and fills this path in\n"
+               "for you, and skips everything that is already done:\n"
+               "  powershell -ExecutionPolicy Bypass -File setup.ps1\n"
+               "To do only the build:\n"
                "  powershell -ExecutionPolicy Bypass -File scripts\\build-whisper-vulkan.ps1\n"
                "then put the path it prints into [whisper] server_exe in your config.",
     )
@@ -161,7 +164,10 @@ def check_whisper_model(cfg: Config) -> CheckResult:
     expect = EXPECTED_TURBO_BYTES if model.name == "ggml-large-v3-turbo.bin" else None
     return check_file(
         "Whisper model", model, min_bytes=100 * 1024 * 1024, expect_bytes=expect,
-        remedy="Download it:\n"
+        remedy="Run setup again - it downloads the models and fills this path in\n"
+               "for you, and resumes rather than starting a download over:\n"
+               "  powershell -ExecutionPolicy Bypass -File setup.ps1\n"
+               "To do only the download:\n"
                "  powershell -ExecutionPolicy Bypass -File scripts\\fetch-models.ps1\n"
                "then put the path into [whisper] model in your config.",
     )

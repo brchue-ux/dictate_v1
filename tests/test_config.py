@@ -87,6 +87,16 @@ class Typos(unittest.TestCase):
         cfg = config_mod.from_mapping({"overlay": {"opacity": 1}})
         self.assertEqual(cfg.overlay.opacity, 1.0)
 
+    def test_a_byte_order_mark_does_not_look_like_a_broken_config(self):
+        """Notepad and Windows PowerShell both save UTF-8 with a byte order
+        mark. Read as plain utf-8 that mark is a TOML syntax error on line 1,
+        so a config that is perfectly fine reads as broken."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dictate.toml"
+            path.write_bytes(b"\xef\xbb\xbf[hotkey]\ncombination = \"ctrl + alt + f9\"\n")
+            cfg = config_mod.load(path)
+            self.assertEqual(cfg.hotkey.combination, "ctrl + alt + f9")
+
     def test_malformed_toml_points_at_the_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "dictate.toml"

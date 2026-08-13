@@ -16,6 +16,15 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - Tests: `PYTHONPATH=src python -m unittest discover -s tests -t .` — stdlib only, no
   pip needed, runs anywhere. pytest collects them too if it is installed.
+- Installing the product: `setup.ps1` is the single entry point, six steps, idempotent.
+  `scripts/build-whisper-vulkan.ps1` and `scripts/fetch-models.ps1` are thin wrappers
+  onto `setup.ps1 -Only <step>` — do not reimplement a step in them.
+- The installer's own logic is tested: `scripts/tests/setup-lib.tests.ps1`, plain
+  PowerShell, no Pester. Add a case there for anything you change in
+  `scripts/setup-lib.ps1`.
+- **PowerShell cannot be run on the machines this project is developed on.** CI is the
+  only syntax check some changes get, so `.github/workflows/ci.yml` parses every `.ps1`
+  with Windows PowerShell 5.1 before anything else runs.
 - The core (pipeline, cleanup, config, process supervision, HTTP client) has **no
   third-party dependencies**, deliberately: that is what lets it be tested off Windows.
   Keep it that way; platform and model code goes behind the seams in
@@ -34,6 +43,15 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `[[deletions]]` blocks, or they silently become fields of the last one.
 - **Caption threads are capped at 4 in `config.validate()`** because more threads were
   measured to be slower. This is a settled decision, not a limitation to lift.
+- **Native commands in PowerShell go through `Invoke-Tool`.** git, cmake and pip write
+  ordinary progress to stderr, which Windows PowerShell turns into a terminating error
+  under `$ErrorActionPreference = 'Stop'`. Exit codes are what decide success.
+- **Downloads are pinned by size AND SHA-256 in `scripts/models.psd1`**, which both the
+  installer and CI read. Provenance for each fingerprint is in the comments there; do
+  not add an entry you have not verified.
+- **CI has no GPU and never will.** Keep "it compiles and the tests pass" separate from
+  "the GPU path runs" in the workflow, in the README, and in any PR description. A
+  green tick is not GPU verification.
 
 ## Maintaining this file
 

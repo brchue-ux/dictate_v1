@@ -126,7 +126,7 @@ influence on the structure, and it is deliberate rather than apologetic:
   component that cannot work says so and stops. `tests/test_cli.py` asserts that
   `src/` contains no test doubles at all.
 * **The pipeline, cleanup, config, process supervision and HTTP client are plain
-  Python** and are tested for real, here, on Linux — 164 tests.
+  Python** and are tested for real, here — 167 tests, on Linux and on Windows.
 * **The fiddly bits of the platform code were factored out into pure functions**
   so they could be tested anyway: `platform/geometry.py` (overlay placement),
   `platform/injection_plan.py` (UTF-16 surrogate pairs, Return vs Unicode),
