@@ -132,7 +132,6 @@ class WindowsTrayIcon:
         self._icons: dict[str, int] = {}
         self._commands: dict[int, str] = {}
         self._proc = _WNDPROC(self._on_message)   # kept alive: Windows holds it
-        self._closing = False
         self.user32 = ctypes.WinDLL("user32", use_last_error=True)
         self.shell32 = ctypes.WinDLL("shell32", use_last_error=True)
         self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -146,6 +145,10 @@ class WindowsTrayIcon:
                                         daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout=10.0):
+            # Leave nothing half-alive behind a failure: a thread still trying
+            # to put an icon up while the app believes there is none would be a
+            # second icon the next time it succeeded.
+            self.close()
             raise DictateError(
                 "dictate's icon in the notification area did not appear.",
                 "dictate is running anyway - stop it with `dictate stop`.",
@@ -167,7 +170,6 @@ class WindowsTrayIcon:
             self.user32.PostMessageW(hwnd, WM_TRAY_REFRESH, 0, 0)
 
     def close(self) -> None:
-        self._closing = True
         hwnd = self._hwnd
         if hwnd:
             self.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
