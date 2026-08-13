@@ -33,6 +33,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -769,6 +770,18 @@ def run_at_logon(config_path: str | None = None) -> int:
                 except DictateError as exc:
                     log.write(exc.report())
                     last = exc
+                except Exception as exc:
+                    # Something nobody anticipated. Under pythonw.exe there is
+                    # no stderr for Python to print a traceback to, so an
+                    # unexpected fault is the one failure that really would
+                    # vanish without a trace. It goes in the log instead.
+                    log.write("something went wrong that dictate did not expect:")
+                    log.write(traceback.format_exc())
+                    last = DictateError(
+                        f"dictate stopped with an unexpected error: {exc}",
+                        "The technical detail is in the log named below - that "
+                        "is the thing to send on.",
+                    )
                 if attempt >= settings.startup_attempts:
                     break
                 if instance.stop_requested(since=started):

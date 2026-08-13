@@ -364,6 +364,26 @@ class TheLogonStart(TempState):
         self.assertIn("gave up", shown)
         self.assertIn(autostart.BLOCK_MARK, shown)
 
+    def test_an_unexpected_fault_is_written_down_rather_than_lost(self):
+        """The one failure that really could vanish: under pythonw.exe there is
+        no stderr for Python to print a traceback to, so a bug nobody
+        anticipated would leave dictate simply not running, with nothing
+        anywhere to say why."""
+        from unittest import mock
+
+        path = self.write_config(
+            "[autostart]\nstartup_attempts = 1\nnotify_on_failure = false\n")
+        with mock.patch.object(autostart, "_attempt",
+                               side_effect=ZeroDivisionError("nobody saw this coming")):
+            code = autostart.run_at_logon(str(path))
+        self.assertEqual(code, 2)
+        text = autostart.log_path().read_text(encoding="utf-8")
+        self.assertIn("did not expect", text)
+        self.assertIn("ZeroDivisionError", text)
+        self.assertIn("nobody saw this coming", text)
+        self.assertIn("Traceback", text)  # the technical detail, in the log
+        self.assertIn("gave up", text)
+
     def test_it_releases_the_lock_when_it_gives_up(self):
         from dictate import instance
 
