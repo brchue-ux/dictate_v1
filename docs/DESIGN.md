@@ -304,6 +304,27 @@ the audio callback; the utterance buffer feeding the GPU pass is never dropped.
 * **No installer, no Windows CI.** Separate follow-up task.
 * **No ROCm path.** Blocked on this card; kept only as the diagnostic in
   `scripts/check-rocm-gfx1030.py`.
+* **`dictate update` does not adopt the install folder as a git clone.** The
+  folder came out of a ZIP, so there is nothing to pull into, and the way to
+  create one — `git init`, add a remote, fetch, hard reset — destroys whatever
+  he has edited *before* anything can name it, and leaves a folder that is
+  neither the old version nor the new one if it stops half way. The source is
+  fetched as an archive over the authenticated API instead, unpacked somewhere
+  else entirely, compared with what he has, and only then written file by file
+  over a complete backup. `src/dictate/update.py` carries the ordering and why
+  each step is where it is.
+* **`dictate update` never rebuilds.** The toolchain, the compiled
+  `whisper.cpp` and the models are in `C:\dictate-gpu` and do not change when
+  the application does. A change that genuinely needs one of them says so and
+  names `setup.ps1 -Only <step>`; it never spends half an hour he did not ask
+  for. That distinction is the entire value of the command.
+* **`dictate update` never forces a stop.** `dictate stop` may end a copy that
+  will not answer, because he asked for it to be gone. An update has not been
+  asked for that, so a copy that is mid-utterance, or that will not stop cleanly
+  within its timeout, is left running and nothing is changed. The running copy
+  publishes whether it is busy from the same place that keeps the tray icon
+  honest (`instance.publish_activity`), so nothing in the hotkey or
+  transcription path had to change to make that answerable.
 
 ---
 

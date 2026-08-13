@@ -46,6 +46,10 @@ RECORD_BYTES = 512
 
 LOCK_NAME = "dictate.lock"
 STOP_REQUEST_NAME = "stop-request"
+#: Whether the running copy is busy right now. Written only when that answer
+#: changes, and read by anything that must not interrupt a sentence - see
+#: `publish_activity` below.
+ACTIVITY_NAME = "activity"
 
 #: Windows opens file descriptors in TEXT mode by default, which would rewrite
 #: the newlines in the fixed-width record on the way in and out and make it stop
@@ -78,6 +82,10 @@ def lock_path() -> Path:
 
 def stop_request_path() -> Path:
     return state_dir() / STOP_REQUEST_NAME
+
+
+def activity_path() -> Path:
+    return state_dir() / ACTIVITY_NAME
 
 
 def _ensure_dir(path: Path) -> None:
@@ -364,3 +372,98 @@ def wait_until_stopped(timeout_s: float = 20.0, *, path: Path | None = None,
         if time.monotonic() >= deadline:
             return False
         time.sleep(poll_s)
+
+
+# ---------------------------------------------------------------------------
+# Whether the running copy is busy
+#
+# The lock says a copy is running. It does not say whether he is speaking into
+# it, and `dictate update` has to know: stopping the app to install something is
+# fine, doing it mid-sentence is not - the recording would be thrown away.
+#
+# So the running copy publishes one bit whenever the answer changes, from the
+# same place that keeps the tray icon honest (`app.Application._refresh_tray`),
+# and nothing in the hotkey or transcription path is involved. It is written on
+# change, not on a timer: four small writes per utterance, none while idle.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Activity:
+    """What the running copy last said it was doing."""
+
+    busy: bool = False
+    #: Plain words for the message: "an utterance", "transcribing".
+    what: str = ""
+    pid: int | None = None
+    at: float = 0.0
+
+    def belongs_to(self, holder: Holder | None) -> bool:
+        """Was this written by the copy that is running NOW?
+
+        A record left by a previous copy must never be read as the current one
+        being busy - that would make `dictate update` refuse forever over a
+        sentence somebody finished last week. Judged the same way a stop request
+        is: by pid, and by whether it was written after this copy started.
+        """
+        if holder is None:
+            return False
+        if self.pid and holder.pid and self.pid != holder.pid:
+            return False
+        return not (holder.started_epoch and self.at
+                    and self.at < holder.started_epoch - 1.0)
+
+
+def publish_activity(busy: bool, what: str = "", *, path: Path | None = None) -> None:
+    """Say whether this copy is in the middle of something.
+
+    Best effort in every direction: it is a courtesy to another command, and it
+    may never be the reason dictation fails.
+    """
+    path = path or activity_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"busy={1 if busy else 0}\n"
+            f"what={what}\n"
+            f"pid={os.getpid()}\n"
+            f"at={time.time():.3f}\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def parse_activity(raw: str) -> Activity:
+    fields: dict[str, str] = {}
+    for line in raw.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key.strip()] = value.strip()
+
+    def number(key: str) -> float:
+        try:
+            return float(fields.get(key, ""))
+        except ValueError:
+            return 0.0
+
+    pid = int(number("pid")) or None
+    return Activity(busy=fields.get("busy", "0") == "1", what=fields.get("what", ""),
+                    pid=pid, at=number("at"))
+
+
+def read_activity(path: Path | None = None) -> Activity | None:
+    path = path or activity_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return parse_activity(raw)
+
+
+def clear_activity(path: Path | None = None) -> None:
+    path = path or activity_path()
+    try:
+        path.unlink()
+    except OSError:
+        pass

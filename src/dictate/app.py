@@ -92,6 +92,9 @@ class Application:
         self._in_flight = 0
         self._holding_hotkey = False
         self._last_error = ""
+        #: The last thing published for `dictate update` to read; `None` until
+        #: something has been, so the first idle state is written too.
+        self._published_activity: str | None = None
 
         self.pipeline = Pipeline(
             batch=self.batch,
@@ -238,13 +241,35 @@ class Application:
                                   model_resident=resident, detail=self._last_error)
 
     def _refresh_tray(self) -> None:
+        state = self._tray_state()
+        self._publish_activity(state)
         tray = self.tray
         if tray is None:
             return
         try:
-            tray.update(self._tray_state())
+            tray.update(state)
         except Exception:
             log.debug("the tray icon could not be updated", exc_info=True)
+
+    #: What each tray status means to somebody outside this process who is about
+    #: to stop it. Only these two are "do not interrupt me".
+    _BUSY_WITH = {
+        tray_mod.TrayStatus.LISTENING: "an utterance - you are speaking",
+        tray_mod.TrayStatus.WORKING: "transcribing what you just said",
+    }
+
+    def _publish_activity(self, state: tray_mod.TrayState) -> None:
+        """Let `dictate update` know whether this is a moment to be stopped in.
+
+        The same answer the tray icon is already showing, written to a file only
+        when it changes - so nothing in the hotkey or transcription path does any
+        more work than it did before, and an idle dictate writes nothing at all.
+        """
+        what = self._BUSY_WITH.get(state.status, "")
+        if what == self._published_activity:
+            return
+        self._published_activity = what
+        instance.publish_activity(bool(what), what)
 
     def _open_log_folder(self) -> None:
         """The tray's third item. The folder, not the file: the log may not
@@ -406,6 +431,7 @@ class Application:
                 log.debug("closing the caption model raised", exc_info=True)
         for thread in self._threads:
             thread.join(timeout=2.0)
+        instance.clear_activity()
         self.console("dictate: stopped.")
 
     def _close_tray(self) -> None:

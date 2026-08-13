@@ -7,3 +7,7 @@ dist/
 venv/
 .pytest_cache/
 *.log
+# Written into the install folder by setup.ps1 and by `dictate update`: which
+# revision this copy of the source is, and a checksum of each file. It describes
+# a particular folder on a particular PC, so it is never committed.
+.dictate-install.json

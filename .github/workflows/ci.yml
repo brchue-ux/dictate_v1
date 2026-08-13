@@ -7,7 +7,7 @@
 # GPU. So this workflow exists to catch everything that can be caught without
 # one, on the same operating system the product actually runs on.
 #
-#   PROVED HERE  the Python package installs on Windows and its 393 tests pass;
+#   PROVED HERE  the Python package installs on Windows and its 488 tests pass;
 #                the installer's own logic works on Windows PowerShell 5.1,
 #                including a download that really is interrupted and resumed;
 #                whisper.cpp compiles from source with the Vulkan backend on
@@ -16,9 +16,11 @@
 #                that real binary end to end; sherpa-onnx loads and produces
 #                live-caption text from real audio; Windows Task Scheduler
 #                accepts the logon task and removing it leaves nothing behind;
-#                and a supervised child process is ended by Windows when its
-#                parent is killed outright, which is what makes the orphaned
-#                whisper-server impossible.
+#                a supervised child process is ended by Windows when its parent
+#                is killed outright, which is what makes the orphaned
+#                whisper-server impossible; and `dictate update` really fetches
+#                THIS private repository over the GitHub CLI and replaces a real
+#                editable install with what came back.
 #
 #   NOT PROVED   anything about the GPU. GitHub's hosted Windows runners have no
 #                AMD card and no Vulkan driver, so Vulkan legitimately finds zero
@@ -31,7 +33,10 @@
 #                overlay or pasting into other applications either - those need
 #                a real desktop with a real person at it. Nor is the LOGON
 #                proved: a runner never logs on, so the task registering is as
-#                far as this can go - nobody here has watched it fire.
+#                far as this can go - nobody here has watched it fire. Nor is
+#                the SIGN-IN: the update job below borrows the workflow's own
+#                token, so `gh auth login` opening a browser and Windows
+#                remembering it afterwards is his first morning, not a test.
 
 name: CI
 
@@ -393,6 +398,253 @@ jobs:
           runner never logs on, so nobody has seen the task fire, seen dictate
           come up in an interactive session, or confirmed that no console window
           appears. That is the first morning on the product owner's PC.
+          '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+  # =========================================================================
+  update:
+    name: dictate update (fetches this private repo for real, on Windows)
+    # A fork's pull request has neither this branch nor a token that can read a
+    # private repository, so the job would fail for a reason that is not a fault.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      # This is what stands in for his sign-in, and it is the ONLY part of the
+      # authentication this can exercise: `gh` reads a token from the
+      # environment here, where on his PC it reads the one Windows remembers
+      # after `gh auth login`. Everything past that point - the API calls, the
+      # source archive, the private repository being visible at all - is
+      # identical, and is genuinely proved below.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whole history: this job seeds an install with an older revision
+          # so that "what changed" is a real answer about real commits.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: An install of its own, so nothing here updates the checkout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # Set here rather than in the job's `env:`, where the `runner` context
+          # is not available and the whole workflow fails to start.
+          "DICTATE_STATE_DIR=$env:RUNNER_TEMP\dictate-state" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $install = "$env:RUNNER_TEMP\dictate-install"
+          robocopy . $install /E /XD .git /NFL /NDL /NJH /NJS /NP | Out-Null
+          # robocopy uses 0-7 for success and 8 upwards for failure.
+          if ($LASTEXITCODE -ge 8) { throw "could not copy the checkout ($LASTEXITCODE)" }
+          $global:LASTEXITCODE = 0
+          python -m pip install -e $install
+          if ($LASTEXITCODE -ne 0) { throw 'the throwaway install failed' }
+          "DICTATE_INSTALL=$install" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          # `dictate update` finds the folder Python loads it from, not a name.
+          # If that is not the copy above, everything below would pass while
+          # updating the wrong folder - which is the exact confusion the command
+          # exists to end, so it is checked before anything else runs.
+          $loaded = python -c "import dictate; print(dictate.__file__)"
+          Write-Host "dictate loads from $loaded"
+          if ($loaded -notlike "$install*") {
+            throw "python loads dictate from $loaded, not from the copy this job made"
+          }
+          exit 0
+
+      - name: Make that install stale, the way his ZIP install is stale
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $install = $env:DICTATE_INSTALL
+          $branch = if ($env:GITHUB_HEAD_REF) { $env:GITHUB_HEAD_REF } else { $env:GITHUB_REF_NAME }
+          git fetch --no-tags origin $branch
+          $head = (git rev-parse FETCH_HEAD).Trim()
+          $base = (git rev-parse "$head~3").Trim()
+          # A subject from the range that is not a merge, so the assertion is
+          # about a line he would actually read rather than about bookkeeping.
+          $expect = (git log --no-merges --format=%s "$base..$head" | Select-Object -First 1)
+          Write-Host "branch $branch, updating from $base to $head"
+          Write-Host "expecting to be told about: $expect"
+
+          # Two differences from the current source, so the update has real work:
+          # a file whose content is behind, and a file that no longer exists
+          # upstream (which only gets removed because it is in the record below).
+          Add-Content -LiteralPath "$install\README.md" -Value 'a line from an older version'
+          Set-Content -LiteralPath "$install\src\dictate\_ci_removed_upstream.py" -Value '# not in the current source'
+
+          # Exactly what setup.ps1 does at install time, and the reason it is
+          # done by dictate rather than in PowerShell: the checksums have to be
+          # taken over the same files the update compares.
+          python -c "import sys, dictate.update as u; print(u.record_install(sys.argv[1], root=sys.argv[2]))" $base $install
+          if ($LASTEXITCODE -ne 0) { throw 'recording the install failed' }
+
+          "UPDATE_BRANCH=$branch"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "UPDATE_HEAD=$head"      | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "UPDATE_BASE=$base"      | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "UPDATE_EXPECT=$expect"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          exit 0
+
+      - name: It fetches this private repository and installs what came back
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $install = $env:DICTATE_INSTALL
+
+          $out = dictate update --repo $env:GITHUB_REPOSITORY --branch $env:UPDATE_BRANCH 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "dictate update failed: $out" }
+          if ($out -match 'Traceback') { throw 'dictate update printed a stack trace' }
+
+          # It said what changed, in the words of the commits themselves.
+          if ($env:UPDATE_EXPECT) {
+            if ($out -notmatch [regex]::Escape($env:UPDATE_EXPECT)) {
+              throw "the update did not report the change '$($env:UPDATE_EXPECT)'"
+            }
+          } else {
+            Write-Host 'No non-merge commit in the range, so nothing to assert about the list.'
+          }
+
+          # It really changed the files.
+          $readme = Get-Content -LiteralPath "$install\README.md" -Raw
+          if ($readme -match 'a line from an older version') {
+            throw 'the update reported success without replacing the file'
+          }
+          # And really removed one the current source does not have.
+          if (Test-Path -LiteralPath "$install\src\dictate\_ci_removed_upstream.py") {
+            throw 'a file that is no longer in the source was left behind'
+          }
+
+          # It recorded which revision this now is, which is the thing
+          # `dictate --version` can never say.
+          $record = Get-Content -LiteralPath "$install\.dictate-install.json" -Raw | ConvertFrom-Json
+          if ($record.revision -ne $env:UPDATE_HEAD) {
+            throw "recorded $($record.revision), expected $($env:UPDATE_HEAD)"
+          }
+
+          # It never rebuilt whisper.cpp, re-downloaded a model or ran the
+          # toolchain. That distinction is the whole value of the command.
+          foreach ($forbidden in @('whisper\.cpp', 'Downloading', 'winget install')) {
+            if ($out -match $forbidden) { throw "the update did work it was not asked for: $forbidden" }
+          }
+
+          # And nothing that looks like a credential reached the screen.
+          if ($env:GH_TOKEN -and $out.Contains($env:GH_TOKEN)) {
+            throw 'the update printed the token'
+          }
+          exit 0
+
+      - name: Running it again is one second and says so
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $out = dictate update --repo $env:GITHUB_REPOSITORY --branch $env:UPDATE_BRANCH 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "a second update failed: $out" }
+          if ($out -notmatch 'already up to date') { throw 'it did not say it was up to date' }
+
+          $check = dictate update --repo $env:GITHUB_REPOSITORY --branch $env:UPDATE_BRANCH --check 2>&1 | Out-String
+          Write-Host $check
+          if ($LASTEXITCODE -ne 0) { throw "--check failed: $check" }
+          exit 0
+
+      - name: A file he has edited stops it, and --force keeps a copy first
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $install = $env:DICTATE_INSTALL
+
+          # Put it back in the "an update is pending" state, then edit a file.
+          python -c "import sys, dictate.update as u; u.record_install(sys.argv[1], root=sys.argv[2])" $env:UPDATE_BASE $install
+          Set-Content -LiteralPath "$install\README.md" -Value 'notes I typed myself'
+
+          $out = dictate update --repo $env:GITHUB_REPOSITORY --branch $env:UPDATE_BRANCH 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -eq 0) { throw 'it overwrote an edited file without saying anything' }
+          if ($out -notmatch 'README\.md') { throw 'it did not name the file that would be overwritten' }
+          if ($out -notmatch '--force') { throw 'it did not say how to go ahead anyway' }
+          $kept = Get-Content -LiteralPath "$install\README.md" -Raw
+          if ($kept -notmatch 'notes I typed myself') { throw 'it changed the file it had just refused to change' }
+
+          $forced = dictate update --repo $env:GITHUB_REPOSITORY --branch $env:UPDATE_BRANCH --force 2>&1 | Out-String
+          Write-Host $forced
+          if ($LASTEXITCODE -ne 0) { throw "--force failed: $forced" }
+          $now = Get-Content -LiteralPath "$install\README.md" -Raw
+          if ($now -match 'notes I typed myself') { throw '--force did not update the file' }
+          exit 0
+
+      - name: And there is a way back
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $install = $env:DICTATE_INSTALL
+          $out = dictate update --restore 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "--restore failed: $out" }
+          $back = Get-Content -LiteralPath "$install\README.md" -Raw
+          if ($back -notmatch 'notes I typed myself') {
+            throw 'the version that was there before --force was not put back'
+          }
+          # The restored copy is a working install, and it says which one it is.
+          python -c "import dictate.cli; print(dictate.cli.__file__)"
+          if ($LASTEXITCODE -ne 0) { throw 'the restored install does not import' }
+          $doctor = dictate doctor 2>&1 | Out-String
+          if ($doctor -match 'Traceback') { throw 'doctor printed a stack trace after a restore' }
+          if ($doctor -notmatch 'Install folder') { throw 'doctor did not say which folder dictate loads from' }
+          # `dictate doctor` exits 1 on a machine with no model and no
+          # whisper-server, which is the correct answer here and not a failure of
+          # this step - so the step's own result is stated rather than inherited.
+          exit 0
+
+      - name: With no sign-in it says what to type, and prints nothing else
+        shell: pwsh
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # The state he is in the very first time, reproduced: the GitHub CLI is
+          # installed and nothing is signed in. The message has to name the one
+          # command that fixes it, because nobody can guess `gh auth login`.
+          $out = dictate update --repo $env:GITHUB_REPOSITORY --check 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -eq 0) { throw 'it claimed to work with nothing signed in' }
+          if ($out -match 'Traceback') { throw 'it printed a stack trace instead of a message' }
+          if ($out -notmatch 'gh auth login') { throw 'it did not say how to sign in' }
+          if ($out -notmatch '(?i)sign in') { throw 'it did not say plainly that a sign-in is needed' }
+          exit 0
+
+      - name: Summary
+        if: always()
+        shell: pwsh
+        run: |
+          @'
+          ### dictate update
+
+          **Proved on real Windows, against this private repository:** the
+          GitHub CLI reads it, the source archive for a specific revision comes
+          back and unpacks, and a real editable install is replaced with what
+          came back - a file behind the current source is brought forward, a
+          file no longer in the source is removed, the revision is recorded, and
+          the commit subjects between the two revisions are reported. Running it
+          again answers "already up to date". A file edited in the install folder
+          stops it by name; `--force` goes ahead and keeps a complete copy;
+          `--restore` puts that copy back and the result imports. With nothing
+          signed in, it names `gh auth login` rather than failing obscurely.
+          Nothing in any of it rebuilds whisper.cpp, downloads a model or runs
+          the toolchain.
+
+          **Not proved, and cannot be here:** the sign-in itself. This job
+          borrows the workflow's own token, so `gh auth login` opening a browser
+          and Windows remembering it afterwards has never been run by anybody -
+          that is his first morning. Nor is a real interruption: the roll-back is
+          driven here by a version that will not import, and by the unit tests
+          off Windows, rather than by pulling the power out half way.
           '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
   # =========================================================================

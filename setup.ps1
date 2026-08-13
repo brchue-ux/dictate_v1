@@ -951,6 +951,52 @@ $($init.Output.Trim())
     } else {
         Write-Ok "Config written to $configPath with every path already filled in."
     }
+
+    Write-InstallRecord -Python $python
+}
+
+function Write-InstallRecord {
+    <# Record which version of the source this folder holds, so that
+       `dictate update` can say what changed and what you have edited.
+
+       `dictate --version` says 0.1.0 and always will, so it can never answer
+       "do I need an update?". This can.
+
+       The record is written by dictate itself rather than here, deliberately:
+       it carries a checksum of every file, and those have to be taken over
+       exactly the files `dictate update` compares. Two implementations of
+       "which files count" would drift and start reporting edits nobody made.
+
+       A folder that came out of a ZIP has no revision in it anywhere, so that
+       field is left empty and the first `dictate update` fills it in. None of
+       this may stop an install that has otherwise worked. #>
+    param([Parameter(Mandatory = $true)]$Python)
+
+    $revision = ''
+    if (Test-Path -LiteralPath (Join-Path $RepoRoot '.git')) {
+        $rev = Invoke-Tool -FilePath 'git' -Arguments @('-C', $RepoRoot, 'rev-parse', 'HEAD')
+        if ($rev.ExitCode -eq 0) { $revision = (Get-LastLine $rev.Output).Trim() }
+    }
+    # `sys.argv[1] if len(sys.argv) > 1 else ""` rather than plain sys.argv[1]:
+    # Windows PowerShell 5.1 DROPS an empty string argument to a native command
+    # rather than passing it, so the ZIP case - which is the ordinary one - would
+    # arrive with no argument at all and fail on an index that is not there.
+    $code = 'import sys, dictate.update as u; print(u.record_install(sys.argv[1] if len(sys.argv) > 1 else ""))'
+    $record = Invoke-Tool -FilePath $Python.Path -Arguments @('-c', $code, $revision)
+    if ($record.ExitCode -ne 0) {
+        Write-Note 'Could not record which version this is, so `dictate update` will not be able to say what changed the first time you run it. Nothing else is affected.'
+        Write-DictateLines $record.Output
+        return
+    }
+    if ($revision.Length -ge 7) {
+        # Single-quoted, joined: a backtick inside a double-quoted PowerShell
+        # string is an escape character, and `dictate update` would print as
+        # "dictate update" with the marks silently eaten.
+        Write-Ok ('Recorded this as revision ' + $revision.Substring(0, 7) +
+            ' - `dictate update` fetches anything newer.')
+    } else {
+        Write-Ok 'Recorded what is in this folder. `dictate update` fetches the latest version and says what changed.'
+    }
 }
 
 # ===========================================================================
@@ -1218,6 +1264,12 @@ Write-Host 'press the hotkey. `dictate autostart enable` prints the exact number
 Write-Host 'from your config.'
 Write-Host '  dictate autostart status   is it on, is it running, and did it start'
 Write-Host '  dictate autostart disable  turn it off again, leaving nothing behind'
+Write-Host ''
+Write-Host 'And when there is a newer version, this is the whole of getting it -'
+Write-Host 'seconds, not the half hour this took. It says what changed:'
+Write-Host '  dictate update' -ForegroundColor White
+Write-Host 'The first time it will ask you to sign in to GitHub once, and tell you'
+Write-Host 'exactly what to type. It never rebuilds any of the above.'
 Write-Host ''
 Write-Host "Config:  $(Join-Path $env:APPDATA 'dictate\dictate.toml')"
 Write-Host "Log:     $(Join-Path $Root 'dictate.log')"

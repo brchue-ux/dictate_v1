@@ -116,6 +116,15 @@ class Parser(unittest.TestCase):
             run(["--version"])
         self.assertEqual(ctx.exception.code, 0)
 
+    def test_update_is_offered_with_the_ways_out_of_it(self):
+        """`--check` and `--restore` are the two he will want when he is not
+        sure: one changes nothing, the other undoes the last one."""
+        args = cli.build_parser().parse_args(["update", "--check"])
+        self.assertTrue(args.check)
+        self.assertFalse(args.force)
+        self.assertEqual(args.branch, "main")
+        self.assertTrue(cli.build_parser().parse_args(["update", "--restore"]).restore)
+
 
 class PlatformSeam(unittest.TestCase):
     """No fallbacks: on a machine without the platform layer, every constructor
