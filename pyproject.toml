@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dictate"
+version = "0.1.0"
+description = "Push-to-talk dictation for Windows: live captions while you speak, clean text pasted when you stop."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# The core pipeline, the cleanup pass and the whisper.cpp client have NO third-party
+# dependencies - that is deliberate, it is what makes them testable off-Windows.
+# Everything platform- or model-specific is an optional extra.
+dependencies = []
+
+[project.optional-dependencies]
+# What the product owner actually installs on Windows.
+windows = [
+    "sounddevice>=0.4.6",   # mic capture (PortAudio)
+    "numpy>=1.26",          # audio buffers for sounddevice + sherpa-onnx
+    "sherpa-onnx>=1.13.5",  # streaming Zipformer for the live captions
+    "global-hotkeys>=0.1.7; sys_platform == 'win32'",  # press/release global hotkey
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+dictate = "dictate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

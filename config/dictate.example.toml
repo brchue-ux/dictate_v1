@@ -1,0 +1,138 @@
+# dictate_v1 configuration
+#
+# Copy this to %APPDATA%\dictate\dictate.toml (or run `dictate init`, which does
+# it for you) and edit it. Every setting below is optional - delete any line and
+# dictate uses the default shown.
+#
+# After editing, run:  dictate doctor
+# It checks every path in here and tells you exactly what is wrong if anything is.
+#
+# THE FOUR PATHS THAT MATTER are marked <<< CHECK THIS. Everything else can stay
+# as it is.
+
+
+[hotkey]
+# Hold this to record. Modifiers: ctrl, alt, shift, win.
+combination = "ctrl + alt + space"
+# "hold"   = push-to-talk: record while held (this is the design).
+# "toggle" = press once to start, press again to stop.
+mode = "hold"
+
+
+[audio]
+# "" means the Windows default microphone. `dictate devices` lists the others;
+# you can put a name, part of a name, or the number.
+device = ""
+# Do not change these two: both models require 16 kHz mono.
+sample_rate = 16000
+channels = 1
+# Microphone callback size in milliseconds.
+block_ms = 32
+# A press shorter than this is treated as a mis-press: nothing is transcribed
+# and nothing is pasted.
+min_utterance_ms = 350
+# Hard ceiling, so a stuck key cannot record forever.
+max_utterance_s = 300
+
+
+[captions]
+# The words that appear on screen WHILE you are speaking.
+#
+# This text is display-only. It is thrown away the moment you let go of the
+# hotkey and it never reaches your document - the text that gets pasted comes
+# from Whisper, which sees the whole recording. That is why it is allowed to be
+# ALL CAPS, unpunctuated, and occasionally wrong.
+enabled = true
+model_dir = 'C:\dictate-gpu\models\sherpa-onnx-streaming-zipformer-en-2023-06-26'  # <<< CHECK THIS
+encoder = "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
+decoder = "decoder-epoch-99-avg-1-chunk-16-left-128.onnx"
+joiner = "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
+tokens = "tokens.txt"
+# LEAVE THIS AT 2. This model was measured to get *worse* with more threads -
+# six threads ran three times slower than two, because the per-chunk work is
+# tiny and thread synchronisation dominates. dictate refuses values above 4.
+num_threads = 2
+provider = "cpu"
+decoding_method = "greedy_search"
+
+
+[overlay]
+# The caption window. It is always on top, it never takes focus, and clicks pass
+# straight through it to whatever is underneath.
+position = "bottom-center"   # bottom-center, bottom-left, bottom-right,
+                             # top-center, top-left, top-right
+margin_px = 90
+max_width_px = 1100
+font_family = "Segoe UI"
+font_size = 20
+opacity = 0.88
+background = "#12121a"
+foreground = "#eaeaf2"
+accent = "#7aa2f7"
+# How much caption text stays on screen; older words scroll off the left.
+max_chars = 220
+click_through = true
+
+
+[whisper]
+# The transcription that actually gets pasted: Whisper large-v3-turbo on the GPU
+# through whisper.cpp's Vulkan backend.
+#
+# dictate starts this server once and keeps it running, so the 1.6 GB model is
+# loaded into VRAM one time at startup rather than once per sentence.
+server_exe = 'C:\dictate-gpu\whisper.cpp\build\bin\Release\whisper-server.exe'  # <<< CHECK THIS
+model = 'C:\dictate-gpu\models\ggml-large-v3-turbo.bin'                         # <<< CHECK THIS
+host = "127.0.0.1"
+port = 8178
+# CPU threads for the parts that are not on the GPU.
+threads = 8
+language = "en"
+beam_size = 1
+best_of = 1
+# false runs it on the CPU instead, which will be far too slow. Only useful for
+# proving whether the GPU is being used at all.
+use_gpu = true
+# Leave this false. whisper.cpp issue #3806 is whisper-server crashing inside
+# AMD's amdvlk64.dll when flash attention is on.
+flash_attn = false
+extra_args = []
+# The first ever start is slow because the graphics driver compiles its shaders.
+startup_timeout_s = 120.0
+request_timeout_s = 120.0
+# How many times to restart the server if it crashes before giving up and
+# telling you.
+max_restarts = 3
+# Push a second of silence through at startup so your first real sentence does
+# not pay for the GPU warming up.
+warmup = true
+
+
+[cleanup]
+# Strips "um" and "uh", collapses doubled words, removes restarts. It can only
+# ever DELETE words - see the top of cleanup-rules.toml.
+enabled = true
+# Relative paths are relative to this config file.
+rules_file = "cleanup-rules.toml"    # <<< CHECK THIS (it should sit next to this file)
+
+
+[paste]
+# "sendinput"  types the text directly. Your clipboard is never touched.
+# "clipboard"  copies, sends Ctrl+V, then puts your old clipboard back.
+#              More reliable in a few remote-desktop and terminal apps.
+method = "sendinput"
+# Put focus back on the window you were in before pasting, if something stole it.
+restore_focus = true
+# Pause between characters, in milliseconds. 0 is fastest; raise it to 1 or 2 if
+# an application drops characters.
+per_char_delay_ms = 0.0
+# Only used by the clipboard method: how long to wait before restoring.
+clipboard_restore_delay_ms = 300
+# Add a space at the end so two dictations in a row do not run together.
+trailing_space = true
+
+
+[logging]
+level = "INFO"
+# Where to write the full log, including whisper.cpp's own output. This is the
+# first thing to look at when something goes wrong. "" means no log file.
+file = 'C:\dictate-gpu\dictate.log'
