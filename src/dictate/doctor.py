@@ -257,6 +257,44 @@ def check_idle_release(cfg: Config) -> CheckResult:
     )
 
 
+def check_install() -> CheckResult:
+    """Which folder dictate is loaded from, which version it is, and whether an
+    update was interrupted.
+
+    The folder is here because "I updated it and nothing changed" has already
+    cost an evening: the answer was that Python loads dictate from somewhere
+    else. The version is here because `dictate --version` says 0.1.0 and always
+    will, so it cannot tell anybody whether an update is needed.
+    """
+    from . import update as update_mod
+
+    root = update_mod.find_install_root()
+    stamp = update_mod.read_stamp(root)
+    where = f"{root} ({stamp.describe()})" if stamp else \
+        f"{root} (revision not recorded - `dictate update` records it)"
+
+    try:
+        update_mod.check_install_root(root)
+    except DictateError as exc:
+        # Not a broken dictate - it is running, or this check would not be - but
+        # `dictate update` cannot replace a folder like this, and finding that
+        # out at the moment he wants an update is worse than knowing now.
+        return CheckResult("Install folder", Status.WARN, str(root), exc.remedy)
+
+    journal = update_mod.read_journal()
+    if journal is not None:
+        return CheckResult(
+            "Install folder", Status.WARN,
+            f"{where}; an update did not finish",
+            "An update was interrupted. The version that was there before it is "
+            "kept, and\nthis puts it back:\n"
+            "  dictate update --restore\n"
+            "Or run the update again, which does the same thing first:\n"
+            "  dictate update",
+        )
+    return CheckResult("Install folder", Status.OK, where)
+
+
 def check_cleanup_rules(cfg: Config) -> CheckResult:
     if not cfg.cleanup.enabled:
         return CheckResult("Cleanup rules", Status.OK, "cleanup disabled in config")
@@ -329,6 +367,7 @@ def collect(cfg: Config, *, checks: list[Callable[[], CheckResult]] | None = Non
     results = [
         check_platform(),
         check_python(),
+        check_install(),
         check_hotkey(cfg),
         check_cleanup_rules(cfg),
         check_whisper_server(cfg),

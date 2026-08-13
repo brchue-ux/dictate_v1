@@ -148,6 +148,63 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Only build,verify -Ref v1.9.
 still do what their names say; they now run the same code as the step of setup
 that does that job, rather than a second copy of it.
 
+### Getting a newer version
+
+```
+dictate update
+```
+
+Seconds, not the half hour the first install took. It fetches the current source,
+tells you what changed in the words of the changes themselves, puts it in place,
+and starts dictate again if it was running:
+
+```
+install folder:  C:\dictate_v1
+                 (this is the folder Python loads dictate from)
+this copy:       0f6ae00 on main, recorded 2026-08-12 22:31:04
+latest on main:  bd4d941  Make an orphaned whisper-server impossible
+
+What changed:
+  - Make an orphaned whisper-server impossible, and give him one command out
+    of any stuck state
+  - tidy: the tray leaves nothing half-alive when it cannot start
+
+Fetching the new version…
+29 file(s) to update.
+```
+
+**It does not rebuild anything.** The build tools, the compiled `whisper.cpp` and
+the models live in `C:\dictate-gpu` and do not change when the application does,
+so none of them are touched — that is the whole reason this takes seconds. If a
+future change ever does need one of them, it will say so and name the exact
+`setup.ps1 -Only <step>` to run. Your settings in `%APPDATA%\dictate` are never
+opened either.
+
+**The first time, it will ask you to sign in to GitHub.** The source is in a
+private repository, and your browser only gets in because you are already signed
+in there — a command has no such luck. So:
+
+```powershell
+winget install --id GitHub.cli     # if you do not have it
+gh auth login                      # opens your browser; once, ever
+```
+
+Choose **GitHub.com**, then **HTTPS**, then **Login with a web browser**. Windows
+remembers it from then on, and `dictate update` never asks again. dictate itself
+never sees, prints or stores the credential — the GitHub CLI holds it, in the
+same place Windows keeps your other sign-ins.
+
+Two things worth knowing:
+
+* `dictate update --check` says what would change and changes nothing.
+* `dictate update --restore` puts back the version that was there before the last
+  update. A complete copy of your install folder is kept every time anything is
+  changed, at `%LOCALAPPDATA%\dictate\updates`, so there is always a way back.
+
+If you have edited a file inside `C:\dictate_v1` yourself, it stops and names the
+file rather than overwriting it. `dictate update --force` goes ahead anyway, and
+still keeps the copy.
+
 ### If anything is ever stuck
 
 ```
@@ -315,7 +372,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 393 tests, run and passing
+### Verified anywhere — 474 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -382,6 +439,14 @@ python -m unittest discover -s tests -t .
 * **What the tray icon says and offers**: the tooltip, the status line, the four
   menu items, that each names the command that does the same thing, and that the
   icon's own bytes are an icon Windows can read whose colour is the status.
+* **Everything `dictate update` decides**, driven with real archives built and
+  unpacked in the test: which folder is the install, what changed between two
+  revisions in plain language, which files to write and which to remove, which
+  files *he* has edited (and the refusal that names them), an archive containing
+  a path that escapes its folder, a new version that will not import being rolled
+  back by itself, an update interrupted half way being put back from its journal,
+  and that a copy in the middle of an utterance is left alone rather than stopped.
+  Also that nothing token-shaped can reach the screen.
 * That the package ships no test doubles.
 
 ### Verified on real Windows — by CI, on every change
@@ -418,7 +483,7 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
-* **The 393 tests above, on Windows** as well as on Linux — which is where the
+* **The 474 tests above, on Windows** as well as on Linux — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.
 * **That a supervised child process cannot outlive its parent.** CI starts a
@@ -440,6 +505,15 @@ Windows machines. These are things that used to be on the "never run" list:
   to come out as the text `System.Management.Automation.RemoteException` in the
   middle of the install report. Both halves of that are tested on the real
   Windows PowerShell 5.1 that ships with Windows.
+* **That `dictate update` really fetches this private repository.** CI signs the
+  GitHub CLI in with the workflow's own token, makes a throwaway editable install
+  that is deliberately behind, and runs the real command: the source archive for
+  a real revision comes back, a file that is behind is brought forward, a file no
+  longer in the source is removed, the revision is recorded, and the commit
+  subjects between the two revisions are reported. Then `--force` past an edited
+  file, `--restore` back again, and — with the token cleared — that it names
+  `gh auth login` instead of failing obscurely. What it cannot prove is the
+  sign-in itself; see below.
 
 ### Still not verified — needs this actual PC
 
@@ -456,6 +530,10 @@ misbehaves.
   Stop and Restart do what they say. A hosted runner has no notification area
   and no one to click anything in it. The `[tray] enabled = false` line in your
   config turns it off if it misbehaves; nothing else depends on it.
+* **`gh auth login` in a browser, and Windows remembering it.** CI borrows the
+  workflow's own token, so the one interactive step of `dictate update` — the
+  sign-in you do once — has never been run by anybody. Everything after it is
+  proved; that first minute is not.
 * **Anything GPU.** CI machines have no graphics card, so every transcription
   above ran on a processor. No timing figure here is measured. The 0.4–1.0 s
   estimate comes from a published RX 6750 GRE (RDNA2, Windows, Vulkan) encode of

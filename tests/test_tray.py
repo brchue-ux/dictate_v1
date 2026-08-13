@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import struct
 import unittest
+from pathlib import Path
 
 from dictate import tray
 
@@ -149,6 +150,28 @@ class WhatTheAppTellsIt(unittest.TestCase):
     their own, with the four things they read supplied.
     """
 
+    def setUp(self):
+        # The app publishes what it is doing into the state directory, so that
+        # `dictate update` can decline to stop it mid-sentence. Point that
+        # somewhere disposable rather than at this machine's real one.
+        import os
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.state = Path(self._tmp.name)
+        self._previous = os.environ.get("DICTATE_STATE_DIR")
+        os.environ["DICTATE_STATE_DIR"] = str(self.state)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        import os
+
+        if self._previous is None:
+            os.environ.pop("DICTATE_STATE_DIR", None)
+        else:
+            os.environ["DICTATE_STATE_DIR"] = self._previous
+        self._tmp.cleanup()
+
     def app(self, **kwargs):
         import threading
         from types import SimpleNamespace
@@ -169,6 +192,7 @@ class WhatTheAppTellsIt(unittest.TestCase):
         app._holding_hotkey = False
         app._in_flight = 0
         app._last_error = ""
+        app._published_activity = None
         app.batch = SimpleNamespace(state=kwargs.pop("residency", Residency.RESIDENT))
         for key, value in kwargs.items():
             setattr(app, key, value)
@@ -210,6 +234,47 @@ class WhatTheAppTellsIt(unittest.TestCase):
         # clean shutdown - the same door Ctrl+C and `dictate stop` use.
         self.assertTrue(app.overlay.closed.is_set())
         self.assertFalse(app.restart_wanted)
+
+    def test_it_publishes_whether_now_is_a_moment_to_be_stopped_in(self):
+        """The seam `dictate update` reads before it stops anything.
+
+        The same answer the icon is already showing, put where another process
+        can see it - so an update never takes the app away mid-sentence.
+        """
+        from dictate import instance
+
+        app = self.app(_holding_hotkey=True)
+        app._refresh_tray()
+        activity = instance.read_activity()
+        self.assertIsNotNone(activity)
+        self.assertTrue(activity.busy)
+        self.assertIn("speaking", activity.what)
+
+        app._holding_hotkey = False
+        app._in_flight = 1
+        app._refresh_tray()
+        self.assertIn("transcribing", instance.read_activity().what)
+
+        app._in_flight = 0
+        app._refresh_tray()
+        self.assertFalse(instance.read_activity().busy)
+
+    def test_an_idle_app_does_not_write_the_same_answer_over_and_over(self):
+        """It is written on change, not on a timer: the tray is refreshed twice
+        a second for as long as dictate runs, and that may not become two disk
+        writes a second for as long as dictate runs."""
+        from dictate import instance
+
+        app = self.app()
+        app._refresh_tray()
+        path = instance.activity_path()
+        first = path.stat().st_mtime_ns
+        path.write_text("busy=1\nwhat=tampered\n", encoding="utf-8")
+        for _ in range(20):
+            app._refresh_tray()
+        self.assertEqual(path.read_text(encoding="utf-8"),
+                         "busy=1\nwhat=tampered\n")
+        self.assertIsNotNone(first)
 
     def test_restart_from_the_tray_shuts_down_first_and_says_so(self):
         from dictate.app import EXIT_RESTART

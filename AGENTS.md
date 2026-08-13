@@ -149,6 +149,28 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **A modal dialog must never be shown while holding the instance lock.** It can sit
   there until the next morning, and `dictate run` would answer "already running" for
   a copy that gave up hours ago.
+- **`dictate update` replaces the folder Python loads from, never a named one.**
+  `update.find_install_root()` answers that from the module's own location, because
+  the install is editable and updating some other copy would appear to succeed and
+  change nothing. The source arrives as an API archive through the GitHub CLI (the
+  repo is private and dictate never handles a token — `gh` does), is unpacked and
+  checked outside the install, and is written over a complete backup with a journal
+  in `%LOCALAPPDATA%\dictate\updates`; an interrupted run is put back by the next
+  `dictate update` or by `--restore`. It never rebuilds whisper.cpp or the models,
+  and it never forces a stop. `docs/DESIGN.md` → "Things deliberately not done"
+  carries the reasoning; `src/dictate/update.py` carries the ordering.
+- **`.dictate-install.json` is what `dictate --version` cannot be.** The version
+  string is 0.1.0 and always will be, so the install folder carries its own record
+  of the revision AND a SHA-256 per file — that is what makes "you have edited these
+  three files" answerable rather than guessable. It is written by
+  `update.record_install()`, called from `setup.ps1` at install time and by every
+  update; never reimplement the hashing in PowerShell, or the two ideas of "which
+  files count" will drift and report edits nobody made. It is deliberately not
+  part of the tree it describes (`is_ignored`) but IS part of a backup.
+- **Anything that must not interrupt an utterance reads `instance.read_activity()`.**
+  The running copy publishes busy/idle from `app.Application._refresh_tray`, on
+  change only, which is the tray's existing answer rather than a second one. Do not
+  move that write into the hotkey or transcription path.
 - **What autostart costs is `[whisper] idle_release_minutes`, not "1.6 GB all day".**
   Since the idle release, leaving the logon task on holds no VRAM between dictation
   sessions. Anything that states the cost — the README, `autostart enable`'s output,

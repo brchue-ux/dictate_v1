@@ -2,6 +2,7 @@
 
     dictate run           hold the hotkey and talk (the actual product)
     dictate stop          stop it, however stuck it is - the one way out
+    dictate update        fetch the latest version and install it in place
     dictate autostart     start it (or stop it) starting itself when you log in
     dictate doctor        check everything the app needs, and say what to fix
     dictate init          write a config file you can edit
@@ -30,7 +31,7 @@ from pathlib import Path
 from . import (
     __version__, app as app_mod, autostart as autostart_mod, config as config_mod,
     doctor as doctor_mod, instance as instance_mod, pipeline as pipeline_mod,
-    recovery as recovery_mod,
+    recovery as recovery_mod, update as update_mod,
 )
 from .errors import AlreadyRunningError, DictateError
 
@@ -154,6 +155,24 @@ def cmd_stop(args: argparse.Namespace) -> int:
                                 stale_only=args.stale_only)
     if outcome.left_alone:
         return EXIT_ALREADY_RUNNING
+    return 0 if outcome.ok else 1
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """Fetch the current source and put it in place.
+
+    Everything it decides is in `update.py` and is tested there. This says what
+    was asked for and turns the answer into an exit code; every failure worth a
+    remedy is a `DictateError` and reaches `main` below, exactly like the rest.
+    """
+    if args.restore:
+        outcome = update_mod.restore(say=_out, config_path=args.config,
+                                     timeout_s=args.timeout)
+    else:
+        outcome = update_mod.update(
+            say=_out, config_path=args.config, repo=args.repo,
+            branch=args.branch, check_only=args.check, force=args.force,
+            timeout_s=args.timeout)
     return 0 if outcome.ok else 1
 
 
@@ -389,6 +408,28 @@ def build_parser() -> argparse.ArgumentParser:
                              "a copy that is running alone. setup.ps1 uses this "
                              "so checking the install cannot stop your dictation")
     p_stop.set_defaults(func=cmd_stop)
+
+    p_up = sub.add_parser(
+        "update",
+        help="fetch the latest version of dictate and install it in place")
+    p_up.add_argument("--check", action="store_true",
+                      help="say what would change and change nothing")
+    p_up.add_argument("--force", action="store_true",
+                      help="update even though you have edited files in the "
+                           "install folder (a complete copy is kept first)")
+    p_up.add_argument("--restore", action="store_true",
+                      help="put back the version that was there before the "
+                           "last update")
+    p_up.add_argument("--branch", default=update_mod.DEFAULT_BRANCH,
+                      help=f"the branch to update from "
+                           f"(default: {update_mod.DEFAULT_BRANCH})")
+    p_up.add_argument("--repo", default=update_mod.DEFAULT_REPO,
+                      help=f"the GitHub repository to update from "
+                           f"(default: {update_mod.DEFAULT_REPO})")
+    p_up.add_argument("--timeout", type=float, default=30.0,
+                      help="seconds to wait for a running dictate to stop "
+                           "before giving up and changing nothing (default: 30)")
+    p_up.set_defaults(func=cmd_update)
 
     p_auto = sub.add_parser("autostart", help="start dictate when you log in")
     p_auto.set_defaults(func=cmd_autostart)
