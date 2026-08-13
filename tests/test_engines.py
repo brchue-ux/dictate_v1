@@ -334,12 +334,17 @@ class EveryChildIsContained(unittest.TestCase):
             proc = self.make(guard, port, "--die-after-health", "1",
                              "--die-once-marker", str(Path(tmp) / "died-once"))
             proc.start()
-            first = proc.pid
+            # The pid as it was HANDED OVER, not as read back afterwards. This
+            # stub is started to die the moment it reports healthy, and `pid` is
+            # None for a process that has already exited - so on a machine busy
+            # enough (a loaded CI runner) it can be None by the next line, and
+            # the test would then be comparing the first child against nothing.
+            first = guard.adopted[0]
             self.assertTrue(wait_for(lambda: proc.pid not in (None, first),
                                      timeout=25), "never restarted")
-            self.assertEqual(guard.adopted[0], first)
-            self.assertIn(proc.pid, guard.adopted)
             self.assertEqual(len(guard.adopted), 2)
+            self.assertIn(proc.pid, guard.adopted)
+            self.assertNotEqual(guard.adopted[0], guard.adopted[1])
 
     def test_and_so_is_the_one_the_idle_release_brings_back(self):
         port = free_port()
