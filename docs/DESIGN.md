@@ -270,6 +270,56 @@ are left alone.
 
 ---
 
+## Spoken punctuation, and why it is a second stage
+
+"hello comma world" → `hello, world`. That is a **substitution**, and the pass
+above is guaranteed never to make one. The guarantee is not negotiable, so
+spoken punctuation is a stage of its own (`src/dictate/punctuation/`) that runs
+**after** cleanup and leaves it exactly as it was — same schema, same
+subsequence check, same position, handed the same bytes.
+
+**Why after and not before.** Two reasons, and the first is the one that
+decides it:
+
+1. Cleanup is then handed, byte for byte, the text Whisper produced, exactly as
+   it was before this feature existed. Its check is evaluated over the same
+   input it always was, and "off" is provably today's behaviour rather than
+   nearly it.
+2. Cleanup's filler rules eat a comma that the filler was carrying — `um,` goes
+   as a unit. Punctuation-first would hand it a comma this stage had just
+   inserted, so "hello um comma world" would lose the comma he asked for.
+
+**Its own guarantee.** It substitutes, so it cannot borrow cleanup's. It
+carries a narrower one instead: a mark may only insert punctuation and
+whitespace — checked on `insert` at load time, including on a rule the user
+wrote — and afterwards `cleanup.engine.words_are_subsequence` is run over the
+result. That is the same function, imported rather than copied. Deleting the
+words of a mark phrase is a deletion and adding "," adds no word, so a correct
+rule always passes and an incorrect one throws the whole stage away. Neither
+pass can put a word into the document that was not spoken, which is the
+property that matters.
+
+**Mark or word** is the whole difficulty, and the rule is deliberately blunt: a
+phrase is the WORD when the word in front of it is a determiner or possessive
+("the comma goes here"), and the MARK everywhere else. Plurals never match.
+What it gets wrong is asserted in `tests/test_punctuation.py::WhereTheRuleIsWrong`
+rather than left to be discovered, and the escape — saying "literal" in front of
+the phrase — is the way out of all of it.
+
+**Whisper's own output is the other half of the design**, and it was measured
+rather than assumed: a dictated mark comes back *punctuated as well as spelled
+out*. "hello comma world" is transcribed `Hello, comma, world.` and "are you
+sure question mark" as `Are you sure? Question mark.` So a substitution absorbs
+the punctuation directly against it — his mark beats Whisper's guess in that
+one spot — and phrases are matched word by word rather than as strings, because
+Whisper writes `open, quote,` and `semi-colon`.
+
+**Off by default.** Every phrase in the rules file is a phrase he can no longer
+dictate literally, so installing a newer dictate must not silently start eating
+the word "period" out of his sentences. One line in `dictate.toml` turns it on.
+
+---
+
 ## Threading
 
 | Thread | Owns | Rule |
@@ -278,7 +328,7 @@ are left alone.
 | hotkey | the keyboard hook | calls `start_utterance` / `finish_utterance`; every callback is wrapped so an exception cannot wedge the hook and with it the whole keyboard |
 | audio | PortAudio | calls `push_audio` only, which appends and enqueues — it never runs a model |
 | caption | — | the **only** thread that ever touches a streaming session |
-| finalize | one worker | so two utterances finishing close together paste in the order they were spoken |
+| finalize | one worker | so two utterances finishing close together paste in the order they were spoken; runs clean → punctuate → paste |
 | idle watch | the residency clock | ticks `ResidentModel.check_idle()`; a short-lived worker of its own does the unload and the reload, so neither the hotkey thread nor the timer ever blocks on one |
 | tray | the notification-area icon and its window | a window's messages go to the thread that created it, so the icon is created, updated and destroyed there; `update()` from any other thread stores the state and posts a message |
 

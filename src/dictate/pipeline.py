@@ -10,7 +10,10 @@
     hotkey up   ──► caption text discarded HERE, on screen and in memory
                     utterance handed to the GPU pass
                        ▼
-                    clean  ──►  paste into the captured window
+                    clean  ──►  punctuate  ──►  paste into the captured window
+
+`clean` may only delete words; `punctuate` turns a spoken "comma" into ",". They
+are separate stages in that order on purpose - see `_punctuate`.
 
 Everything in this module is plain Python: no Windows, no audio library, no
 model. The platform pieces and the two transcription backends arrive as
@@ -41,6 +44,7 @@ from .audio.buffer import UtteranceBuffer
 from .cleanup.engine import CleanResult
 from .errors import DictateError
 from .platform.base import CaptionOverlay, OverlayState, TargetWindow
+from .punctuation.engine import PunctuationResult
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +99,7 @@ class Pipeline:
         injector,
         windows,
         overlay: CaptionOverlay,
+        punctuator: Callable[[str], PunctuationResult] | None = None,
         sample_rate: int = 16000,
         min_utterance_ms: int = 350,
         max_utterance_s: float = 300.0,
@@ -109,6 +114,10 @@ class Pipeline:
         self.injector = injector
         self.windows = windows
         self.overlay = overlay
+        #: Spoken punctuation, AFTER cleanup - see `_finalize`. None (the
+        #: default, and what `[punctuation] enabled = false` produces) leaves
+        #: the cleaned text exactly as it is.
+        self.punctuator = punctuator
         self.streaming = streaming
         self.sample_rate = sample_rate
         self.min_utterance_ms = min_utterance_ms
@@ -348,7 +357,7 @@ class Pipeline:
                 log.warning("cleanup discarded: %s", result.rejected_reason)
                 self.notify("warning", "Cleanup was skipped for that one - "
                                        + result.rejected_reason + ".")
-            final = result.text.strip()
+            final = self._punctuate(result.text).strip()
             if not final:
                 log.info("transcription came back empty")
                 self.overlay.set_state(OverlayState.DONE, "")
@@ -369,6 +378,33 @@ class Pipeline:
         finally:
             with self._lock:
                 self._pending = max(0, self._pending - 1)
+
+    def _punctuate(self, text: str) -> str:
+        """Spoken punctuation, run AFTER the cleanup pass and never inside it.
+
+        The order is deliberate and it is the only order that leaves the cleanup
+        guarantee where it was: cleanup receives, byte for byte, the text
+        Whisper produced, exactly as it did before this stage existed, and its
+        subsequence check is evaluated over that same text. Running punctuation
+        first would also have fed cleanup's filler rules a comma they were
+        written to eat - `um,` is removed WITH its comma, so "hello um comma
+        world" would have lost the comma this stage had just put in.
+
+        A failure here must never cost him the dictation: the cleaned text is
+        what gets pasted if anything goes wrong.
+        """
+        if self.punctuator is None:
+            return text
+        try:
+            result = self.punctuator(text)
+        except Exception:
+            log.exception("spoken punctuation failed; pasting the text without it")
+            return text
+        if result.rejected_reason:
+            log.warning("spoken punctuation discarded: %s", result.rejected_reason)
+            self.notify("warning", "Spoken punctuation was skipped for that one - "
+                                   + result.rejected_reason + ".")
+        return result.text
 
     def _fail(self, message: str) -> None:
         self.overlay.set_state(OverlayState.ERROR, message.splitlines()[0])

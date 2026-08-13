@@ -43,6 +43,7 @@ from .errors import DictateError
 from .pipeline import Pipeline
 from .platform import factory
 from .platform.base import OverlayState
+from .punctuation.service import PunctuationService
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +84,16 @@ class Application:
             enabled=cfg.cleanup.enabled,
             notify=self.notify,
         )
+        # Spoken punctuation is a stage of its own, and it runs AFTER the
+        # cleanup pass: cleanup may only delete words and this substitutes them,
+        # so it could not live inside it without taking that guarantee apart.
+        # Off unless he turned it on, in which case this is None and the
+        # pipeline pastes exactly what it pasted before.
+        self.punctuator = PunctuationService(
+            cfg.resolve(cfg.punctuation.rules_file) if cfg.punctuation.enabled else None,
+            enabled=cfg.punctuation.enabled,
+            notify=self.notify,
+        )
         self.streaming = (
             SherpaStreamingTranscriber.from_config(cfg) if cfg.captions.enabled else None
         )
@@ -102,6 +113,7 @@ class Application:
             injector=self.injector,
             windows=self.tracker,
             overlay=self.overlay,
+            punctuator=self.punctuator,
             streaming=self.streaming,
             sample_rate=cfg.audio.sample_rate,
             min_utterance_ms=cfg.audio.min_utterance_ms,
@@ -153,6 +165,12 @@ class Application:
         self.console(f"dictate: cleanup rules  {self.cfg.cleanup.rules_file}"
                      if self.cfg.cleanup.enabled else "dictate: cleanup disabled")
         self.cleaner.load()
+        # Eagerly, for the same reason as the cleanup rules: a rules file he has
+        # broken is reported now, not in the middle of a sentence.
+        self.console(f"dictate: spoken marks   {self.cfg.punctuation.rules_file}"
+                     if self.cfg.punctuation.enabled
+                     else "dictate: spoken punctuation off")
+        self.punctuator.load()
 
         self.console("dictate: starting whisper-server (loading the model into "
                      "the graphics card)…")

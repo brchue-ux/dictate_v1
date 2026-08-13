@@ -1,0 +1,246 @@
+# dictate_v1 - spoken punctuation
+#
+# Say "hello comma world" and get "hello, world".
+#
+# This file is yours to edit. Save it and the next thing you dictate uses the
+# new rules (the app re-reads it when the file changes).
+#
+# IT IS OFF UNTIL YOU TURN IT ON. In dictate.toml:
+#
+#     [punctuation]
+#     enabled = true
+#
+# Off is the default because every phrase below is a phrase you can then no
+# longer dictate literally, and dictate is not allowed to change what it pastes
+# because you installed a new version.
+#
+#
+# THE ONE THING THESE RULES CANNOT DO IS ADD WORDS.
+# `insert` may only contain punctuation and whitespace - dictate refuses to load
+# this file if any rule would insert a letter or a digit. And after the rules
+# run, dictate checks that the words it is about to paste are the words Whisper
+# heard, in the same order, minus the mark phrases - the same check the cleanup
+# pass uses. If a rule ever breaks that, the whole pass is thrown away and the
+# text is left exactly as it arrived. So the worst a mistake in here can do is
+# put a mark where you did not want one.
+#
+#
+# WHEN IS "COMMA" A MARK AND WHEN IS IT THE WORD?
+# The rule is one line: a phrase below is the WORD when the word in front of it
+# is one of `guard_words`, and the MARK everywhere else.
+#
+#     "the comma goes here"          -> left alone     ("the" is a guard word)
+#     "set the period to five minutes" -> left alone
+#     "hello comma world"            -> "hello, world"
+#
+# Plurals are never touched, because a phrase has to match whole words:
+# "commas", "periods" and "question marks" are simply not the phrases below.
+#
+# When the rule gets it wrong, say "literal" in front of the phrase:
+#
+#     "I am not going literal full stop"  ->  "I am not going full stop"
+#
+# And if a mark is more trouble than it is worth, delete its [[marks]] block.
+# Nothing else needs to change.
+
+
+# ---------------------------------------------------------------------------
+# Settings
+#
+# These have to come BEFORE the [[marks]] blocks below: in TOML, any plain
+# setting written after a [[table]] header belongs to that table, not to the
+# file. Add new settings of this kind above this line, not at the bottom.
+# ---------------------------------------------------------------------------
+
+# Say this in front of a phrase to get the words themselves. Set it to "" to
+# turn the escape off.
+escape_word = "literal"
+
+# A phrase directly after one of these is the WORD, not the mark.
+#
+# Only determiners and possessives are in here, and that is deliberate: they are
+# the words that come before "comma" when you are TALKING about a comma, and
+# almost never before one you are asking for. Numbers ("one comma two comma
+# three") and "no" were tried and taken out again - they are far too common in
+# front of a mark you really meant.
+#
+# "that" is the riskiest entry: "delete that comma" is exactly why it is here,
+# but "I said that comma then I left" is a sentence you might also say. Delete
+# it if that trade is the wrong way round for you.
+#
+# "word" is not a determiner and is here anyway: "the word comma" is how anyone
+# says it out loud, and MEASURED, Whisper transcribes it exactly like that.
+guard_words = [
+    "a",
+    "an",
+    "the",
+    "word",
+    "this",
+    "that",
+    "these",
+    "those",
+    "my",
+    "your",
+    "his",
+    "her",
+    "its",
+    "our",
+    "their",
+    "another",
+]
+
+
+# ---------------------------------------------------------------------------
+# The marks.
+#
+#   say              the phrases you speak. Matched word by word, so a phrase
+#                    written "semi colon" also catches Whisper's "semi-colon".
+#   insert           what goes in. Punctuation and whitespace only.
+#   spacing          after   the mark goes on the END of the word before it,
+#                            and a space follows:  "hello, world"
+#                    close   like after, but it closes a pair, so a full stop
+#                            standing after it is left alone:  'he said "hi".'
+#                    before  the mark goes in FRONT of the next word, with a
+#                            space before it:  'he said "hello'
+#                    around  a space on both sides:  "go - if we can"
+#                    break   a line break, no space either side
+#   capitalize_next  start the next word with a capital, the way Whisper would
+#                    have written it if it had heard the mark instead of the word
+#   guard_words      extra guards for this mark only, on top of the list above
+#
+# Everything from here to the end of the file is part of this list - see the
+# TOML note above before adding a plain setting after it.
+# ---------------------------------------------------------------------------
+
+[[marks]]
+name = "full stop"
+comment = """Whisper writes the sentence AND the word: "that is all period" comes
+back as "That is all period." and "that is all period the meeting is over" as
+"That is all period, the meeting is over." The full stop that goes in takes those
+with it, so neither is left behind.
+
+"full stop" is also a British figure of speech - "I am not going, full stop" -
+and this cannot tell the two apart. Say "literal full stop" for that one."""
+say = ["period", "full stop"]
+insert = "."
+spacing = "after"
+capitalize_next = true
+
+[[marks]]
+name = "comma"
+comment = """MEASURED: "hello comma world" is transcribed "Hello, comma, world."
+- Whisper hears the pause and punctuates it as well as spelling it out. Both of
+those commas are eaten by the one that goes in."""
+say = ["comma"]
+insert = ","
+spacing = "after"
+
+[[marks]]
+name = "question mark"
+comment = """MEASURED: "are you sure question mark" is transcribed "Are you sure?
+Question mark." - Whisper had already worked out it was a question. The question
+mark that goes in replaces the one Whisper wrote, in the same place."""
+say = ["question mark"]
+insert = "?"
+spacing = "after"
+capitalize_next = true
+
+[[marks]]
+name = "exclamation mark"
+say = ["exclamation mark", "exclamation point"]
+insert = "!"
+spacing = "after"
+capitalize_next = true
+
+[[marks]]
+name = "colon"
+say = ["colon"]
+insert = ":"
+spacing = "after"
+
+[[marks]]
+name = "semicolon"
+comment = """"semi colon" is here as well as "semicolon" because Whisper writes
+it either way, and the hyphen in "semi-colon" is matched by the two-word form."""
+say = ["semicolon", "semi colon"]
+insert = ";"
+spacing = "after"
+
+[[marks]]
+name = "dash"
+comment = """A spaced dash, the way Whisper writes one it heard you pause for.
+"hyphen" is deliberately NOT here: an unspaced hyphen joins two words, and
+getting that wrong welds them together."""
+say = ["dash"]
+insert = "-"
+spacing = "around"
+
+[[marks]]
+name = "open quote"
+comment = """Two words on purpose. Bare "quote" is a common noun - "a quote from
+the report" - and the guard list cannot save it in "he gave me quote after
+quote"."""
+say = ["open quote", "open quotes"]
+insert = "\""
+spacing = "before"
+
+[[marks]]
+name = "close quote"
+say = ["close quote", "close quotes"]
+insert = "\""
+spacing = "close"
+
+[[marks]]
+name = "open bracket"
+say = ["open bracket", "open brackets", "open parenthesis"]
+insert = "("
+spacing = "before"
+
+[[marks]]
+name = "close bracket"
+say = ["close bracket", "close brackets", "close parenthesis"]
+insert = ")"
+spacing = "close"
+
+[[marks]]
+name = "new line"
+comment = """A line break is sent as a Return keypress, because that is the only
+thing that puts a new line into another application. In a chat box or a terminal
+Return SUBMITS - so "new line" there sends what you have typed so far. That is
+not a bug this can fix; it is what a new line does in those windows. Delete this
+block if you dictate mostly into a chat window."""
+say = ["new line"]
+insert = "\n"
+spacing = "break"
+
+[[marks]]
+name = "new paragraph"
+comment = """Two Returns, so the same warning as "new line" applies twice over."""
+say = ["new paragraph"]
+insert = "\n\n"
+spacing = "break"
+capitalize_next = true
+
+
+# ---------------------------------------------------------------------------
+# Adding your own
+#
+# "new section" is the example everyone reaches for first. It is not shipped,
+# because what a section looks like is yours to decide - copy this and edit it:
+#
+# [[marks]]
+# name = "new section"
+# say = ["new section"]
+# insert = "\n\n---\n\n"
+# spacing = "break"
+# capitalize_next = true
+#
+# Two things to think about before you add one:
+#
+# 1. Every phrase you add is a phrase you can no longer dictate literally
+#    without saying "literal" in front of it. Two-word phrases are much safer
+#    than one-word phrases for that reason.
+# 2. `insert` cannot contain letters or digits. That is the rule that stops this
+#    file being able to put words into your document that you never said, and
+#    dictate refuses to start if a rule breaks it.
+# ---------------------------------------------------------------------------

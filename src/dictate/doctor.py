@@ -337,6 +337,33 @@ def check_cleanup_rules(cfg: Config) -> CheckResult:
     )
 
 
+def check_punctuation_rules(cfg: Config) -> CheckResult:
+    """Spoken punctuation, if he turned it on.
+
+    Off is not a fault and must not read like one - saying "not working yet" to
+    someone whose install is perfect costs the trust of every other line here.
+    """
+    if not cfg.punctuation.enabled:
+        return CheckResult(
+            "Spoken punctuation", Status.OK,
+            'off - say "comma" and you get the word, as before',
+            'Set [punctuation] enabled = true to have "hello comma world" '
+            'become "hello, world". Try it first with: '
+            'dictate punctuate --explain "hello comma world"')
+    path = cfg.resolve(cfg.punctuation.rules_file)
+    try:
+        from .punctuation import rules as rules_mod
+
+        loaded = rules_mod.load(path)
+    except DictateError as exc:
+        return CheckResult("Spoken punctuation", Status.FAIL, exc.message, exc.remedy)
+    phrases = sum(len(m.say) for m in loaded.marks)
+    return CheckResult(
+        "Spoken punctuation", Status.OK,
+        f"{path} ({len(loaded.marks)} marks, {phrases} phrases you can say)",
+    )
+
+
 def check_hotkey(cfg: Config) -> CheckResult:
     from .platform.hotkey_spec import describe
 
@@ -395,6 +422,7 @@ def collect(cfg: Config, *, checks: list[Callable[[], CheckResult]] | None = Non
         check_install(),
         check_hotkey(cfg),
         check_cleanup_rules(cfg),
+        check_punctuation_rules(cfg),
         check_whisper_server(cfg),
         check_whisper_model(cfg),
         check_port(cfg),
