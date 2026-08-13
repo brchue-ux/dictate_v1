@@ -38,10 +38,11 @@ max_utterance_s = 300
 [captions]
 # The words that appear on screen WHILE you are speaking.
 #
-# This text is display-only. It is thrown away the moment you let go of the
-# hotkey and it never reaches your document - the text that gets pasted comes
-# from Whisper, which sees the whole recording. That is why it is allowed to be
-# ALL CAPS, unpunctuated, and occasionally wrong.
+# This text is display-only and never reaches your document. The words stay on
+# screen after you let go - greyed, while the graphics card works - so you can
+# still see what you said; they go when the real text arrives. What gets pasted
+# always comes from Whisper, which sees the whole recording. That is why these
+# words are allowed to be ALL CAPS, unpunctuated, and occasionally wrong.
 enabled = true
 model_dir = 'C:\dictate-gpu\models\sherpa-onnx-streaming-zipformer-en-2023-06-26'  # <<< CHECK THIS
 encoder = "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
@@ -229,6 +230,30 @@ trailing_space = true
 # which is why it is on by default. Turning it off changes nothing else:
 # `dictate stop` still stops it from any window.
 enabled = true
+
+
+[history]
+# A record of what you have dictated, so you can look back over it.
+#
+# It is a plain text file, newest first, that you open and read:
+#
+#   dictate history            opens it (or right-click the icon by the clock)
+#   dictate history --delete   deletes the whole thing, there and then
+#
+# Each entry is the text that was pasted, when you said it, how long you spoke
+# for, and - only when dictate changed something on the way - what Whisper heard
+# first, so you can see exactly what the cleanup rules removed or what a spoken
+# mark turned into.
+#
+# It is yours and it stays here. Nothing about it is sent anywhere and nothing
+# else reads it. Turning it off stops anything new being written; a file that is
+# already there is left alone, so delete it first if you want it gone.
+enabled = true
+# How many dictations to keep. The oldest drop off the end, so the file never
+# grows without limit. 0 keeps nothing, the same as enabled = false.
+keep = 200
+# Where to put it. "" means history.txt next to this config file.
+file = ""
 
 
 [autostart]

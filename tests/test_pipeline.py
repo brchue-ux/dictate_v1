@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import threading
 import unittest
+from pathlib import Path
 
+from dictate import pipeline as pipeline_mod
 from dictate.cleanup.engine import CleanResult
 from dictate.errors import InjectionError, TranscriptionError
-from dictate.pipeline import Pipeline, PipelineState, caption_tail
+from dictate.pipeline import Pipeline, PipelineState, Utterance, caption_tail
 from dictate.platform.base import OverlayState, TargetWindow
 
 from .fakes import (
@@ -135,8 +137,94 @@ class HappyPath(PipelineTestCase):
         self.assertEqual(states[-1], OverlayState.DONE)
 
 
-class CaptionsAreDiscarded(PipelineTestCase):
-    """Constraint 4: caption text is display-only and dies on release."""
+class TheCaptionStaysUpUntilTheTextLands(PipelineTestCase):
+    """What he asked for: "captions should stay up while I'm talking, and it
+    thinks, until it's inserted"."""
+
+    def test_the_words_are_still_on_screen_while_the_gpu_works(self):
+        p = self.build(submit=DeferredSubmit())
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.drain(p)
+        spoken = self.overlay.showing
+        self.assertTrue(spoken)
+
+        p.finish_utterance()               # he lets go; transcription is pending
+        state, showing = self.overlay.screen[-1]
+        self.assertIs(state, OverlayState.THINKING)
+        self.assertEqual(showing, spoken)  # the same words, still there
+
+    def test_release_asks_for_no_text_at_all_rather_than_re_sending_it(self):
+        """The mechanism, not just the effect. The pipeline holds no caption
+        text, so the only thing it CAN do here is leave the screen alone."""
+        p = self.build(submit=DeferredSubmit())
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.drain(p)
+        p.finish_utterance()
+        state, asked_for = self.overlay.history[-1]
+        self.assertIs(state, OverlayState.THINKING)
+        self.assertIsNone(asked_for)
+
+    def test_the_words_go_when_the_text_lands_and_not_before(self):
+        submit = DeferredSubmit()
+        p = self.build(submit=submit)
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.drain(p)
+        p.finish_utterance()
+        self.assertTrue(self.overlay.showing)   # still up, still nothing pasted
+        self.assertEqual(self.injector.sent, [])
+
+        submit.run_all()
+        state, showing = self.overlay.screen[-1]
+        self.assertIs(state, OverlayState.DONE)
+        self.assertEqual(showing, "")
+        self.assertEqual(len(self.injector.sent), 1)
+
+    def test_a_failure_replaces_the_words_with_what_went_wrong(self):
+        """The one thing worse than an empty panel is one that goes on showing
+        him a sentence that is never going to be pasted."""
+        p = self.build(batch=FakeBatch(error=TranscriptionError("gone", "restart")))
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.drain(p)
+        p.finish_utterance()
+        state, showing = self.overlay.screen[-1]
+        self.assertIs(state, OverlayState.ERROR)
+        self.assertNotIn("CHUNK", showing)
+
+    def test_a_mis_press_takes_the_panel_away_rather_than_leaving_it_thinking(self):
+        p = self.build(min_utterance_ms=350)
+        p.start_utterance()
+        p.push_audio(audio(100))
+        p.finish_utterance()
+        state, showing = self.overlay.screen[-1]
+        self.assertIs(state, OverlayState.HIDDEN)
+        self.assertEqual(showing, "")
+
+    def test_nothing_carries_over_from_one_dictation_to_the_next(self):
+        p = self.build()
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.drain(p)
+        p.finish_utterance()
+
+        p.start_utterance()
+        state, showing = self.overlay.screen[-1]
+        self.assertIs(state, OverlayState.LISTENING)
+        self.assertEqual(showing, "")
+
+
+class CaptionsCanNeverBePasted(PipelineTestCase):
+    """Constraint 4: caption text is display-only.
+
+    It used to be held by clearing the screen at release, and four tests here
+    asserted that timing. The timing has changed - the words now stay up until
+    the real text lands - so these assert the guarantee itself: whatever is on
+    screen, and whenever, the caption cannot reach his document. The enforcement
+    is structural, and each test names the part of the structure it holds.
+    """
 
     def test_caption_text_never_reaches_the_injector(self):
         p = self.build()
@@ -149,19 +237,59 @@ class CaptionsAreDiscarded(PipelineTestCase):
         self.assertEqual(pasted, "Hello world.")         # from the batch engine
         self.assertNotIn("CHUNK", pasted)                # never the caption text
 
-    def test_release_clears_the_caption_from_the_screen_immediately(self):
-        p = self.build()
+    def test_the_words_on_screen_at_the_moment_of_the_paste_are_not_the_paste(self):
+        """The new timing's own case: the caption is still up, in front of him,
+        while the text is being delivered. It is still not what is delivered."""
+        submit = DeferredSubmit()
+        p = self.build(submit=submit)
         p.start_utterance()
         p.push_audio(audio(600))
         self.drain(p)
         p.finish_utterance()
-        # The first thing drawn after release carries no caption text at all.
-        after_release = [t for s, t in self.overlay.history
-                         if s in (OverlayState.THINKING, OverlayState.DONE)]
-        self.assertTrue(after_release)
-        self.assertTrue(all(t == "" for t in after_release))
+        on_screen = self.overlay.showing
+        self.assertIn("CHUNK", on_screen)
+
+        submit.run_all()
+        pasted, _ = self.injector.sent[0]
+        self.assertEqual(pasted, "Hello world.")
+        self.assertNotEqual(pasted, on_screen)
+
+    def test_the_pipeline_never_holds_the_caption_text(self):
+        """Why the two tests above cannot start failing quietly: there is no
+        copy of the caption text in here to paste by accident. It goes from the
+        decoder to the screen and is not kept."""
+        p = self.build(submit=DeferredSubmit())
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.drain(p)
+        p.finish_utterance()
+        self.assertIn("CHUNK", self.overlay.showing)     # it IS on screen
+
+        held = [f"{name} = {value!r}" for name, value in vars(p).items()
+                if "CHUNK" in repr(value)]
+        self.assertEqual(held, [])
+
+    def test_the_finalise_worker_is_handed_audio_and_no_text_at_all(self):
+        """The value that crosses into the paste path carries PCM, a sample
+        rate, a window and two numbers. There is no field for a string to
+        travel in, which is why no string can."""
+        import dataclasses
+
+        text_fields = [f.name for f in dataclasses.fields(Utterance)
+                       if f.type in ("str", str)]
+        self.assertEqual(text_fields, [])
+
+    def test_the_injector_is_called_from_exactly_one_place(self):
+        """A second call site is how a rule like this rots. The one that exists
+        is in `_finalize`, and what it sends comes out of `batch.transcribe`."""
+        source = (Path(pipeline_mod.__file__)).read_text(encoding="utf-8")
+        body = source.split("def _finalize(", 1)[1]
+        self.assertEqual(source.count("injector.send("), 1)
+        self.assertIn("self.injector.send(final, utt.target)", body)
 
     def test_the_streaming_session_is_closed_and_emptied_on_release(self):
+        """The decoder that made the words on screen is shut on release, so the
+        text that is still visible cannot be asked for again by anything."""
         p = self.build()
         p.start_utterance()
         p.push_audio(audio(600))
@@ -183,6 +311,104 @@ class CaptionsAreDiscarded(PipelineTestCase):
         new_captions = [t for s, t in self.overlay.history[before:]
                         if s is OverlayState.LISTENING]
         self.assertEqual(new_captions, [])
+
+    def test_the_caption_is_gone_before_the_panel_says_the_text_landed(self):
+        """"pasted" and a sentence on screen together is the one arrangement in
+        which the caption could be taken for what was pasted."""
+        p = self.build()
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.drain(p)
+        p.finish_utterance()
+        shown_when_done = [t for s, t in self.overlay.screen
+                           if s is OverlayState.DONE]
+        self.assertTrue(shown_when_done)
+        self.assertTrue(all(t == "" for t in shown_when_done))
+
+
+class WhatGoesIntoTheHistory(PipelineTestCase):
+    """The pipeline's whole share of the dictation history: it hands over what
+    landed, once, and only when something did."""
+
+    def build(self, **kwargs) -> Pipeline:
+        self.recorded: list[dict] = []
+        kwargs.setdefault("record", lambda text, **kw: self.recorded.append(
+            dict(text=text, **kw)))
+        return super().build(**kwargs)
+
+    def test_a_delivered_dictation_is_recorded_with_the_text_that_landed(self):
+        p = self.build(cleaner=lambda text: CleanResult(text="Hello world.",
+                                                        original=text))
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(len(self.recorded), 1)
+        self.assertEqual(self.recorded[0]["text"], "Hello world.")
+        self.assertEqual(self.recorded[0]["text"], self.injector.sent[0][0])
+
+    def test_it_carries_what_whisper_said_before_the_rules_ran(self):
+        """The raw/cleaned pair is the evidence for "it ate a word", which is
+        the one argument a history has to be able to settle."""
+        p = self.build(batch=FakeBatch("Um, hello world."),
+                       cleaner=lambda text: CleanResult(text="Hello world.",
+                                                        original=text))
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(self.recorded[0]["raw"], "Um, hello world.")
+
+    def test_it_carries_how_long_he_spoke_for(self):
+        p = self.build()
+        p.start_utterance()
+        p.push_audio(audio(1000))
+        p.finish_utterance()
+        self.assertAlmostEqual(self.recorded[0]["spoke_s"], 1.0, places=2)
+
+    def test_nothing_is_recorded_when_nothing_was_pasted(self):
+        for case, kwargs in (
+            ("transcription failed",
+             dict(batch=FakeBatch(error=TranscriptionError("gone", "restart")))),
+            ("the paste failed",
+             dict(injector=FakeInjector(error=InjectionError("no", "try again")))),
+            ("nothing was heard", dict(batch=FakeBatch(""))),
+        ):
+            with self.subTest(case=case):
+                p = self.build(**kwargs)
+                p.start_utterance()
+                p.push_audio(audio(600))
+                p.finish_utterance()
+                self.assertEqual(self.recorded, [])
+
+    def test_a_mis_press_is_not_a_dictation(self):
+        p = self.build(min_utterance_ms=350)
+        p.start_utterance()
+        p.push_audio(audio(100))
+        p.finish_utterance()
+        self.assertEqual(self.recorded, [])
+
+    def test_the_caption_text_is_not_offered_to_it_either(self):
+        """It is a record of what he dictated. What was on screen while he
+        dictated is not that, and constraint 4 applies to a file as much as to
+        a document."""
+        p = self.build()
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.drain(p)
+        p.finish_utterance()
+        self.assertNotIn("CHUNK", repr(self.recorded))
+
+    def test_a_history_that_cannot_be_written_does_not_cost_him_the_dictation(self):
+        def explode(text, **kwargs):
+            raise OSError("the disk is full")
+
+        p = self.build(record=explode)
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(self.injector.sent[0][0], "Hello world.")
+        self.assertEqual(p.completed, 1)
+        self.assertEqual([lvl for lvl, _ in self.notices], [])
+        self.assertIs(self.overlay.states[-1], OverlayState.DONE)
 
 
 class ShortAndEmpty(PipelineTestCase):

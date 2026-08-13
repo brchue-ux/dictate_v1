@@ -9,11 +9,14 @@
     dictate devices       list the microphones dictate can see
     dictate clean         run the cleanup rules over text on stdin
     dictate punctuate     turn spoken marks ("comma") into marks (",")
+    dictate history       open what you have dictated, or delete it
     dictate overlay       show the caption overlay with sample text
     dictate transcribe    push a .wav through the resident GPU pass and time it
 
 `doctor`, `init`, `clean` and `punctuate` all work on any platform, on purpose:
-they are the commands you want when the app will not start.
+they are the commands you want when the app will not start. So does
+`history --delete`: getting rid of a record of everything you have said must not
+depend on dictate being in a fit state to run.
 
 Exit codes: 0 fine, 1 something is missing, 2 an error with a remedy attached,
 3 a copy of dictate is already running (and `stop --stale-only` left it alone),
@@ -23,6 +26,7 @@ Exit codes: 0 fine, 1 something is missing, 2 an error with a remedy attached,
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 import threading
@@ -261,6 +265,56 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_history(args: argparse.Namespace) -> int:
+    """Open what he has dictated, or delete it.
+
+    Deliberately these two things only. Reading it back is what he asked for -
+    "keep a history just for review" - and getting rid of it has to be one step
+    that does not involve finding a file.
+    """
+    from . import history as history_mod
+
+    cfg = _load_config(args)
+    store = history_mod.HistoryStore(history_mod.path_for(cfg),
+                                     keep=cfg.history.keep,
+                                     enabled=cfg.history.enabled)
+
+    if args.delete:
+        if store.delete():
+            _out(f"deleted {store.path}")
+        else:
+            _out(f"there was nothing to delete ({store.path} does not exist)")
+        return 0
+
+    _out(f"file      {store.path}")
+    if not store.path.exists():
+        _out("          (nothing dictated yet - it appears the first time you do)")
+    else:
+        _out(f"keeping   {store.count()} of the last {cfg.history.keep} dictations")
+    if not cfg.history.enabled:
+        # An old file outlives the setting on purpose: turning the history off
+        # stops dictate writing, and deleting what is already there stays his
+        # decision rather than a side effect of editing a config file.
+        _out("          [history] enabled = false, so nothing new is being kept")
+    _out("delete    dictate history --delete")
+    _out("")
+    if not store.path.exists():
+        return 0
+    if not hasattr(os, "startfile"):
+        # Not a fallback that pretends: it says what it did not do, and the
+        # path above is what to do with instead.
+        _out("It is a plain text file - open it in whatever you read text in. "
+             "(dictate can only open it for you on Windows.)")
+        return 0
+    try:
+        os.startfile(str(store.path))  # noqa: S606 - Windows only, by design
+    except OSError as exc:
+        _err(f"dictate could not open it for you: {exc}")
+        return 1
+    _out("Opening it now.")
+    return 0
+
+
 #: What the preview shows. Ordinary dictated speech, in the shape the caption
 #: model actually produces it - upper case, no punctuation - because that is what
 #: has to look right, not a designer's sample sentence.
@@ -313,14 +367,15 @@ def cmd_overlay(args: argparse.Namespace) -> int:
     It drives the real overlay through the real interface. It is not a mock: the
     only thing standing in for the pipeline is a timer that feeds it words.
     """
-    from .platform import factory
+    from .platform import base, factory
     from .platform.base import OverlayState
 
     cfg = _load_config(args)
     overlay = factory.make_overlay(cfg, notify=lambda level, msg: _err(f"   {msg}"))
 
-    _out("Showing the caption overlay. It appears, fills with words, clears on")
-    _out("'release', shows 'pasted', then fades out. Ctrl+C to stop early.")
+    _out("Showing the caption overlay. It appears, fills with words, holds them")
+    _out("greyed while it 'thinks', clears them as the text 'lands', then fades")
+    _out("out. Ctrl+C to stop early.")
     _out("")
     _out(f"  font       {cfg.overlay.font_family} {cfg.overlay.font_size}pt")
     _out(f"  position   {cfg.overlay.position}, {cfg.overlay.margin_px}px margin, "
@@ -356,7 +411,11 @@ def cmd_overlay(args: argparse.Namespace) -> int:
                                   pipeline_mod.caption_tail(shown, cfg.overlay.max_chars))
                 time.sleep(args.rate / 1000.0)
             time.sleep(0.4)
-            overlay.set_state(OverlayState.THINKING, "")
+            # No text: the words he was reading stay up, greyed, exactly as
+            # they do while the real GPU pass runs. `dictate overlay` is the
+            # only way anyone without this PC can see that, so it has to be the
+            # same call the pipeline makes.
+            overlay.set_state(OverlayState.THINKING, base.KEEP)
             time.sleep(1.1)
             overlay.set_state(OverlayState.DONE, "")
             time.sleep(2.0)
@@ -501,6 +560,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_punct.add_argument("--explain", action="store_true",
                          help="say which mark each substitution came from")
     p_punct.set_defaults(func=cmd_punctuate)
+
+    p_hist = sub.add_parser("history",
+                            help="open what you have dictated, or delete it")
+    p_hist.add_argument("--delete", action="store_true",
+                        help="delete the whole history, now")
+    p_hist.set_defaults(func=cmd_history)
 
     p_ov = sub.add_parser("overlay",
                           help="show the caption overlay with sample text, "

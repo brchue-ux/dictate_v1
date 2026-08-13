@@ -33,7 +33,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import instance, tray as tray_mod, update as update_mod
+from . import history as history_mod, instance, tray as tray_mod, update as update_mod
 from .cleanup.service import CleanupService
 from .config import Config
 from .engines.residency import ResidentModel, Residency
@@ -97,6 +97,12 @@ class Application:
         self.streaming = (
             SherpaStreamingTranscriber.from_config(cfg) if cfg.captions.enabled else None
         )
+        self.history = history_mod.HistoryStore(
+            history_mod.path_for(cfg),
+            keep=cfg.history.keep,
+            enabled=cfg.history.enabled,
+            notify=self.notify,
+        )
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dictate-finalize")
         #: Transcriptions queued or running, so the tray can say "transcribing"
         #: for exactly as long as that is true and not a moment longer.
@@ -126,6 +132,7 @@ class Application:
             max_caption_chars=cfg.overlay.max_chars,
             submit=self._submit,
             notify=self.notify,
+            record=self.history.record,
         )
 
     # -- user-facing messages -------------------------------------------
@@ -198,6 +205,9 @@ class Application:
         self.audio.start(self.pipeline.push_audio)
         self.console(f"dictate: microphone     {self.audio.describe}")
         self.console(f"dictate: paste method   {self.injector.describe}")
+        # Said out loud, once, because a record of everything he says is not
+        # something to keep quietly: he should know it exists and where it is.
+        self.console(f"dictate: history        {self.history.describe}")
 
         self._spawn(self._caption_loop, "dictate-captions")
         self._spawn(self._stop_request_loop, "dictate-stop-watch")
@@ -226,6 +236,8 @@ class Application:
             open_log=self._open_log_folder,
             check_updates=self.check_for_updates,
             update_now=self.update_now,
+            open_history=self._open_history,
+            delete_history=self._delete_history,
         )
         try:
             self.tray = factory.make_tray_icon(
@@ -264,7 +276,8 @@ class Application:
             hotkey = self.cfg.hotkey.combination
         return tray_mod.TrayState(status=status, hotkey=hotkey,
                                   model_resident=resident, detail=self._last_error,
-                                  updating=self.update_in_flight())
+                                  updating=self.update_in_flight(),
+                                  history=self.history.enabled)
 
     def update_in_flight(self) -> bool:
         """Is the update this copy started still going?
@@ -388,6 +401,32 @@ class Application:
         self.console(f"dictate: {what} is running in a window of its own "
                      f"(process {getattr(process, 'pid', '?')}).")
         self._refresh_tray()
+
+    def _open_history(self) -> None:
+        """The tray's history item, and what `dictate history` does. The file
+        itself this time, not the folder: it is what he wants to read."""
+        path = self.history.path
+        if not path.exists():
+            self.notify("info", "There is nothing in the dictation history yet - "
+                                "it fills up as you dictate.")
+            return
+        try:
+            os.startfile(str(path))  # noqa: S606 - Windows only, by design
+        except Exception:
+            log.exception("could not open %s", path)
+            self.notify("warning", f"dictate could not open {path}. Open it "
+                                   f"yourself - it is a plain text file.")
+
+    def _delete_history(self) -> None:
+        """The tray's other history item. It deletes; it does not ask.
+
+        There is no dialog because a running dictate is not allowed one (see
+        `tray.menu`), so the item says exactly what it does instead.
+        """
+        if self.history.delete():
+            self.notify("info", "The dictation history has been deleted.")
+        else:
+            self.notify("info", "There was no dictation history to delete.")
 
     def request_stop_from_tray(self) -> None:
         """The tray's Stop item. Exactly what `dictate stop` asks for, through

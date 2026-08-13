@@ -72,6 +72,8 @@ def actions(done: list[str]) -> tray.TrayActions:
         open_log=lambda: done.append("log"),
         check_updates=lambda: done.append("check"),
         update_now=lambda: done.append("update"),
+        open_history=lambda: done.append("history"),
+        delete_history=lambda: done.append("history-delete"),
     )
 
 
@@ -80,6 +82,26 @@ class WhatItOffers(unittest.TestCase):
         keys = [item.key for item in tray.menu(state())]
         self.assertEqual(keys, [tray.STATUS, tray.STOP, tray.RESTART,
                                 tray.CHECK, tray.UPDATE, tray.LOG])
+
+    def test_a_history_being_kept_can_be_opened_and_deleted_from_here(self):
+        """The tray is the only surface a logon-started copy has, so it is
+        where a record of everything he says has to be reachable - and where
+        getting rid of it has to be one click and no hunting for a file."""
+        keys = [item.key for item in tray.menu(state(history=True))]
+        self.assertEqual(keys[-2:], [tray.HISTORY, tray.HISTORY_DELETE])
+
+    def test_a_history_he_has_turned_off_is_not_mentioned_at_all(self):
+        keys = [item.key for item in tray.menu(state(history=False))]
+        self.assertNotIn(tray.HISTORY, keys)
+        self.assertNotIn(tray.HISTORY_DELETE, keys)
+
+    def test_the_delete_item_says_what_it_deletes(self):
+        items = {item.key: item for item in tray.menu(state(history=True))}
+        self.assertIn("Delete", items[tray.HISTORY_DELETE].label)
+        self.assertEqual(items[tray.HISTORY_DELETE].command,
+                         "dictate history --delete")
+        # Not the default: a click on the icon must never be able to hit it.
+        self.assertFalse(items[tray.HISTORY_DELETE].default)
 
     def test_the_status_line_is_not_clickable(self):
         items = {item.key: item for item in tray.menu(state())}
@@ -120,15 +142,27 @@ class WhatItOffers(unittest.TestCase):
 
     def test_the_actions_are_wired_to_the_keys(self):
         done: list[str] = []
-        for item in tray.menu(state()):
-            actions(done).invoke(item.key)
-        self.assertEqual(done, ["stop", "restart", "check", "update", "log"])
+        wired = actions(done)
+        for item in tray.menu(state(history=True)):
+            wired.invoke(item.key)
+        self.assertEqual(done, ["stop", "restart", "check", "update", "log",
+                                "history", "history-delete"])
 
     def test_an_unknown_id_does_nothing_rather_than_raising(self):
         done: list[str] = []
         self.assertFalse(actions(done).invoke("nonsense"))
         self.assertFalse(actions(done).invoke(tray.STATUS))
         self.assertEqual(done, [])
+
+    def test_a_history_action_that_was_never_supplied_does_nothing(self):
+        """A menu id from before the history was turned off must not reach a
+        handler that is not there - least of all the delete one."""
+        bare = tray.TrayActions(stop=lambda: None, restart=lambda: None,
+                                open_log=lambda: None,
+                                check_updates=lambda: None,
+                                update_now=lambda: None)
+        self.assertFalse(bare.invoke(tray.HISTORY_DELETE))
+        self.assertFalse(bare.invoke(tray.HISTORY))
 
 
 class WhatItLooksLike(unittest.TestCase):
@@ -211,18 +245,26 @@ class WhatTheAppTellsIt(unittest.TestCase):
         self._tmp.cleanup()
 
     def app(self, **kwargs):
+        import tempfile
         import threading
+        from pathlib import Path
         from types import SimpleNamespace
 
-        from dictate import config as config_mod
+        from dictate import config as config_mod, history as history_mod
         from dictate.app import Application
         from dictate.engines.residency import Residency
 
         from . import fakes
 
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         app = object.__new__(Application)
         app.cfg = config_mod.load(None)
         app.console = lambda _msg="": None
+        app.notices = []
+        app.history = history_mod.HistoryStore(
+            Path(tmp.name) / "history.txt",
+            enabled=kwargs.pop("history_enabled", True))
         app.overlay = fakes.FakeOverlay()
         app.tray = None
         app.restart_wanted = False
@@ -407,6 +449,33 @@ class WhatTheAppTellsIt(unittest.TestCase):
         self.assertIs(state.status, tray.TrayStatus.ERROR)
         self.assertIn("no window to update in", state.detail)
         self.assertFalse(app.update_in_flight())
+
+    def test_the_menu_only_mentions_a_history_that_is_being_kept(self):
+        self.assertTrue(self.app()._tray_state().history)
+        self.assertFalse(self.app(history_enabled=False)._tray_state().history)
+
+    def test_delete_from_the_tray_really_deletes_it_and_says_it_did(self):
+        app = self.app()
+        said: list[str] = []
+        app.notify = lambda level, message: said.append(message)
+        app.history.record("Something he would rather not keep.")
+        self.assertTrue(app.history.path.exists())
+
+        app._delete_history()
+        self.assertFalse(app.history.path.exists())
+        self.assertIn("deleted", said[0])
+
+        app._delete_history()          # again, with nothing there
+        self.assertIn("no dictation history", said[1])
+
+    def test_opening_an_empty_history_says_so_rather_than_failing(self):
+        """Before he has dictated anything the file does not exist yet, and
+        nothing on Windows can open a file that is not there."""
+        app = self.app()
+        said: list[str] = []
+        app.notify = lambda level, message: said.append(message)
+        app._open_history()
+        self.assertIn("nothing in the dictation history yet", said[0])
 
     def test_restart_from_the_tray_shuts_down_first_and_says_so(self):
         from dictate.app import EXIT_RESTART

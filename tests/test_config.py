@@ -52,13 +52,31 @@ class ShippedExample(unittest.TestCase):
         example = config_mod.load(EXAMPLE)
         defaults = config_mod.load(None)
         for section in ("hotkey", "audio", "captions", "overlay", "cleanup",
-                        "paste", "logging"):
+                        "paste", "history", "logging"):
             with self.subTest(section=section):
                 got = getattr(example, section)
                 want = getattr(defaults, section)
                 if section == "logging":
                     continue  # the example sets a log file on purpose
                 self.assertEqual(got, want)
+
+    def test_every_key_the_example_ships_still_exists(self):
+        """His dictate.toml was written from this file. A key that disappears
+        from a dataclass makes that file fail to load on startup, so keys are
+        added and deprecated by ignoring - never deleted. Held for every
+        section, not just [overlay]."""
+        import dataclasses
+        import re
+
+        text = EXAMPLE.read_text(encoding="utf-8")
+        sections = re.split(r"(?m)^\[(\w+)\]$", text)[1:]
+        self.assertTrue(sections)
+        for name, block in zip(sections[::2], sections[1::2]):
+            with self.subTest(section=name):
+                cls = config_mod._SECTIONS[name]
+                known = {f.name for f in dataclasses.fields(cls)}
+                keys = set(re.findall(r"^(\w+)\s*=", block, re.MULTILINE))
+                self.assertEqual(keys - known, set())
 
 
 class Typos(unittest.TestCase):

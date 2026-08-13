@@ -7,13 +7,30 @@
     audio blocks ──────┼──► utterance buffer   (kept whole, for the GPU pass)
                        └──► caption queue      (disposable, display only)
                        │
-    hotkey up   ──► caption text discarded HERE, on screen and in memory
+    hotkey up   ──► the caption DECODER is closed here and its queued audio
+                    invalidated: no new caption text can ever be produced
+                    the words already on screen stay there, greyed, so he can
+                    still see what he said while the GPU works
                     utterance handed to the GPU pass
                        ▼
                     clean  ──►  punctuate  ──►  paste into the captured window
+                       ▼
+                    the screen is cleared and says "pasted" - which is the
+                    moment the words he was reading go
 
 `clean` may only delete words; `punctuate` turns a spoken "comma" into ",". They
 are separate stages in that order on purpose - see `_punctuate`.
+
+**Constraint 4, and where it is enforced.** Caption text is display-only: it
+must never reach his document. This module is what makes that structural rather
+than a matter of timing - it never holds the caption text at all.
+`pump_captions` reads a session's text and hands it straight to the overlay
+without keeping a reference, and the release changes the overlay's state with
+`KEEP` rather than with any text, because there is no text here to send. The
+value the finalise worker is given is an `Utterance`, which carries audio; and
+the string the injector is handed is what `batch.transcribe` produced, with the
+cleanup and punctuation stages applied to it - there is no path by which a
+caption session's text could become it.
 
 Everything in this module is plain Python: no Windows, no audio library, no
 model. The platform pieces and the two transcription backends arrive as
@@ -43,7 +60,7 @@ from enum import Enum
 from .audio.buffer import UtteranceBuffer
 from .cleanup.engine import CleanResult
 from .errors import DictateError
-from .platform.base import CaptionOverlay, OverlayState, TargetWindow
+from .platform.base import KEEP, CaptionOverlay, OverlayState, TargetWindow
 from .punctuation.engine import PunctuationResult
 
 log = logging.getLogger(__name__)
@@ -73,6 +90,11 @@ class Utterance:
 
 Notify = Callable[[str, str], None]
 Submit = Callable[[Callable[[], None]], None]
+#: Called once per dictation that was actually delivered, with the text that
+#: landed, the text Whisper produced before the cleanup rules ran, and how long
+#: he spoke for. What is kept out of that, in what shape, and for how long is
+#: `history.HistoryStore`'s business, not this module's.
+Record = Callable[..., None]
 
 
 def caption_tail(text: str, max_chars: int) -> str:
@@ -107,6 +129,7 @@ class Pipeline:
         streaming=None,
         submit: Submit | None = None,
         notify: Notify | None = None,
+        record: Record | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.batch = batch
@@ -124,6 +147,7 @@ class Pipeline:
         self.max_caption_chars = max_caption_chars
         self.submit: Submit = submit or (lambda fn: fn())
         self.notify: Notify = notify or (lambda level, msg: None)
+        self.record: Record = record or (lambda text, **kwargs: None)
         self.clock = clock
 
         self.buffer = UtteranceBuffer(sample_rate, max_utterance_s)
@@ -303,9 +327,15 @@ class Pipeline:
             duration = len(pcm) / 2 / self.sample_rate
             self._pending += 1
 
-        # The caption text stops existing here: cleared from the screen, and the
-        # decoder that produced it is closed without its text being read again.
-        self.overlay.set_state(OverlayState.THINKING, "")
+        # The words stay on screen and the panel says "thinking": he can still
+        # read what he said while the GPU works, which is the moment he would
+        # otherwise be watching an empty slab and wondering.
+        #
+        # KEEP, not the text - this module does not have the text. The decoder
+        # that produced it has just been detached and is closed below without
+        # being read again, and every queued caption block was invalidated by
+        # the `_uid` bump, so nothing can add a word to the panel from here on.
+        self.overlay.set_state(OverlayState.THINKING, KEEP)
         if stale is not None:
             self._enqueue((_CLOSE, stale))
 
@@ -368,7 +398,12 @@ class Pipeline:
             self.completed += 1
             log.info("delivered %d chars to %s in %.2fs",
                      len(final), utt.target or "the focused window", self.clock() - t0)
+            # An empty string, never KEEP: the caption goes at exactly the
+            # moment the real text lands in his document. Leaving it up under
+            # the word "pasted" is the one arrangement in which he could take
+            # the caption for what was pasted.
             self.overlay.set_state(OverlayState.DONE, "")
+            self._remember(final, raw=text, utt=utt)
         except DictateError as exc:
             log.error("%s", exc.report())
             self._fail(exc.report())
@@ -405,6 +440,20 @@ class Pipeline:
             self.notify("warning", "Spoken punctuation was skipped for that one - "
                                    + result.rejected_reason + ".")
         return result.text
+
+    def _remember(self, final: str, *, raw: str, utt: Utterance) -> None:
+        """Hand the finished dictation to whoever is keeping the record.
+
+        Called only after the text has actually been delivered, so every line in
+        the history is text that landed somewhere. It is guarded here rather
+        than trusted to the callback: a history that cannot be written must
+        never turn a dictation that worked into a reported failure.
+        """
+        try:
+            self.record(final, raw=raw, spoke_s=utt.duration_s)
+        except Exception:
+            log.exception("the dictation history could not be written; the text "
+                          "was pasted and nothing else is affected")
 
     def _fail(self, message: str) -> None:
         self.overlay.set_state(OverlayState.ERROR, message.splitlines()[0])

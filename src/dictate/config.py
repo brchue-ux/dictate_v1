@@ -33,6 +33,11 @@ CAPTION_THREAD_CEILING = 4
 # avoid. 0 (never release) is still allowed and is a different thing entirely.
 MIN_IDLE_RELEASE_MINUTES = 0.5
 
+# The dictation history is newest-first, so every entry rewrites the file. A few
+# hundred entries is a few tens of kilobytes and costs nothing; six figures would
+# be a pause after every sentence. See `history.py`.
+MAX_HISTORY_KEEP = 10_000
+
 
 @dataclass
 class HotkeyConfig:
@@ -243,6 +248,24 @@ class AutostartConfig:
 
 
 @dataclass
+class HistoryConfig:
+    """A record of what he dictated, for looking back over.
+
+    It is his text on his disk and nothing else reads it - see
+    `dictate/history.py` for what is kept and what deliberately is not.
+    """
+
+    enabled: bool = True
+    #: Dictations kept, newest first; the older ones drop off the end. 0 is the
+    #: same as enabled = false. Entries rather than days or bytes because it is
+    #: the one unit he can predict the effect of.
+    keep: int = 200
+    #: Empty means `history.txt` beside his config file, which is where he would
+    #: look for it. Relative paths resolve against the config's own directory.
+    file: str = ""
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     #: Empty string means stderr only.
@@ -261,6 +284,7 @@ class Config:
     paste: PasteConfig = field(default_factory=PasteConfig)
     tray: TrayConfig = field(default_factory=TrayConfig)
     autostart: AutostartConfig = field(default_factory=AutostartConfig)
+    history: HistoryConfig = field(default_factory=HistoryConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     #: Directory the config was loaded from; relative paths resolve against it.
@@ -300,6 +324,7 @@ _SECTIONS: dict[str, type] = {
     "paste": PasteConfig,
     "tray": TrayConfig,
     "autostart": AutostartConfig,
+    "history": HistoryConfig,
     "logging": LoggingConfig,
 }
 
@@ -536,6 +561,24 @@ def validate(cfg: Config) -> Config:
             f"[autostart] retry_delay_s is {cfg.autostart.retry_delay_s}, which is "
             "outside 1-300.",
             "20 is the default.",
+        )
+    if cfg.history.keep < 0:
+        raise ConfigError(
+            f"[history] keep is {cfg.history.keep}, and a number of dictations "
+            f"cannot be negative.",
+            "200 is the default. 0 keeps nothing, which is the same as "
+            "enabled = false.",
+        )
+    if cfg.history.keep > MAX_HISTORY_KEEP:
+        # The whole file is rewritten on every dictation, because it is newest
+        # first. That is nothing at a few hundred entries and silly at a
+        # hundred thousand, so the ceiling is here rather than in his day.
+        raise ConfigError(
+            f"[history] keep is {cfg.history.keep}. The history is rewritten "
+            f"whole every time you dictate, so keeping more than "
+            f"{MAX_HISTORY_KEEP} would start costing you time after every "
+            f"sentence.",
+            f"Use {MAX_HISTORY_KEEP} or fewer; 200 is the default.",
         )
     if cfg.logging.level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
         raise ConfigError(

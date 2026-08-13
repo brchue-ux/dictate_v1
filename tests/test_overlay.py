@@ -525,6 +525,49 @@ class TheLooksOwnRules(unittest.TestCase):
         self.assertLess(luminance(cfg.edge), luminance(cfg.background))
         self.assertGreater(luminance(cfg.background) - luminance(cfg.edge), 0.005)
 
+    def test_a_state_change_can_keep_the_words_but_only_what_is_on_screen(self):
+        """Constraint 4's new shape. `_apply` may hold the caption through the
+        thinking phase - but only text that is visible NOW, so a previous
+        utterance's words can never come back up under a new one, and nothing
+        outside this file can hand it caption text to display."""
+        apply_body = OVERLAY_CODE.split("def _apply(", 1)[1].split("\n    def ", 1)[0]
+        self.assertIn("if text is None:", apply_body)
+        self.assertIn("self._text if self._visible else \"\"", OVERLAY_SRC)
+
+    def test_collapsing_a_burst_of_updates_does_not_lose_the_last_words(self):
+        """Only the newest state in a 30 ms tick is drawn, which is right. But
+        if the release arrives in the same tick as the final caption, a state
+        that keeps the words has to keep THOSE words - otherwise the panel
+        freezes a word or two behind what he actually said."""
+        poll = OVERLAY_CODE.split("def _poll(", 1)[1].split("\n    def ", 1)[0]
+        self.assertIn("newest_text", poll)
+        self.assertIn("if text is None and newest_text is not None:", poll)
+
+    def test_the_words_are_greyed_while_it_thinks_and_read_normally_otherwise(self):
+        """He must never take the held caption for the finished text, and the
+        error message must stay as readable as it was."""
+        colour = OVERLAY_CODE.split("def _text_colour(", 1)[1].split(
+            "\n    def ", 1)[0]
+        self.assertIn("self.cfg.muted if state is OverlayState.THINKING",
+                      colour)
+        self.assertIn("else self.cfg.foreground", colour)
+
+    def test_the_greyed_caption_is_still_comfortably_readable(self):
+        """Grey enough to read as "not final", not so grey it cannot be read -
+        it is on screen for the second he most wants to look at it."""
+        cfg = config_mod.OverlayConfig()
+        self.assertGreater(contrast(cfg.muted, cfg.background), 3.0)
+        self.assertLess(luminance(cfg.muted), luminance(cfg.foreground))
+
+    def test_hiding_the_panel_takes_the_words_with_it(self):
+        apply_body = OVERLAY_CODE.split("def _apply(", 1)[1].split("\n    def ", 1)[0]
+        # String literals are blanked by `code_only`, so this checks that the
+        # assignment is there and that what it assigns is a literal.
+        hidden = apply_body.split("OverlayState.HIDDEN", 1)[1].split("return", 1)[0]
+        self.assertIn("self._text =", hidden)
+        self.assertIn('self._text = ""',
+                      OVERLAY_SRC.split("if state is OverlayState.HIDDEN:", 1)[1])
+
     def test_a_state_arriving_mid_fade_out_turns_the_fade_around(self):
         """The bug this prevents: 'pasted' lingers, the fade out starts, he
         presses the hotkey again - and the new utterance's captions are drawn
