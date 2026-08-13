@@ -1,0 +1,158 @@
+# dictate_v1 - cleanup rules
+#
+# This file is yours to edit. Save it and the next thing you dictate uses the
+# new rules (the app re-reads it when the file changes).
+#
+# THE ONE THING THESE RULES CANNOT DO IS ADD WORDS.
+# There is no "replace with" option anywhere in this file, by design - every
+# rule can only delete. And after the rules run, dictate checks that the words
+# it is about to paste are a subset of the words Whisper actually heard, in the
+# same order. If a rule ever breaks that, the whole cleanup is thrown away and
+# Whisper's text is pasted exactly as it came out. So the worst a mistake in
+# here can do is remove something you wanted to keep.
+#
+# Whisper already writes punctuation and capital letters, so nothing here tries
+# to add them.
+
+
+# ---------------------------------------------------------------------------
+# Filler words. Removed wherever they stand alone as a whole word, along with a
+# comma they were carrying ("Um, so..." -> "So...").
+#
+# Only put words here that are never meaningful on their own. "like", "so" and
+# "right" are NOT in this list because they are real words - see [[deletions]]
+# below for how those are handled safely.
+# ---------------------------------------------------------------------------
+fillers = [
+    "um",
+    "uh",
+    "umm",
+    "uhh",
+    "erm",
+    "er",
+    "hmm",
+    "mmm",
+    "uhm",
+    "ehm",
+]
+
+
+# ---------------------------------------------------------------------------
+# Filler phrases. Removed wherever the whole phrase appears.
+#
+# Careful here: "I mean" and "you know" can both be meant literally ("you know
+# the answer"). They are included because in dictation they are overwhelmingly
+# filler - delete a line if you find it eating real speech.
+# ---------------------------------------------------------------------------
+filler_phrases = [
+    "you know",
+    "i mean",
+    "sort of",
+    "kind of",
+    "like i said",
+    "if that makes sense",
+]
+
+
+# ---------------------------------------------------------------------------
+# Built-in transformations
+#
+# These have to come BEFORE the [[deletions]] blocks below: in TOML, any plain
+# setting written after a [[table]] header belongs to that table, not to the
+# file. Add new settings of this kind above this line, not at the bottom.
+# ---------------------------------------------------------------------------
+
+# "the the cat" -> "the cat". Only when the two are directly adjacent; a comma
+# or full stop between them means you meant it.
+collapse_doubled_words = true
+
+# ...except for these, which English genuinely doubles.
+doubled_word_exceptions = [
+    "had",
+    "that",
+    "is",
+    "was",
+    "he",
+    "she",
+    "no",
+    "very",
+    "really",
+    "so",
+]
+
+# "I want to - I want to go" -> "I want to go". Deletes the abandoned first
+# attempt when you restart a phrase verbatim.
+collapse_repeated_phrases = true
+max_repeat_phrase_words = 6
+
+# Tidy up punctuation the deletions left dangling (", ," -> ","). Only ever
+# removes marks; never adds one.
+repair_punctuation = true
+
+# If deleting a filler left a sentence starting with a lowercase letter, put the
+# capital back. This changes a letter's case, never the word.
+recapitalize_sentences = true
+
+
+# ---------------------------------------------------------------------------
+# Guarded deletions: regular expressions whose match is deleted.
+#
+# Each one exists because a plain word-list entry would eat real speech.
+# `pattern` is a Python regular expression. `ignorecase` defaults to true.
+#
+# Everything from here to the end of the file is part of this list - see the
+# TOML note above before adding a plain setting after it.
+# ---------------------------------------------------------------------------
+
+[[deletions]]
+name = "comma-wrapped like"
+comment = """"like" is a real verb and a real preposition ("I like it", "like
+this"). It is only filler when it is fenced off by commas, which is exactly how
+Whisper punctuates it when it hears it as filler."""
+pattern = ",[ \\t]*like[ \\t]*,"
+
+[[deletions]]
+name = "clause-leading like"
+comment = """"..., like, we should go" with the trailing comma only. Matches
+"like," directly after a comma or at the very start of the text."""
+pattern = "(?:^|(?<=, ))like,[ \\t]*"
+
+[[deletions]]
+name = "leading so"
+comment = """A sentence-opening "So," that carries no meaning. Requires the
+comma - "So we went home" keeps its "So", because there it is a real connective."""
+pattern = "(?:^|(?<=[.!?] ))so,[ \\t]*"
+
+# OFF by default, and here so you can decide for yourself. A tag question at the
+# end of a sentence - "we should ship it, right?" - is a real verbal tic, and
+# this removes it. The catch: the "?" is the sentence's only punctuation, so
+# deleting it leaves "we should ship it" with nothing on the end, and this pass
+# is not allowed to add a full stop (Whisper does the punctuation; we do not
+# second-guess it). Leaving the tic in was judged the smaller wart. Uncomment if
+# you disagree.
+#
+# [[deletions]]
+# name = "trailing right"
+# pattern = ",[ \\t]*right\\?"
+
+[[deletions]]
+name = "stutter fragments"
+comment = """Whisper transcribes a stutter as a short fragment repeated with a
+dash: "I-I-I think", "th- th- the". The fragment must repeat at least twice, so
+ordinary hyphenated words ("e-mail", "co-operate", "re-read") are never touched.
+Removes the abandoned fragments and leaves the finished word."""
+pattern = "\\b([A-Za-z]{1,3})-[ \\t]?(?:\\1-[ \\t]?)+"
+
+# NOT SHIPPED, and here as a warning: a rule that strips the dash out of
+# "I was going to - anyway" looks harmless and is not. Deleting the dash AND the
+# spaces around it welds the two words together ("to - I" became "toI" the first
+# time this was written), and an em-dash in Whisper's output is usually real
+# punctuation it heard you pause for - removing it is re-punctuating, which this
+# pass deliberately does not do. Verbatim restarts are handled by
+# collapse_repeated_phrases above, which eats the dash between the two copies as
+# part of the repeat. If you add a rule like this yourself, the safety check will
+# very likely throw your whole cleanup away, which is it working as intended.
+#
+# [[deletions]]
+# name = "dangling restart dash"
+# pattern = "(?<=[ \\t])[-–—]+[ \\t]+"
