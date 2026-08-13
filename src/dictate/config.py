@@ -377,7 +377,11 @@ def load(path: str | os.PathLike[str] | None) -> Config:
             "`dictate init` to write one for you.",
         )
     try:
-        raw = tomllib.loads(p.read_text(encoding="utf-8"))
+        # utf-8-sig, not utf-8: Notepad and Windows PowerShell both write UTF-8
+        # with a byte order mark, and tomllib rejects that mark as a syntax
+        # error on line 1 - which reads as "your config is broken" when nothing
+        # is wrong with it. Files without a mark are unaffected.
+        raw = tomllib.loads(p.read_text(encoding="utf-8-sig"))
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(
             f"Config file {p} is not valid TOML: {exc}",

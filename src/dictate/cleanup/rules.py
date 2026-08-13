@@ -175,7 +175,9 @@ def load(path: str | Path) -> CleanupRules:
             "[cleanup] enabled = false to paste Whisper's text unchanged.",
         )
     try:
-        raw = tomllib.loads(p.read_text(encoding="utf-8"))
+        # utf-8-sig: this file is meant to be edited, and Notepad saves UTF-8
+        # with a byte order mark that tomllib would report as a syntax error.
+        raw = tomllib.loads(p.read_text(encoding="utf-8-sig"))
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{p} is not valid TOML: {exc}",
                           "Check for a missing quote or bracket on the line above.") from exc

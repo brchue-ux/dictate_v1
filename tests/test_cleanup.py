@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -170,6 +171,15 @@ class RulesFileValidation(unittest.TestCase):
             rules_mod.from_mapping(
                 {"deletions": [{"name": "oops", "pattern": "([unclosed"}]}, Path("x.toml"))
         self.assertIn("oops", str(ctx.exception))
+
+    def test_a_byte_order_mark_does_not_look_like_a_broken_rules_file(self):
+        """This file is meant to be edited, and Notepad saves UTF-8 with a byte
+        order mark that would otherwise read as a syntax error on line 1."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cleanup-rules.toml"
+            path.write_bytes(b'\xef\xbb\xbffillers = ["um", "uh"]\n')
+            loaded = rules_mod.load(path)
+            self.assertIn("um", loaded.fillers)
 
     def test_missing_file_explains_the_options(self):
         with self.assertRaises(ConfigError) as ctx:
