@@ -904,6 +904,59 @@ Test-Case 'a program that fails reports its exit code rather than throwing' {
     Assert-Equal 3 $run.ExitCode 'exit code'
 }
 
+Test-Case 'a blank line on stderr stays blank instead of naming a .NET type' {
+    # The bug: `2>&1` wraps every stderr line in an ErrorRecord whose Exception
+    # is a RemoteException carrying the line as its Message. For a BLANK line
+    # that Message is empty, and ErrorRecord.ToString() then falls through to
+    # Exception.ToString() - which, for an exception that was never thrown, is
+    # nothing but its type name. The product owner was shown
+    # "System.Management.Automation.RemoteException" twice in the middle of an
+    # install report: once for each blank line dictate printed around its own
+    # error message.
+    $empty = New-Object System.Exception('')
+    $record = New-Object System.Management.Automation.ErrorRecord(
+        $empty, 'NativeCommandError',
+        [System.Management.Automation.ErrorCategory]::NotSpecified, $null)
+
+    # What .ToString() makes of it is recorded rather than asserted - it is
+    # PowerShell's behaviour, not ours, and the end-to-end case below is the
+    # real proof. What IS asserted is that our own reader keeps it blank.
+    Write-Host "        (ErrorRecord.ToString() on a blank line: [$($record.ToString())])" -ForegroundColor DarkGray
+    Assert-Equal '' (Get-NativeOutputLine $record) 'a blank stderr line'
+
+    $real = New-Object System.Management.Automation.ErrorRecord(
+        (New-Object System.Exception('could not find the model file')),
+        'NativeCommandError',
+        [System.Management.Automation.ErrorCategory]::NotSpecified, $null)
+    Assert-Equal 'could not find the model file' (Get-NativeOutputLine $real) 'a real stderr line'
+
+    Assert-Equal 'plain text' (Get-NativeOutputLine 'plain text') 'ordinary stdout'
+    Assert-Equal '' (Get-NativeOutputLine $null) 'nothing at all'
+}
+
+Test-Case 'a program whose message is framed by blank lines comes through whole' {
+    # The same thing end to end, through a real native command on this real
+    # Windows PowerShell - which is the only place the wrapping happens at all.
+    # dictate prints exactly this shape: a blank line, the message, a blank
+    # line. Every word of it has to survive, and no type name may appear.
+    $python = Get-PythonCommand -MinimumVersion '3.8'
+    if (-not $python) { throw 'no Python to test with' }
+    # chr(10) and single quotes rather than "\n" and double quotes: Windows
+    # PowerShell 5.1 mangles double quotes on their way into a native command's
+    # argument list, and this test is about the OUTPUT, not about that.
+    $snippet = "import sys; sys.stderr.write(chr(10) + '127.0.0.1:8178 is already in use' + chr(10) + '  -> dictate stop' + chr(10) + chr(10))"
+    $run = Invoke-Tool -FilePath $python.Path -Arguments @('-c', $snippet)
+
+    Assert-Contains $run.Output '127.0.0.1:8178 is already in use'
+    Assert-Contains $run.Output 'dictate stop'
+    if ($run.Output -match 'System\.Management\.Automation') {
+        throw "a .NET type name leaked into what the user is shown: $($run.Output)"
+    }
+    if ($run.Output -match 'RemoteException') {
+        throw "RemoteException leaked into what the user is shown: $($run.Output)"
+    }
+}
+
 Test-Case 'a non-zero exit code from a tool becomes a plain-language failure' {
     $global:DictateSetupProblem = $null
     $threw = $false

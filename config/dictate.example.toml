@@ -203,6 +203,16 @@ clipboard_restore_delay_ms = 300
 trailing_space = true
 
 
+[tray]
+# The little dictate icon by the clock. It shows what dictate is doing - grey
+# when it is waiting, gold while it is listening to you - and right-clicking it
+# offers Stop and Restart, each labelled with the command that does the same
+# thing. It is the only thing on screen when dictate starts by itself at logon,
+# which is why it is on by default. Turning it off changes nothing else:
+# `dictate stop` still stops it from any window.
+enabled = true
+
+
 [autostart]
 # These only matter if you have run `dictate autostart enable`, which makes
 # dictate start by itself when you log in. They do nothing to a `dictate run`

@@ -191,6 +191,19 @@ class PasteConfig:
 
 
 @dataclass
+class TrayConfig:
+    """The icon in the notification area.
+
+    It is on by default and there is one reason for that: with
+    `dictate autostart enable` there is no window at all, and something that is
+    running with nothing on screen has to be visible somewhere. See
+    `dictate/tray.py`.
+    """
+
+    enabled: bool = True
+
+
+@dataclass
 class AutostartConfig:
     """Only used when dictate starts itself at logon (`dictate autostart enable`).
 
@@ -226,6 +239,7 @@ class Config:
     whisper: WhisperConfig = field(default_factory=WhisperConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     paste: PasteConfig = field(default_factory=PasteConfig)
+    tray: TrayConfig = field(default_factory=TrayConfig)
     autostart: AutostartConfig = field(default_factory=AutostartConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
@@ -263,6 +277,7 @@ _SECTIONS: dict[str, type] = {
     "whisper": WhisperConfig,
     "cleanup": CleanupConfig,
     "paste": PasteConfig,
+    "tray": TrayConfig,
     "autostart": AutostartConfig,
     "logging": LoggingConfig,
 }

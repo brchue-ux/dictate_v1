@@ -20,9 +20,9 @@ from dictate.config import WhisperConfig
 from dictate.engines.process import ManagedProcess
 from dictate.engines.whisper_backend import WhisperVulkanBackend
 from dictate.engines.whisper_server import WhisperServerClient, _multipart
-from dictate.errors import BackendUnavailableError, TranscriptionError
+from dictate.errors import BackendUnavailableError, DictateError, TranscriptionError
 
-from . import stub_server
+from . import fakes, stub_server
 
 STUB = Path(__file__).resolve().parent / "stub_server.py"
 
@@ -296,6 +296,93 @@ class ProcessLifecycle(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 10.0)
 
 
+class EveryChildIsContained(unittest.TestCase):
+    """Nothing dictate starts may be able to outlive it.
+
+    The containment itself is the operating system's job - a Windows job object
+    - and it is proved on a real Windows runner in CI, by killing a parent
+    without letting it clean up. What is proved HERE is the half that is ours
+    and that a Windows-only test would still have to get right: that every
+    spawn is handed over. Not just the first one: the restart after a crash and
+    the reload after an idle release are new processes too, and either of them
+    slipping through would leave exactly the orphan this exists to prevent.
+    """
+
+    def make(self, guard, port: int, *extra: str, **kwargs) -> ManagedProcess:
+        client = WhisperServerClient("127.0.0.1", port)
+        proc = ManagedProcess(
+            [sys.executable, str(STUB), "--port", str(port), *extra],
+            name="stub-server", health_check=client.is_healthy,
+            startup_timeout_s=20.0, poll_interval_s=0.05, restart_backoff_s=0.05,
+            guard=guard, **kwargs,
+        )
+        self.addCleanup(proc.stop)
+        return proc
+
+    def test_the_first_child_is_handed_over(self):
+        guard = fakes.RecordingGuard()
+        proc = self.make(guard, free_port())
+        proc.start()
+        self.assertEqual(guard.adopted, [proc.pid])
+
+    def test_so_is_the_one_that_replaces_a_crash(self):
+        import tempfile
+
+        port = free_port()
+        with tempfile.TemporaryDirectory() as tmp:
+            guard = fakes.RecordingGuard()
+            proc = self.make(guard, port, "--die-after-health", "1",
+                             "--die-once-marker", str(Path(tmp) / "died-once"))
+            proc.start()
+            first = proc.pid
+            self.assertTrue(wait_for(lambda: proc.pid not in (None, first),
+                                     timeout=25), "never restarted")
+            self.assertEqual(guard.adopted[0], first)
+            self.assertIn(proc.pid, guard.adopted)
+            self.assertEqual(len(guard.adopted), 2)
+
+    def test_and_so_is_the_one_the_idle_release_brings_back(self):
+        port = free_port()
+        guard = fakes.RecordingGuard()
+        proc = self.make(guard, port)
+        proc.start()
+        first = proc.pid
+        proc.stop()                                   # the idle release
+        proc.start()                                  # the next hotkey press
+        self.assertEqual(guard.adopted, [first, proc.pid])
+        self.assertNotEqual(first, proc.pid)
+
+    def test_a_guard_that_refuses_says_so_and_does_not_stop_dictate(self):
+        """An unguarded child is worse in a crash and fine the rest of the
+        time, so refusing to start over it would be absurd. But it is said out
+        loud, with the command that clears up afterwards - being told nothing
+        is how he ended up hunting processes in Task Manager."""
+        said: list[tuple[str, str]] = []
+        guard = fakes.RecordingGuard(
+            error=DictateError("Windows would not allow it", "run `dictate stop`"))
+        proc = self.make(guard, free_port(),
+                         notify=lambda level, message: said.append((level, message)))
+        proc.start()
+        self.assertTrue(proc.is_running())
+        self.assertEqual([level for level, _ in said], ["warning"])
+        self.assertIn("dictate stop", said[0][1])
+
+
+class TheGuardOnThisMachine(unittest.TestCase):
+    def test_off_windows_there_is_none_rather_than_a_pretend_one(self):
+        """`platform/factory.py`'s rule, applied to containment: there is no
+        job object here, and dictate says so rather than shipping something
+        that would look like containment and provide none."""
+        from dictate.engines import process as process_mod
+
+        guard = process_mod._platform_guard()
+        if sys.platform == "win32":
+            self.assertIsNotNone(guard)
+            self.assertIn("job object", guard.describe)
+        else:
+            self.assertIsNone(guard)
+
+
 # ---------------------------------------------------------------------------
 # The backend that ties the two together
 # ---------------------------------------------------------------------------
@@ -356,7 +443,10 @@ class BackendPreflight(unittest.TestCase):
             backend = WhisperVulkanBackend(cfg)
             with self.assertRaises(BackendUnavailableError) as ctx:
                 backend.preflight()
-            self.assertIn("already listening", ctx.exception.message)
+            self.assertIn("already in use", ctx.exception.message)
+            # The message he read twice in one evening has to name the command
+            # that gets him out, not describe the situation.
+            self.assertIn("dictate stop", ctx.exception.remedy)
 
     def test_argv_reflects_the_settled_decisions(self):
         cfg = WhisperConfig(server_exe="w.exe", model="m.bin", port=1234)

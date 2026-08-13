@@ -116,6 +116,11 @@ The line labelled "Adrenalin Edition" is the version number.
 $script:Python = $null          # @{ Path; Version } once step 2 or 5 has found it
 $script:BuiltCommit = ''
 $script:VerifyProblems = New-Object System.Collections.Generic.List[string]
+#: Checks that could not be RUN, as opposed to checks that failed. A copy of
+#: dictate already running is the ordinary case: the install is fine, one test
+#: could not be carried out, and calling that "not working yet" is how a setup
+#: with nothing wrong with it told the product owner it was broken.
+$script:VerifyDeferred = New-Object System.Collections.Generic.List[string]
 
 function Get-WhisperSourceDir { return (Join-Path $Root 'whisper.cpp') }
 function Get-ModelsDir { return (Join-Path $Root 'models') }
@@ -155,6 +160,49 @@ function Invoke-Dictate {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
     $python = Get-RequiredPython
     return (Invoke-Tool -FilePath $python.Path -Arguments (@('-m', 'dictate') + $Arguments))
+}
+
+function Clear-StaleTranscriptionPort {
+    <# Deal with whatever a previous run left holding the transcription port,
+       before anything here trips over it.
+
+       A whisper-server that outlived its dictate used to make every later
+       `dictate run` AND every `setup.ps1 -Only verify` fail on a port that
+       nothing appeared to be using, with no way out but Task Manager. Clearing
+       it is a normal thing for an installer to do, not an error for him to
+       diagnose - so this is called before the checks rather than after they
+       have failed for that reason.
+
+       `dictate stop --stale-only` is the one command behind it. It clears a
+       leftover and deliberately leaves a copy that is genuinely RUNNING alone:
+       checking an installation is not a reason to take away the thing he is
+       using.
+
+       Returns @{ State; Output } where State is one of
+         'clear'    nothing of dictate's is holding the port
+         'running'  a copy of dictate is running and was left alone
+         'stuck'    something still has the port; Output says what to type
+         'unknown'  dictate is not installed yet, so there is nothing to ask #>
+    $python = Get-PythonCommand -MinimumVersion '3.11'
+    if (-not $python) { return @{ State = 'unknown'; Output = '' } }
+    $probe = Invoke-Tool -FilePath $python.Path -Arguments @('-c', 'import dictate')
+    if ($probe.ExitCode -ne 0) { return @{ State = 'unknown'; Output = '' } }
+
+    $run = Invoke-Tool -FilePath $python.Path `
+        -Arguments @('-m', 'dictate', 'stop', '--stale-only')
+    # 3 is dictate's "a copy is already running" - see the exit codes at the top
+    # of src/dictate/cli.py.
+    $state = 'stuck'
+    if ($run.ExitCode -eq 0) { $state = 'clear' }
+    elseif ($run.ExitCode -eq 3) { $state = 'running' }
+    return @{ State = $state; Output = $run.Output }
+}
+
+function Write-DictateLines {
+    param([string]$Output)
+    foreach ($line in ($Output -split "`r?`n")) {
+        if ($line.Trim()) { Write-Detail $line.TrimEnd() }
+    }
 }
 
 # ===========================================================================
@@ -238,6 +286,22 @@ If another drive has room, you can put the dictate part elsewhere with:
         } else {
             Write-Ok "$free GB free on $drive"
         }
+    }
+
+    # -- Anything a previous run left behind ---------------------------------
+    # Before the install does anything else, so that a whisper-server left over
+    # from an earlier session cannot make a step fail later for a reason that
+    # has nothing to do with this PC.
+    $port = Clear-StaleTranscriptionPort
+    if ($port.State -eq 'running') {
+        Write-Skip 'A copy of dictate is already running. Setup has left it alone.'
+    } elseif ($port.State -eq 'stuck') {
+        Write-Note 'Something is holding the transcription port and setup could not clear it. dictate said:'
+        Write-DictateLines $port.Output
+    } elseif ($port.Output -match 'is free again') {
+        # The phrase comes from recovery.py, which is where the clearing is done.
+        Write-Ok 'Cleared a transcription process an earlier run left behind.'
+        Write-DictateLines $port.Output
     }
 
     # -- The 30-second ROCm reality check (informational only) --------------
@@ -944,10 +1008,40 @@ function Invoke-Verify {
     }
 
     # -- 3. Does the real thing actually transcribe? ------------------------
+    # The transcription test starts a whisper-server of its own, so it needs
+    # the port. Whoever has it decides what happens next, and NONE of the
+    # answers is "the installation is broken":
+    #
+    #   nothing has it      -> run the test
+    #   a leftover has it   -> it was just cleared; run the test
+    #   dictate has it      -> his dictation is running. Say so, name the
+    #                          command, do not stop it, and do not pretend the
+    #                          install failed
+    $port = @{ State = 'clear'; Output = '' }
+    if (Test-Path -LiteralPath $TestClip) {
+        $port = Clear-StaleTranscriptionPort
+        if ($port.State -eq 'clear' -and $port.Output -match 'is free again') {
+            Write-Ok 'Cleared a transcription process an earlier run left behind.'
+        }
+    }
+
     if (-not (Test-Path -LiteralPath $TestClip)) {
         Write-Note "The bundled test clip is missing from $TestClip, so the transcription test was skipped."
     } elseif ($script:VerifyProblems.Count -gt 0) {
         Write-Note 'Skipping the transcription test until the problems above are fixed - it would only fail for the same reason.'
+    } elseif ($port.State -eq 'running') {
+        Write-Ok 'A copy of dictate is already running, and setup has left it alone.'
+        Write-Detail 'It is holding the transcription port, so the test clip was not run - two'
+        Write-Detail 'transcription processes cannot share one port. Nothing is wrong with this'
+        Write-Detail 'installation. To run that last check, stop the copy that is running and'
+        Write-Detail 'ask for the checks again:'
+        Write-Detail '  dictate stop'
+        Write-Detail '  powershell -ExecutionPolicy Bypass -File setup.ps1 -Only verify'
+        $script:VerifyDeferred.Add('The test clip was not run: a copy of dictate is already running and is using the transcription port.')
+    } elseif ($port.State -eq 'stuck') {
+        Write-Note 'Something else is holding the transcription port, so the test clip was not run. dictate said:'
+        Write-DictateLines $port.Output
+        $script:VerifyDeferred.Add('The test clip was not run: something that is not dictate is holding the transcription port. The lines above say what to type.')
     } else {
         Write-Detail 'Starting the transcription process and putting an 11-second test clip through it.'
         Write-Detail 'The first run is slower than normal: the graphics driver compiles its shaders once.'
@@ -955,9 +1049,7 @@ function Invoke-Verify {
 
         if ($run.ExitCode -ne 0) {
             Add-VerifyProblem 'The transcription process would not run the test clip.'
-            foreach ($line in ($run.Output -split "`r?`n")) {
-                if ($line.Trim()) { Write-Detail $line }
-            }
+            Write-DictateLines $run.Output
         } elseif ($run.Output -notmatch '(?i)country') {
             Add-VerifyProblem 'Transcription ran, but what came back does not match the test clip - the words should include "ask not what your country can do for you".'
             Write-Detail 'There are two things this can be, in the order worth trying:'
@@ -1085,20 +1177,45 @@ if ($script:VerifyProblems.Count -gt 0) {
     exit 1
 }
 
+# A check that could not be RUN is not a check that failed, and it is not a
+# broken installation. It says which one, why, and what to type - and then gets
+# out of the way, because everything else did work.
+if ($script:VerifyDeferred.Count -gt 0) {
+    Write-Host '-----------------------------------------------------------------------' -ForegroundColor Green
+    Write-Host ('Installed in ' + (Format-Duration $overall.Elapsed.TotalSeconds) +
+        '. One check could not be run:') -ForegroundColor Green
+    Write-Host ''
+    foreach ($deferred in $script:VerifyDeferred) { Write-Host "  - $deferred" }
+    Write-Host ''
+    Write-Host 'Everything else passed. To run that last check as well:' -ForegroundColor Green
+    Write-Host '  dictate stop' -ForegroundColor White
+    Write-Host '  powershell -ExecutionPolicy Bypass -File setup.ps1 -Only verify'
+    Write-Host '-----------------------------------------------------------------------' -ForegroundColor Green
+    exit 0
+}
+
 Write-Host '-----------------------------------------------------------------------' -ForegroundColor Green
 Write-Host ('Done in ' + (Format-Duration $overall.Elapsed.TotalSeconds) + '.') -ForegroundColor Green
 Write-Host ''
 Write-Host 'To start dictating, open a new PowerShell window and run:'
 Write-Host '  dictate run' -ForegroundColor White
 Write-Host ''
-Write-Host 'Then hold Ctrl + Alt + Space, speak, and let go. Ctrl+C in that window'
-Write-Host 'stops it.'
+Write-Host 'Then hold Ctrl + Alt + Space, speak, and let go.'
+Write-Host ''
+Write-Host 'THE ONE COMMAND WORTH REMEMBERING. If anything is ever stuck - dictate' -ForegroundColor White
+Write-Host 'will not start, a window was closed, something says the port is in use -'
+Write-Host 'this clears all of it, and you do not need to know which it was:'
+Write-Host '  dictate stop' -ForegroundColor White
+Write-Host 'There is also a dictate icon by the clock while it runs, with Stop and'
+Write-Host 'Restart on it, so you never have to remember that either.'
 Write-Host ''
 Write-Host 'Once you are happy with it, you can have it start by itself when you'
 Write-Host 'log in, so you never type that again:'
 Write-Host '  dictate autostart enable' -ForegroundColor White
-Write-Host 'It then holds about 1.6 GB of graphics memory for as long as you are'
-Write-Host 'logged in, which is what makes your first sentence as fast as the rest.'
+Write-Host 'That costs your graphics card nothing between dictation sessions: the'
+Write-Host 'model is handed back after a few idle minutes and taken again when you'
+Write-Host 'press the hotkey. `dictate autostart enable` prints the exact number'
+Write-Host 'from your config.'
 Write-Host '  dictate autostart status   is it on, is it running, and did it start'
 Write-Host '  dictate autostart disable  turn it off again, leaving nothing behind'
 Write-Host ''

@@ -216,6 +216,7 @@ class TheAppStopsWhenAsked(TempState):
         app._started_at = time.time()
         app.console = lambda _msg="": None
         app.overlay = fakes.FakeOverlay()
+        app.tray = None          # the same loop keeps the tray icon up to date
         thread = threading.Thread(target=app._stop_request_loop, daemon=True)
         thread.start()
         self.addCleanup(app._stopping.set)
@@ -256,6 +257,17 @@ class StopFromTheCommandLine(TempState):
         self.assertIn("did not stop", out)
         self.assertIn("whisper-server.exe", out)  # it has to go too
         self.assertNotIn("Traceback", out)
+        # Ending a copy that will not answer is a Windows job (taskkill /T), and
+        # this is not Windows: it has to say so rather than claim it did it.
+        self.assertIn(sys.platform, out)
+
+    def test_it_reports_on_the_transcription_port_even_when_nothing_is_running(self):
+        """`dictate stop` is the one command he is asked to remember, so it
+        answers the question behind every use of it - is anything of dictate's
+        still there - rather than only the one about the lock."""
+        code, out = _run_cli(["stop"])
+        self.assertEqual(code, 0)
+        self.assertIn("transcription port", out)
 
 
 def _run_cli(argv: list[str]) -> tuple[int, str]:

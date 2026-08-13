@@ -1,7 +1,7 @@
 """Command line.
 
     dictate run           hold the hotkey and talk (the actual product)
-    dictate stop          ask the copy that is running to shut down cleanly
+    dictate stop          stop it, however stuck it is - the one way out
     dictate autostart     start it (or stop it) starting itself when you log in
     dictate doctor        check everything the app needs, and say what to fix
     dictate init          write a config file you can edit
@@ -14,7 +14,8 @@
 commands you want when the app will not start.
 
 Exit codes: 0 fine, 1 something is missing, 2 an error with a remedy attached,
-3 dictate is already running, 130 Ctrl+C.
+3 a copy of dictate is already running (and `stop --stale-only` left it alone),
+130 Ctrl+C.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from pathlib import Path
 from . import (
     __version__, app as app_mod, autostart as autostart_mod, config as config_mod,
     doctor as doctor_mod, instance as instance_mod, pipeline as pipeline_mod,
+    recovery as recovery_mod,
 )
 from .errors import AlreadyRunningError, DictateError
 
@@ -107,38 +109,52 @@ def cmd_run(args: argparse.Namespace) -> int:
             _err(doctor_mod.format_report(failures))
             _err("\nRun `dictate doctor` for the full check.")
             return 2
-        return app_mod.run(cfg, console=_err)
+        code = app_mod.run(cfg, console=_err)
     finally:
+        # Before the restart below, always: the new copy takes this lock the
+        # moment it starts, and one that raced its own predecessor would be
+        # turned away as "dictate is already running".
         lock.release()
+
+    if code == app_mod.EXIT_RESTART:
+        return _restart(args)
+    return code
+
+
+def _restart(args: argparse.Namespace) -> int:
+    """Start the fresh copy the tray's Restart item asked for."""
+    try:
+        pid = recovery_mod.relaunch(args.config)
+    except DictateError as exc:
+        _err(f"\n{exc.report()}\n")
+        return 2
+    _out(f"dictate has been restarted (process {pid}).")
+    return 0
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
-    """Ask the running copy to shut down - politely, because it owns a
-    whisper-server child that holds the transcription port, and 1.6 GB of VRAM
-    whenever the model is resident. Killing the parent strands it."""
-    holder = instance_mod.running_instance()
-    if holder is None:
-        _out("dictate is not running.")
-        return 0
+    """The one command that gets out of any stuck state.
 
-    _out(f"asking dictate to stop ({holder.describe()})…")
-    instance_mod.request_stop()
-    if instance_mod.wait_until_stopped(args.timeout):
-        _out("dictate has stopped, and whisper-server with it - nothing of it is "
-             "left running.")
-        if holder.started_by == "logon":
-            _out("")
-            _out("It will start again the next time you log in. To prevent that:")
-            _out("  dictate autostart disable")
-        return 0
+    It does not ask which failure this is. It stops a copy that is running the
+    way Ctrl+C does; ends one that will not answer, together with the
+    whisper-server it owns; clears a whisper-server an earlier run left behind
+    on the transcription port; and names the exact thing to type if anything is
+    left. Everything it decides is in `recovery.py` and is tested there.
+    """
+    try:
+        cfg = _load_config(args)
+    except DictateError as exc:
+        # A config that will not load must not stop a rescue: the port is the
+        # thing being rescued, and the default is what the app would have used.
+        _err(f"(your config file could not be read, so the default "
+             f"transcription port is assumed: {exc.message})")
+        cfg = config_mod.load(None)
 
-    instance_mod.clear_stop_request()
-    _err(f"dictate did not stop within {args.timeout:.0f} seconds.")
-    _err("")
-    _err("It may be finishing a transcription. Run this again, and if it still")
-    _err("will not go, end it in Task Manager - look for pythonw.exe or")
-    _err("python.exe, and for whisper-server.exe, which has to go too.")
-    return 1
+    outcome = recovery_mod.stop(cfg, say=_out, timeout_s=args.timeout,
+                                stale_only=args.stale_only)
+    if outcome.left_alone:
+        return EXIT_ALREADY_RUNNING
+    return 0 if outcome.ok else 1
 
 
 def cmd_autostart(args: argparse.Namespace) -> int:
@@ -362,9 +378,16 @@ def build_parser() -> argparse.ArgumentParser:
                        help=argparse.SUPPRESS)  # how the logon task calls it
     p_run.set_defaults(func=cmd_run)
 
-    p_stop = sub.add_parser("stop", help="stop the copy that is running")
+    p_stop = sub.add_parser(
+        "stop",
+        help="stop dictate and clear anything a previous run left behind")
     p_stop.add_argument("--timeout", type=float, default=20.0,
-                        help="seconds to wait for it to go (default: 20)")
+                        help="seconds to wait for it to go before ending it "
+                             "(default: 20)")
+    p_stop.add_argument("--stale-only", action="store_true",
+                        help="only clear what an earlier run left behind; leave "
+                             "a copy that is running alone. setup.ps1 uses this "
+                             "so checking the install cannot stop your dictation")
     p_stop.set_defaults(func=cmd_stop)
 
     p_auto = sub.add_parser("autostart", help="start dictate when you log in")
