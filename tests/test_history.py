@@ -237,12 +237,19 @@ class WhenTheDiskWillNotTakeIt(HistoryTestCase):
 
 
 class WhereItLives(unittest.TestCase):
+    """`config.load` resolves the config's own path, so these compare against a
+    resolved one too. On Windows that is not pedantry: a temporary folder comes
+    back as the 8.3 short name (`RUNNER~1`), and `resolve()` turns it into the
+    long one - two spellings of the same folder, and the history has to be
+    beside the config whichever spelling he typed."""
+
     def test_it_sits_beside_his_config_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "dictate.toml"
             path.write_text("[history]\nkeep = 10\n", encoding="utf-8")
             cfg = config_mod.load(path)
-            self.assertEqual(history_mod.path_for(cfg), path.parent / "history.txt")
+            self.assertEqual(history_mod.path_for(cfg),
+                             path.resolve().parent / "history.txt")
 
     def test_with_no_config_file_it_goes_where_dictate_keeps_its_own_state(self):
         from dictate import instance
@@ -257,7 +264,7 @@ class WhereItLives(unittest.TestCase):
             path.write_text('[history]\nfile = "notes/said.txt"\n', encoding="utf-8")
             cfg = config_mod.load(path)
             self.assertEqual(history_mod.path_for(cfg),
-                             path.parent / "notes" / "said.txt")
+                             path.resolve().parent / "notes" / "said.txt")
 
     def test_a_folder_that_does_not_exist_yet_is_made(self):
         with tempfile.TemporaryDirectory() as tmp:
