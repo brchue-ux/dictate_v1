@@ -437,7 +437,7 @@ class TheSignIn(unittest.TestCase):
 class TheArchive(TempState):
     def test_the_wrapper_folder_github_adds_is_stripped(self):
         into = self.tmp / "staging"
-        found = update.extract_source(tarball(source_tree()), into)
+        found = update.extract_source(tarball(source_tree()), into).root
         self.assertTrue((found / "src" / "dictate" / "cli.py").exists())
         self.assertEqual(found.parent, into)
 
@@ -462,13 +462,39 @@ class TheArchive(TempState):
         info.linkname = "/etc/passwd"
         ordinary = tarfile.TarInfo("top/real.txt")
         ordinary.size = 0
-        kept = update.safe_members([info, ordinary])
+        kept, skipped = update.safe_members([info, ordinary])
         self.assertEqual([m.name for m in kept], ["top/real.txt"])
+        self.assertEqual(skipped, ["top/link"])
+
+    def test_a_link_in_the_source_is_left_alone_rather_than_deleted(self):
+        """`CLAUDE.md` in this repository is a link. dictate will not write one -
+        but "not in the new tree" would then read as "deleted upstream", and it
+        would disappear from his folder, silently, on every single update."""
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            data = b"# real\n"
+            real = tarfile.TarInfo("top/AGENTS.md")
+            real.size = len(data)
+            archive.addfile(real, io.BytesIO(data))
+            link = tarfile.TarInfo("top/CLAUDE.md")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "AGENTS.md"
+            archive.addfile(link)
+
+        fetched = update.extract_source(buffer.getvalue(), self.tmp / "staging")
+        self.assertEqual(fetched.kept_as_is, frozenset({"CLAUDE.md"}))
+        self.assertFalse((fetched.root / "CLAUDE.md").exists())
+
+        manifest = {"AGENTS.md": "old", "CLAUDE.md": "old"}
+        plan = update.plan_apply(manifest, update.tree_files(fetched.root),
+                                 manifest, fetched.kept_as_is)
+        self.assertEqual(plan.delete, ())
+        self.assertEqual(plan.write, ("AGENTS.md",))
 
     def test_an_archive_that_is_not_dictate_is_refused_before_anything_is_copied(self):
         files = source_tree()
         files["pyproject.toml"] = '[project]\nname = "something-else"\n'
-        found = update.extract_source(tarball(files), self.tmp / "staging")
+        found = update.extract_source(tarball(files), self.tmp / "staging").root
         with self.assertRaises(DictateError) as ctx:
             update.check_source_tree(found)
         self.assertIn("some other project", ctx.exception.message)
@@ -476,7 +502,7 @@ class TheArchive(TempState):
     def test_an_archive_missing_half_the_program_is_refused(self):
         files = source_tree()
         del files["src/dictate/cli.py"]
-        found = update.extract_source(tarball(files), self.tmp / "staging")
+        found = update.extract_source(tarball(files), self.tmp / "staging").root
         with self.assertRaises(DictateError) as ctx:
             update.check_source_tree(found)
         self.assertIn("src/dictate/cli.py", ctx.exception.message)

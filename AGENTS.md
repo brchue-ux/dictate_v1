@@ -167,6 +167,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   update; never reimplement the hashing in PowerShell, or the two ideas of "which
   files count" will drift and report edits nobody made. It is deliberately not
   part of the tree it describes (`is_ignored`) but IS part of a backup.
+- **A source archive's links are skipped AND named.** `CLAUDE.md` is a symlink to
+  `AGENTS.md`, and dictate never writes a link out of an archive. `safe_members`
+  therefore returns what it refused as well as what it kept, and `plan_apply` takes
+  that as `kept_as_is`: without it, "not in the new tree" reads as "deleted
+  upstream" and a tracked file disappears from the install folder on every update.
+  CI caught this; do not simplify either return value away.
 - **Anything that must not interrupt an utterance reads `instance.read_activity()`.**
   The running copy publishes busy/idle from `app.Application._refresh_tray`, on
   change only, which is the tray's existing answer rather than a second one. Do not

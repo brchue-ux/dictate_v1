@@ -355,7 +355,8 @@ class Plan:
 
 
 def plan_apply(current: dict[str, str], incoming: dict[str, str],
-               manifest: dict[str, str] | None) -> Plan:
+               manifest: dict[str, str] | None,
+               kept_as_is: frozenset[str] = frozenset()) -> Plan:
     """Which files to write and which to remove.
 
     A file is written only when its content differs, so "12 files changed" is the
@@ -366,13 +367,20 @@ def plan_apply(current: dict[str, str], incoming: dict[str, str],
     folder that came from a ZIP) nothing is ever deleted: dictate would be
     guessing at which files were once part of the application and which are his,
     and guessing wrong means deleting something of his.
+
+    `kept_as_is` is the third case, and it is the subtle one: paths that ARE in
+    the source but that dictate will not write - which today means the links the
+    archive carries, `CLAUDE.md` being one of them. Without this they look
+    exactly like "deleted upstream", and a tracked file would quietly disappear
+    from his folder on every single update. They are left as they are.
     """
     write = tuple(sorted(rel for rel, digest in incoming.items()
                          if current.get(rel) != digest))
     if not manifest:
         return Plan(write=write)
     delete = tuple(sorted(rel for rel in manifest
-                          if rel not in incoming and rel in current))
+                          if rel not in incoming and rel not in kept_as_is
+                          and rel in current))
     return Plan(write=write, delete=delete)
 
 
@@ -755,16 +763,24 @@ class GitHub:
 # ---------------------------------------------------------------------------
 
 
-def safe_members(members: list[tarfile.TarInfo]) -> list[tarfile.TarInfo]:
-    """The members of an archive that may be written to disk.
+def safe_members(members: list[tarfile.TarInfo]
+                 ) -> tuple[list[tarfile.TarInfo], list[str]]:
+    """The members of an archive that may be written to disk, and the ones that
+    are in it but will not be written.
 
     Everything that is not an ordinary file or directory is refused, and so is
     any path that leaves the folder it is being unpacked into. This is not
     theatre: an archive is the one thing in dictate that arrives from outside and
     is written to disk by path, and `..` in a member name is how that becomes
     "write anywhere on the PC".
+
+    The second list matters as much as the first. `CLAUDE.md` in this repository
+    is a link, and a link that is skipped without being *named* looks to the
+    file plan exactly like a file deleted upstream - so it would be removed from
+    his folder, silently, on every update.
     """
     kept: list[tarfile.TarInfo] = []
+    skipped: list[str] = []
     for member in members:
         name = member.name.replace("\\", "/")
         parts = [p for p in name.split("/") if p not in ("", ".")]
@@ -777,12 +793,11 @@ def safe_members(members: list[tarfile.TarInfo]) -> list[tarfile.TarInfo]:
                 "This should be impossible. Do not run it - report it, and "
                 "install by hand from\nthe ZIP on GitHub in the meantime.",
             )
-        if member.issym() or member.islnk():
-            continue
-        if not (member.isfile() or member.isdir()):
+        if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+            skipped.append(name)
             continue
         kept.append(member)
-    return kept
+    return kept, skipped
 
 
 def archive_root(names: list[str]) -> str:
@@ -800,14 +815,24 @@ def archive_root(names: list[str]) -> str:
     return tops.pop()
 
 
-def extract_source(data: bytes, into: Path) -> Path:
-    """Unpack a GitHub source archive and return the folder the source is in."""
+@dataclass(frozen=True)
+class Source:
+    """An unpacked source archive: where it is, and what was in it that dictate
+    will not write (see `safe_members`)."""
+
+    root: Path
+    kept_as_is: frozenset[str] = frozenset()
+
+
+def extract_source(data: bytes, into: Path) -> Source:
+    """Unpack a GitHub source archive and say where the source ended up."""
     if into.exists():
         shutil.rmtree(into)
     into.mkdir(parents=True, exist_ok=True)
+    skipped: list[str] = []
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
-            members = safe_members(archive.getmembers())
+            members, skipped = safe_members(archive.getmembers())
             top = archive_root([m.name for m in members])
             # `data` is the standard filter: no device files, no absolute paths,
             # no permissions carried over. safe_members has already refused
@@ -829,7 +854,12 @@ def extract_source(data: bytes, into: Path) -> Path:
             "Nothing has been changed. Free some space on that drive and run "
             "`dictate update`\nagain.",
         ) from exc
-    return into / top
+    prefix = f"{top}/"
+    return Source(
+        root=into / top,
+        kept_as_is=frozenset(name[len(prefix):] for name in skipped
+                             if name.startswith(prefix)),
+    )
 
 
 def check_source_tree(root: Path) -> None:
@@ -1372,11 +1402,12 @@ def update(*, say: Say, root: Path | None = None, repo: str = DEFAULT_REPO,
     # -- fetch, unpack and check, all outside the install folder -------------
     say("Fetching the new version…")
     staging = updates / f"source-{head.short}"
-    incoming_root = extract_source(source.source(head.sha), staging)
+    fetched = extract_source(source.source(head.sha), staging)
+    incoming_root = fetched.root
     check_source_tree(incoming_root)
     incoming = tree_files(incoming_root)
 
-    plan = plan_apply(current, incoming, stamp.files or None)
+    plan = plan_apply(current, incoming, stamp.files or None, fetched.kept_as_is)
     outcome.written, outcome.deleted = plan.write, plan.delete
 
     if plan.empty:
