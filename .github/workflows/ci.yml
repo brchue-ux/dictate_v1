@@ -135,15 +135,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "dictate autostart enable failed: $out" }
           if ($out -notmatch '1.6 GB') { throw 'enable did not state what it costs to leave on' }
 
-          # Windows' own view of it, not dictate's.
+          # Windows' own view of it, not dictate's. Note that this is NOT the
+          # XML dictate sent: Task Scheduler normalises it, reordering the
+          # document and dropping every element whose value is already the
+          # default - which is why <RunLevel>LeastPrivilege</RunLevel> is not in
+          # what comes back. It is the default, and its absence IS the answer.
+          # So privilege is checked by what must NOT be there instead.
           $query = schtasks /Query /TN dictate /XML 2>&1 | Out-String
           Write-Host $query
           if ($LASTEXITCODE -ne 0) { throw 'the task is not registered with Windows' }
-          foreach ($needed in @('LogonTrigger', 'InteractiveToken', 'LeastPrivilege',
-                                'IgnoreNew', 'pythonw.exe', 'run --autostart')) {
+          foreach ($needed in @('LogonTrigger', 'PT30S', 'InteractiveToken',
+                                'IgnoreNew', 'PT0S', 'pythonw.exe', 'run --autostart')) {
             if ($query -notmatch [regex]::Escape($needed)) {
               throw "the registered task lost '$needed' on the way into Windows"
             }
+          }
+          # The one that would be a real problem: asking for administrator
+          # rights at every logon. Nothing dictate does at run time needs them.
+          if ($query -match 'HighestAvailable') {
+            throw 'the registered task asks to run elevated'
           }
 
           # And dictate reading Windows' answer back - the parsing that tells
