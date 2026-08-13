@@ -226,9 +226,11 @@ Test-Case 'the real shipped config can be pointed at real paths' {
             '    data = tomllib.load(fh)',
             'print(data["whisper"]["model"])'
         )
-        $out = (& $python.Path $probe $file 2>&1 | Out-String).Trim()
-        if ($LASTEXITCODE -ne 0) { throw "python could not parse the config we wrote: $out" }
-        Assert-Equal 'C:\dictate-gpu\models\ggml-large-v3-turbo.bin' $out 'python-parsed model path'
+        $run = Invoke-Tool -FilePath $python.Path -Arguments @($probe, $file)
+        if ($run.ExitCode -ne 0) {
+            throw ("python could not parse the config we wrote: " + (Get-LastLine $run.Output))
+        }
+        Assert-Equal 'C:\dictate-gpu\models\ggml-large-v3-turbo.bin' (Get-LastLine $run.Output) 'python-parsed model path'
     }
 }
 
@@ -567,8 +569,11 @@ Test-Case 'a program writing to stderr does not stop the install' {
     $python = Get-PythonCommand -MinimumVersion '3.8'
     if (-not $python) { throw 'no Python to test with' }
     $ErrorActionPreference = 'Stop'
+    # No double quotes in that argument: Windows PowerShell does not escape them
+    # when it hands an argument to a native program, so the receiving program
+    # gets something it cannot parse. setup.ps1 avoids them for the same reason.
     $run = Invoke-Tool -FilePath $python.Path -Arguments @('-c',
-        'import sys; sys.stderr.write("Cloning into whisper.cpp...\n"); print("done")')
+        'import sys; print(''Cloning into whisper.cpp...'', file=sys.stderr); print(''done'')')
     Assert-Equal 0 $run.ExitCode 'exit code'
     Assert-Contains $run.Output 'Cloning into'
     Assert-Contains $run.Output 'done'

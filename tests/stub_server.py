@@ -31,6 +31,7 @@ class StubHandler(BaseHTTPRequestHandler):
     ready_at = 0.0
     reply_text = "Hello from the stub."
     fail_inference = 0
+    die_after_health = 0
     seen: list = []
 
     def log_message(self, *_args):  # keep the test output clean
@@ -50,8 +51,24 @@ class StubHandler(BaseHTTPRequestHandler):
             return
         if time.monotonic() < type(self).ready_at:
             self._json(503, {"status": "loading model"})
-        else:
-            self._json(200, {"status": "ok"})
+            return
+        self._json(200, {"status": "ok"})
+        if type(self).die_after_health:
+            # Crash *after* saying it is healthy, so a test can exercise the
+            # restart path without betting on how long the process took to
+            # start. A timer cannot do that: process startup takes a few
+            # hundred milliseconds on Windows and almost none on Linux, so a
+            # timer short enough to be quick there fires before the server is
+            # ever up here, and the supervisor correctly reports a different
+            # failure. (That is what CI caught.)
+            type(self).die_after_health -= 1
+            if type(self).die_after_health == 0:
+                try:
+                    self.wfile.flush()
+                except OSError:
+                    pass
+                print("stub-server: dying now", flush=True)
+                os._exit(9)
 
     def do_POST(self):
         if self.path != "/inference":
@@ -72,11 +89,13 @@ class StubHandler(BaseHTTPRequestHandler):
 
 def make_server(port: int = 0, *, ready_after: float = 0.0,
                 reply_text: str = "Hello from the stub.",
-                fail_inference: int = 0) -> ThreadingHTTPServer:
+                fail_inference: int = 0,
+                die_after_health: int = 0) -> ThreadingHTTPServer:
     handler = type("BoundStub", (StubHandler,), {
         "ready_at": time.monotonic() + ready_after,
         "reply_text": reply_text,
         "fail_inference": fail_inference,
+        "die_after_health": die_after_health,
         "seen": [],
     })
     return ThreadingHTTPServer(("127.0.0.1", port), handler)
@@ -95,10 +114,21 @@ def main() -> int:
     parser.add_argument("--ready-after", type=float, default=0.0)
     parser.add_argument("--die-after", type=float, default=0.0,
                         help="exit abruptly this many seconds after starting")
+    parser.add_argument("--die-after-health", type=int, default=0,
+                        help="exit abruptly after answering this many health "
+                             "checks. Prefer this to --die-after for testing "
+                             "the restart path: it does not depend on how long "
+                             "the process took to start, which differs by an "
+                             "order of magnitude between Windows and Linux")
     parser.add_argument("--die-once-marker", default=None,
-                        help="with --die-after: only die if this file does not "
-                             "exist yet, so the FIRST run crashes and the "
-                             "restarted one stays up")
+                        help="with --die-after or --die-after-health: only die "
+                             "if this file does not exist yet, so the FIRST run "
+                             "crashes and the restarted one stays up")
+    parser.add_argument("--slow-after-marker", type=float, default=0.0,
+                        help="with --die-once-marker: become ready this many "
+                             "seconds from now, but only on the runs AFTER the "
+                             "first. That is how a test gets the supervisor "
+                             "stuck part way through a restart on purpose")
     parser.add_argument("--exit-immediately", action="store_true")
     parser.add_argument("--reply", default="Hello from the stub.")
     # whisper-server's real flags, accepted and ignored, so a test can pass the
@@ -114,18 +144,26 @@ def main() -> int:
         print("stub: refusing to start (simulated bad model file)", file=sys.stderr)
         return 7
 
-    server = make_server(args.port, ready_after=args.ready_after, reply_text=args.reply)
-    print("stub-server: listening", flush=True)
-
-    should_die = bool(args.die_after)
+    should_die = bool(args.die_after) or bool(args.die_after_health)
+    is_a_restart = bool(args.die_once_marker) and os.path.exists(args.die_once_marker)
     if should_die and args.die_once_marker:
-        if os.path.exists(args.die_once_marker):
+        if is_a_restart:
             should_die = False
         else:
             with open(args.die_once_marker, "w", encoding="utf-8") as fh:
                 fh.write("died once")
 
-    if should_die:
+    ready_after = args.ready_after
+    if is_a_restart and args.slow_after_marker:
+        ready_after = args.slow_after_marker
+
+    server = make_server(
+        args.port, ready_after=ready_after, reply_text=args.reply,
+        die_after_health=(args.die_after_health if should_die else 0),
+    )
+    print("stub-server: listening", flush=True)
+
+    if should_die and args.die_after:
         def die():
             time.sleep(args.die_after)
             print("stub-server: dying now", flush=True)

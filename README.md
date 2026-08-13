@@ -118,9 +118,13 @@ The full log, including whisper.cpp's own output, goes to the file named under
 ## Configuration
 
 One file, `dictate.toml`, with a sane default for everything —
-`config/dictate.example.toml` is the annotated copy `dictate init` gives you.
-The four paths that need checking are marked `<<< CHECK THIS`; the rest can stay
-as it is.
+`config/dictate.example.toml` is the annotated copy of it. Setup writes it for
+you at `%APPDATA%\dictate\dictate.toml` with the paths already pointing at what
+it installed, so there is nothing you have to fill in.
+
+It is yours to edit after that. Setup will not overwrite your version: running
+it again only re-points those paths, and leaves every other line — the hotkey,
+the overlay colours, anything you have changed — exactly as you left it.
 
 A typo in that file is an error with a message, not a silently ignored setting.
 
@@ -163,7 +167,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 165 tests, run and passing
+### Verified anywhere — 167 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -210,7 +214,7 @@ Windows machines. These are things that used to be on the "never run" list:
 * **The installer's own logic**, on Windows PowerShell 5.1 — the version that
   ships with Windows — including a download that is genuinely interrupted
   half-way and resumed, and the edit it makes to your config file.
-* **The 165 tests above, on Windows** as well as on Linux.
+* **The 167 tests above, on Windows** as well as on Linux.
 
 ### Still not verified — needs this actual PC
 
