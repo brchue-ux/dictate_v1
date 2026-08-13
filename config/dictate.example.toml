@@ -105,6 +105,20 @@ max_restarts = 3
 # Push a second of silence through at startup so your first real sentence does
 # not pay for the GPU warming up.
 warmup = true
+# HOW LONG THE MODEL SITS IN YOUR GRAPHICS CARD WHEN YOU ARE NOT DICTATING.
+#
+# The model takes about 1.6 GB of your card's memory. After this many minutes
+# without dictating, dictate hands that memory back, so games and anything else
+# using the card get the whole 16 GB.
+#
+# You get it back by dictating: the moment you PRESS the hotkey dictate starts
+# loading the model again, while you are still speaking, so most of the time it
+# is ready before you let go. The words on screen while you talk come from a
+# different model on the processor and are not affected at all.
+#
+# Set this to 0 to keep the model loaded for as long as dictate is running,
+# which is how dictate used to behave.
+idle_release_minutes = 5
 
 
 [cleanup]

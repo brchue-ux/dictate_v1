@@ -43,6 +43,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `[[deletions]]` blocks, or they silently become fields of the last one.
 - **Caption threads are capped at 4 in `config.validate()`** because more threads were
   measured to be slower. This is a settled decision, not a limitation to lift.
+- **Model residency is bounded by use, not by process lifetime.**
+  `engines/residency.py` (`ResidentModel`) wraps the batch backend and unloads
+  whisper-server after `[whisper] idle_release_minutes` so the GPU memory goes back.
+  Two things about it are load-bearing: the reload starts at hotkey **press**
+  (`app.Application._on_hotkey_press`), not at release, which is what hides the load
+  behind the speaking; and nothing whisper-specific lives in the wrapper, so a reload
+  is an ordinary `start()` and the health wait, restart budget and clean shutdown all
+  still apply. `docs/DESIGN.md` constraint 1 carries the reasoning.
 - **The Vulkan SDK's winget id is `KhronosGroup.VulkanSDK`**, not
   `LunarG.VulkanSDK` — winget files it under that publisher and only *displays*
   "LunarG Inc.". The wrong id returns "No package found matching input criteria"

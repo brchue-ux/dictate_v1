@@ -206,6 +206,34 @@ def check_port(cfg: Config) -> CheckResult:
     )
 
 
+def check_idle_release(cfg: Config) -> CheckResult:
+    """What the graphics card is being asked to hold, and whether it holds it now.
+
+    This is the answer to "is dictate using my VRAM at the moment?", which is
+    the question the setting exists for. It is deliberately the only place that
+    reports it: unloading and reloading are routine, so they are not announced
+    while he is working.
+    """
+    from .engines.residency import minutes_text
+    from .engines.whisper_server import WhisperServerClient
+
+    minutes = cfg.whisper.idle_release_minutes
+    if minutes <= 0:
+        return CheckResult(
+            "Graphics card memory", Status.OK,
+            "the model stays loaded for as long as dictate is running "
+            "(idle_release_minutes = 0)",
+        )
+    loaded = WhisperServerClient(cfg.whisper.host, cfg.whisper.port).is_healthy()
+    now = ("a transcription model is loaded right now" if loaded else
+           "no transcription model is loaded right now - either dictate is not "
+           "running, or it has given the memory back")
+    return CheckResult(
+        "Graphics card memory", Status.OK,
+        f"given back after {minutes_text(minutes * 60.0)} without dictating; {now}",
+    )
+
+
 def check_cleanup_rules(cfg: Config) -> CheckResult:
     if not cfg.cleanup.enabled:
         return CheckResult("Cleanup rules", Status.OK, "cleanup disabled in config")
@@ -283,6 +311,7 @@ def collect(cfg: Config, *, checks: list[Callable[[], CheckResult]] | None = Non
         check_whisper_server(cfg),
         check_whisper_model(cfg),
         check_port(cfg),
+        check_idle_release(cfg),
     ]
     if cfg.captions.enabled:
         results.append(check_caption_model(cfg))

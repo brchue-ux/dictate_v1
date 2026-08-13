@@ -148,6 +148,36 @@ Try a rule without dictating:
 dictate clean --explain "Um, so I was, you know, thinking about it."
 ```
 
+### Your graphics card is only busy while you are dictating
+
+The transcription model takes about **1.6 GB** of your card's memory. It used to
+sit there for as long as dictate was running — all day, whether or not you had
+said anything since breakfast — which is memory a game or a compute job could
+have had.
+
+Now dictate hands it back after **five minutes without dictating**. Between
+dictation sessions the card is genuinely idle as far as dictate is concerned:
+the full 16 GB is available to everything else, and there is nothing to close or
+remember to close.
+
+You get it back by dictating, and you are unlikely to notice it happening.
+Loading the model starts the moment you **press** the hotkey — not when you let
+go — so it happens while you are still speaking, which is about how long it
+takes. The words on screen while you talk come from a different, much smaller
+model that runs on the processor, so they appear exactly as usual either way.
+Worst case, on a short sentence after a long gap, the paste is a second or two
+later than normal, once.
+
+To turn it off and keep the model loaded permanently, set this in your config:
+
+```toml
+[whisper]
+idle_release_minutes = 0
+```
+
+`dictate doctor` tells you what it is set to and whether a model is loaded at
+this moment.
+
 ### Your clipboard is not touched
 
 The default paste method synthesises the characters as keystrokes and never uses
@@ -167,7 +197,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 167 tests, run and passing
+### Verified anywhere — 207 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -183,7 +213,17 @@ python -m unittest discover -s tests -t .
 * That the target window is captured at press and not at paste time.
 * The resident-backend lifecycle against a **real child process**: start, wait
   for health, slow start, crash → restart, repeated crashes → give up with a
-  reason, clean shutdown, and the stop-during-restart deadlock.
+  reason, clean shutdown, and the stop-during-restart deadlock. Including that
+  after an idle release the server really can be started again on the same port,
+  and that the restart-on-crash supervision applies to that second process too.
+* **When the graphics card's memory is handed back and taken again**: the idle
+  timer, that a running transcription is never unloaded from under itself, that
+  the load starts at hotkey press rather than at release, and every awkward
+  collision — pressing while the shutdown is running, pressing again while a
+  load is already running, an utterance that ends before the model has loaded,
+  two overlapping utterances, and shutdown arriving in the middle of any of it.
+  Also that a model which cannot be loaded again says so and never silently
+  pastes nothing.
 * The whisper-server HTTP client against a **real HTTP server**: multipart WAV
   upload, response parsing, HTTP errors, nothing-listening.
 * The cleanup pass, including the "can only delete" guarantee — and that every
@@ -222,7 +262,7 @@ Windows machines. These are things that used to be on the "never run" list:
 * **That a genuinely absent Vulkan SDK is reported as absent** — CI asserts the
   installer never claims it installed, never asks for a restart, and always
   prints a download address.
-* **The 167 tests above, on Windows** as well as on Linux.
+* **The 207 tests above, on Windows** as well as on Linux.
 
 ### Still not verified — needs this actual PC
 
@@ -235,6 +275,12 @@ misbehaves.
   428 ms on a card with half the compute units. **Step 6 of setup answers this
   in about a minute**, and so does `dictate transcribe some.wav` at any time.
   A green tick on CI says nothing whatsoever about the GPU.
+* **That the 1.6 GB really comes back.** dictate shuts `whisper-server` down and
+  the process genuinely exits — that much is tested against a real child process
+  here. Whether the driver then returns the VRAM to the pool, and how long the
+  reload actually takes on your card, has been observed by nobody. Task
+  Manager's Dedicated GPU memory figure, five minutes after you stop dictating,
+  is the check.
 * **The toolchain install** — winget fetching Python, CMake, the Vulkan SDK and
   the C++ build tools. CI machines already have most of those and do not use
   winget at all, so step 2 of setup is the one part of it no machine here has
