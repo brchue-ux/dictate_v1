@@ -4,7 +4,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 ## Where the real documentation is
 
-- **`docs/DESIGN.md`** — the four settled decisions, the five constraints that break the
+- **`docs/DESIGN.md`** — the four settled decisions, the six constraints that break the
   product if ignored, the threading model, and what was deliberately not done. Read it
   before changing anything in `src/dictate/platform/` or `src/dictate/engines/`.
 - **`README.md` → "What was verified, and what was not"** — the honest split between what
@@ -51,6 +51,30 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **`config/cleanup-rules.toml` is TOML**: plain settings must come *before* the
   `[[deletions]]` blocks, or they silently become fields of the last one. Same
   trap, same rule, in `config/voice-punctuation.toml`.
+- **Nothing dictated may press a key, and `whisper-server` replies in lines.**
+  whisper.cpp's `output_str` writes `"\n"` after EVERY segment, so the JSON
+  `text` field is one line per segment; `WhisperServerClient._parse` joins them
+  with a space, exactly as the `verbose_json` branch beside it always did.
+  Leaving that newline in is what pressed Enter in his terminal and ran a
+  command. Behind it, `plan_text` emits Return or Tab only when the caller
+  passes `allow_return=True`, and `injector.send` applies
+  `platform/line_breaks.py` once, above both paste methods - a newline on the
+  clipboard submits just as well as a synthesised one. `[paste] line_breaks =
+  "return"` is the only way back, and it is what makes the spoken "new line"
+  mark do anything. `tests/test_stray_enter.py` holds the whole chain, and
+  `docs/DESIGN.md` constraint 6 carries the reasoning. Related, same class:
+  `platform/modifier_guard.py` waits for Ctrl/Alt/Win to come up before typing,
+  because the chord's other keys can still be down when the paste happens.
+- **The tray changes the hotkey by offering a short list, and writes it down.**
+  He will not hand-edit a config file, and a running dictate may not show a
+  dialog (it holds the instance lock), so "press the keys you want" is out -
+  `src/dictate/hotkey_switch.py` carries that reasoning and the choices. Order
+  is the safety: register the new combination, and only if Windows accepts it
+  write the config, so a combination another program owns leaves both the
+  hotkey and the file as they were (`app.change_hotkey`). The write is a
+  one-line text edit, never a re-serialised TOML - `config_edit.py` preserves
+  his comments, his CRLF endings and his byte order mark, and is the module to
+  reuse for any other setting the tray ever changes.
 - **Spoken punctuation is a stage of its own and must stay one.** It substitutes,
   which the cleanup pass is built to make impossible, so it lives in
   `src/dictate/punctuation/` and runs *after* cleanup — never inside it, never
@@ -103,14 +127,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `font_size`/`max_width_px`: his `dictate.toml` sets those explicitly, so a
   default change reaches him not at all. `docs/DESIGN.md` 2c carries the
   reasoning; `tests/test_overlay.py::TheSizeKnobs` holds the proportions.
-- **`dictate look` writes one line of his config, in place.** Never rewrite that
-  file from the dataclasses: it is the commented file `dictate init` wrote, and
-  the comments are most of it. `overlay_size.set_in_text` replaces the value,
-  keeps the trailing comment at its own column, stops at the next section header
-  and adds the key at the top of `[overlay]` when it is missing;
-  `tests/test_overlay_size.py` holds each of those. The same function is what
-  `dictate overlay --keep` and the tray's two size items use - one writer, one
-  set of rules.
+- **Everything that writes to his config goes through `config_edit`.** The
+  hotkey and the caption size both do (`app._persist_hotkey`,
+  `overlay_size.write`), and anything else ever added must: it is the module
+  that keeps his comments, his CRLF endings and his byte order mark, and a
+  second "edit one line of TOML" is two ideas of what is safe, drifting.
+  `overlay_size` only decides WHICH keys of `[overlay]` may be written that way.
 - **Tk substitutes a missing font family silently.** `platform/fonts.py` compares
   what was asked for against `Font.actual("family")` and reports the substitution on
   startup. Anything that picks a font must go through it; "it looked wrong and

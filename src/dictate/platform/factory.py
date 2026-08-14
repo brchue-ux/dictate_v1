@@ -49,6 +49,8 @@ def make_injector(cfg: Config, tracker):
         per_char_delay_ms=cfg.paste.per_char_delay_ms,
         clipboard_restore_delay_ms=cfg.paste.clipboard_restore_delay_ms,
         trailing_space=cfg.paste.trailing_space,
+        line_break_mode=cfg.paste.line_breaks,
+        modifier_wait_ms=cfg.paste.modifier_wait_ms,
     )
 
 
@@ -74,11 +76,15 @@ def make_audio_capture(cfg: Config):
     )
 
 
-def make_hotkey_listener(cfg: Config):
+def make_hotkey_listener(cfg: Config, combination: str | None = None):
+    """`combination` overrides the config, which is how the tray changes the
+    hotkey while dictate is running: a second listener is built for the new
+    combination and only becomes the one in use if Windows accepts it."""
     _require_windows("global hotkey")
     from .windows.hotkey import WindowsHotkeyListener  # noqa: PLC0415
 
-    return WindowsHotkeyListener(cfg.hotkey.combination, cfg.hotkey.mode)
+    return WindowsHotkeyListener(combination or cfg.hotkey.combination,
+                                 cfg.hotkey.mode)
 
 
 def make_child_guard():

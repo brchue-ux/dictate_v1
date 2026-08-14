@@ -29,7 +29,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
-from . import overlay_size
+from . import hotkey_switch, overlay_size
+from .errors import DictateError
+from .platform.hotkey_spec import describe
 
 #: The menu item keys. The Win32 side maps these to command ids and back; it
 #: knows nothing else about what the menu means.
@@ -41,8 +43,17 @@ LOG = "log"
 STATUS = "status"
 HISTORY = "history"
 HISTORY_DELETE = "history-delete"
-SMALLER = "captions-smaller"
-BIGGER = "captions-bigger"
+HOTKEY = "hotkey"
+SIZE = "caption-size"
+#: One key per caption size, the same shape as the hotkey's keys below and for
+#: the same reason: the Win32 side carries a string and knows nothing about it.
+SIZE_PREFIX = "caption-size="
+SIZE_OTHER = "caption-size-other"
+#: One key per offered combination: the key carries the combination itself, so
+#: the Win32 side still knows nothing but a string, and `TrayActions.invoke`
+#: is the only thing that has to read it.
+HOTKEY_PREFIX = "hotkey="
+HOTKEY_OTHER = "hotkey-other"
 
 
 class TrayStatus(Enum):
@@ -89,6 +100,9 @@ class TrayState:
     status: TrayStatus = TrayStatus.STARTING
     #: The hotkey, in the words `dictate doctor` uses.
     hotkey: str = ""
+    #: The same hotkey as it is written in the config file. The menu needs it to
+    #: tick the one he is using; the tooltip wants the pretty one above.
+    hotkey_combination: str = ""
     #: Whether the transcription model is in the graphics card right now.
     model_resident: bool = False
     #: One line about what went wrong, when status is ERROR.
@@ -143,6 +157,12 @@ class MenuItem:
     enabled: bool = True
     default: bool = False
     separator_after: bool = False
+    #: A submenu. An item with children is not clickable itself and has no
+    #: action; the Win32 side hangs a popup menu off it.
+    children: tuple[MenuItem, ...] = ()
+    #: Shown with a tick. Used for "this is the hotkey you have", which is the
+    #: only thing on this menu with a current value to show.
+    checked: bool = False
 
     @property
     def text(self) -> str:
@@ -158,23 +178,79 @@ def status_line(state: TrayState) -> str:
     return text
 
 
+def hotkey_items(state: TrayState) -> list[MenuItem]:
+    """The submenu under "Change the hotkey".
+
+    A click and it is in force, and in his config file, and it is the tick that
+    tells him which one that is. What is offered and why is
+    `hotkey_switch.CHOICES`; the last line is the command that takes anything
+    at all, greyed because it is a thing to type rather than a thing to click.
+    """
+    items: list[MenuItem] = []
+    listed = hotkey_switch.choices_for(state.hotkey_combination)
+    for combination, why, is_current in listed:
+        try:
+            label = describe(combination)
+        except DictateError:
+            label = combination
+        items.append(MenuItem(
+            HOTKEY_PREFIX + combination,
+            label if is_current else f"{label} - {why}",
+            hotkey_switch.command_for(combination),
+            checked=is_current,
+            separator_after=combination == listed[-1][0],
+        ))
+    items.append(MenuItem(HOTKEY_OTHER, "Any other combination",
+                          hotkey_switch.EXAMPLE_COMMAND, enabled=False))
+    return items
+
+
+def size_items(state: TrayState) -> list[MenuItem]:
+    """The submenu under "Caption size".
+
+    A click and it is the size of the next thing he says, and it is in his
+    config file, and the tick is what tells him which one he is on. The names
+    and what each one measures are `overlay_size`; the last line is the command
+    that does the things a menu cannot - the words and the box apart, and the
+    font - greyed, because it is a thing to type rather than a thing to click.
+    """
+    current = state.caption_size or overlay_size.DEFAULT
+    items = [
+        MenuItem(SIZE_PREFIX + name,
+                 f"{name} - about {overlay_size.caption_px(name)} px text",
+                 f"dictate look {name}",
+                 checked=name == current,
+                 separator_after=name == overlay_size.names()[-1])
+        for name in overlay_size.names()
+    ]
+    items.append(MenuItem(SIZE_OTHER, "Just the words, just the box, or the font",
+                          "dictate overlay --text bigger", enabled=False))
+    return items
+
+
 def menu(state: TrayState) -> list[MenuItem]:
     """What right-clicking the icon offers.
 
-    Eight lines, in five groups: what it is doing, the two that change how big
-    the captions are, the two that change whether it is running, the two that
-    change which version it is, and the log - plus two more when a dictation
+    Eight lines, in six groups: what it is doing, how big the captions are,
+    the two that change whether it is running, the two that change which
+    version it is, the hotkey, and the log - plus two more when a dictation
     history is being kept. None of them needs him to have worked out what went
     wrong first - Stop clears a stuck copy as well as a healthy one, because
     `dictate stop` does.
 
-    **The two size items are here because the captions are the thing he sees
-    and the tray is the only surface a logon-started copy has**: a panel that is
-    a bit too big should not require finding a terminal. They step the one knob
-    (`dictate look smaller` / `bigger`), which moves the words and the panel
-    together; splitting those two, or changing the font, is a preview-and-judge
-    job and lives in `dictate overlay`. Each greys out at the end of the ladder
-    rather than offering a step that would do nothing.
+    **Caption size and Change the hotkey are the two items with a submenu**, and
+    the two that show a current value. They are also the two that write to his
+    config file, through the same `config_edit`; `hotkey_switch` carries why the
+    hotkey is a list of combinations rather than "press the keys you want" or
+    "here is your config file, edit it", and `overlay_size` carries why the
+    caption size is one named ladder rather than five pixel measurements.
+
+    **Caption size is on the tray because the captions are the thing he looks
+    at** and this is the only surface a logon-started copy has: a panel that is
+    a bit too big should not require finding a terminal. The submenu moves the
+    one knob, which takes the words and the box together; splitting those two,
+    or changing the font, is a preview-and-judge job and stays in
+    `dictate overlay`, which the last line of the submenu names.
 
     **Check for updates changes nothing, ever**, which is why it is offered even
     while an update is already running: it is a report and cannot make anything
@@ -194,19 +270,16 @@ def menu(state: TrayState) -> list[MenuItem]:
     """
     items = [
         MenuItem(STATUS, status_line(state), enabled=False, separator_after=True),
-        MenuItem(SMALLER, "Make the captions smaller", "dictate look smaller",
-                 enabled=not overlay_size.at_end(state.caption_size, -1)
-                 if state.caption_size else True),
-        MenuItem(BIGGER, "Make the captions bigger", "dictate look bigger",
-                 enabled=not overlay_size.at_end(state.caption_size, 1)
-                 if state.caption_size else True,
-                 separator_after=True),
+        MenuItem(SIZE, "Caption size", "dictate look",
+                 children=tuple(size_items(state)), separator_after=True),
         MenuItem(STOP, "Stop dictate", "dictate stop", default=True),
         MenuItem(RESTART, "Restart dictate", "dictate stop, dictate run",
                  separator_after=True),
         MenuItem(CHECK, "Check for updates", "dictate update --check"),
         MenuItem(UPDATE, "Update now", "dictate update",
                  enabled=not state.updating, separator_after=True),
+        MenuItem(HOTKEY, "Change the hotkey", "dictate hotkey",
+                 children=tuple(hotkey_items(state)), separator_after=True),
         MenuItem(LOG, "Open the log folder"),
     ]
     if state.history:
@@ -230,8 +303,11 @@ class TrayActions:
     update_now: Callable[[], None]
     open_history: Callable[[], None] | None = None
     delete_history: Callable[[], None] | None = None
-    captions_smaller: Callable[[], None] | None = None
-    captions_bigger: Callable[[], None] | None = None
+    #: These two take what the menu item carries - a combination, a size name.
+    #: The only actions here that are given anything, which is why they are not
+    #: in `handlers` with the rest.
+    set_hotkey: Callable[[str], None] | None = None
+    set_caption_size: Callable[[str], None] | None = None
     handlers: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -242,15 +318,25 @@ class TrayActions:
         # than raising - which is the right answer for a menu id from a copy of
         # the menu built before the history was turned off.
         for key, action in ((HISTORY, self.open_history),
-                            (HISTORY_DELETE, self.delete_history),
-                            (SMALLER, self.captions_smaller),
-                            (BIGGER, self.captions_bigger)):
+                            (HISTORY_DELETE, self.delete_history)):
             if action is not None:
                 self.handlers[key] = action
 
     def invoke(self, key: str) -> bool:
         """Run the action for `key`. False if there is nothing to run, which is
         the right answer for the status line and for a stale menu id."""
+        if key.startswith(SIZE_PREFIX):
+            name = key[len(SIZE_PREFIX):]
+            if self.set_caption_size is None or not name:
+                return False
+            self.set_caption_size(name)
+            return True
+        if key.startswith(HOTKEY_PREFIX):
+            combination = key[len(HOTKEY_PREFIX):]
+            if self.set_hotkey is None or not combination:
+                return False
+            self.set_hotkey(combination)
+            return True
         handler = self.handlers.get(key)
         if handler is None:
             return False

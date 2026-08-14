@@ -23,6 +23,7 @@ from typing import Any
 from . import overlay_size
 from .errors import ConfigError
 from .platform.fade import MIN_FADE_MS
+from .platform.line_breaks import MODES as LINE_BREAK_MODES
 
 # The live-caption Zipformer measurably gets *worse* above 2 threads
 # (dictate-feasibility report S3c: 6 threads was 3x worse than 2).
@@ -227,6 +228,17 @@ class PasteConfig:
     clipboard_restore_delay_ms: int = 300
     #: Append a trailing space so consecutive dictations do not run together.
     trailing_space: bool = True
+    #: What a line break in the text does. "space" pastes it as a space and is
+    #: the default: Return SUBMITS in a terminal, a chat box and most search
+    #: fields, so dictated text is not allowed to press it unless he has said
+    #: so. "return" sends the Return keypress, which is what someone dictating
+    #: into a document wants. See `platform/line_breaks.py`.
+    line_breaks: str = "space"
+    #: How long to wait for Ctrl, Alt or Win to come up before typing, when the
+    #: hotkey chord is still half-held at paste time. Whatever is still down
+    #: after this is sent a key-up, so the text is typed rather than fired as
+    #: shortcuts. 0 turns the whole guard off. See `platform/modifier_guard.py`.
+    modifier_wait_ms: int = 400
 
 
 @dataclass
@@ -565,6 +577,23 @@ def validate(cfg: Config) -> Config:
         raise ConfigError(
             f"[paste] method must be 'sendinput' or 'clipboard', got {cfg.paste.method!r}.",
             "sendinput is the default and never touches your clipboard.",
+        )
+    if cfg.paste.line_breaks not in LINE_BREAK_MODES:
+        raise ConfigError(
+            f"[paste] line_breaks must be "
+            f"{' or '.join(repr(m) for m in LINE_BREAK_MODES)}, got "
+            f"{cfg.paste.line_breaks!r}.",
+            '"space" is the default: a line break in what you dictated is '
+            'pasted as a space, because Return submits in a terminal or a chat '
+            'box. Use "return" if you dictate into a document and want the line '
+            "break.",
+        )
+    if not 0 <= cfg.paste.modifier_wait_ms <= 5000:
+        raise ConfigError(
+            f"[paste] modifier_wait_ms is {cfg.paste.modifier_wait_ms}, which is "
+            f"outside 0-5000.",
+            "400 is the default: long enough for you to finish letting go of "
+            "the hotkey, short enough not to be a pause. 0 turns the guard off.",
         )
     if not 0 <= cfg.autostart.logon_delay_s <= 600:
         raise ConfigError(

@@ -206,16 +206,25 @@ spacing = "close"
 name = "new line"
 comment = """A line break is sent as a Return keypress, because that is the only
 thing that puts a new line into another application. In a chat box or a terminal
-Return SUBMITS - so "new line" there sends what you have typed so far. That is
-not a bug this can fix; it is what a new line does in those windows. Delete this
-block if you dictate mostly into a chat window."""
+Return SUBMITS - so "new line" there sends what you have typed so far.
+
+THIS MARK DOES NOTHING UNTIL YOU ASK FOR IT. dictate pastes a line break as a
+space unless you set
+
+    [paste]
+    line_breaks = "return"
+
+in dictate.toml. Until you do, "new line" puts a space in. That default is
+there because a line break dictate did not mean to send once ran a command in
+the product owner's terminal, and he did not notice at the time."""
 say = ["new line"]
 insert = "\n"
 spacing = "break"
 
 [[marks]]
 name = "new paragraph"
-comment = """Two Returns, so the same warning as "new line" applies twice over."""
+comment = """Two Returns, so everything said about "new line" applies twice
+over - including that it is a space until [paste] line_breaks = "return"."""
 say = ["new paragraph"]
 insert = "\n\n"
 spacing = "break"

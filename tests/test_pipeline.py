@@ -364,6 +364,29 @@ class WhatGoesIntoTheHistory(PipelineTestCase):
         p.finish_utterance()
         self.assertAlmostEqual(self.recorded[0]["spoke_s"], 1.0, places=2)
 
+    def test_it_carries_whether_pasting_it_pressed_return(self):
+        """The stray-Enter defect's own line in the history. Ordinarily it is
+        zero, because `[paste] line_breaks` will not let it be anything else -
+        and what the injector reports is what goes down, so if it ever is not
+        zero he can find out which dictation it was."""
+        class Submitting(FakeInjector):
+            def send(self, text, target):
+                super().send(text, target)
+                return 2
+
+        p = self.build(injector=Submitting())
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(self.recorded[0]["returns"], 2)
+
+    def test_an_injector_that_reports_nothing_is_not_an_error(self):
+        p = self.build()          # FakeInjector.send returns None
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(self.recorded[0]["returns"], 0)
+
     def test_nothing_is_recorded_when_nothing_was_pasted(self):
         for case, kwargs in (
             ("transcription failed",

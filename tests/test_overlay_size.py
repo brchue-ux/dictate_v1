@@ -53,8 +53,6 @@ class TheLadder(unittest.TestCase):
         self.assertEqual(size_mod.step("huge", 1), "huge")
         self.assertEqual(size_mod.step("compact", 1), "medium")
         self.assertEqual(size_mod.step("compact", -1), "small")
-        self.assertTrue(size_mod.at_end("small", -1))
-        self.assertFalse(size_mod.at_end("small", 1))
 
     def test_a_step_from_something_unrecognisable_starts_from_the_default(self):
         """A menu built before a config was reloaded must not raise on a thread
@@ -116,15 +114,24 @@ class WritingItToHisConfig(unittest.TestCase):
         self.assertIn('size = "huge"', out)
         self.assertIn('text_size = "medium"', out)
 
-    def test_the_comment_on_the_line_survives_at_its_own_column(self):
-        """They are a block of aligned comments in the file `dictate init`
-        writes, and one line jumping left is how a config starts looking like
-        something a program has been at."""
-        text = '[overlay]\nsize = "huge"                 # small, compact, medium\n'
+    def test_the_comment_on_the_line_survives(self):
+        """Through `config_edit`, which is the one writer in this repository
+        that touches his config: the value changes and the comment after it is
+        the comment it was, gap and all."""
+        text = '[overlay]\nsize = "huge"   # small, compact, medium\n'
         out = size_mod.set_in_text(text, {"size": "medium"})
-        self.assertIn('size = "medium"', out)
-        self.assertEqual([line.index("#") for line in text.splitlines() if "#" in line],
-                         [line.index("#") for line in out.splitlines() if "#" in line])
+        self.assertIn('size = "medium"   # small, compact, medium', out)
+
+    def test_his_line_endings_and_byte_order_mark_are_not_a_change_he_asked_for(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dictate.toml"
+            path.write_bytes(b"\xef\xbb\xbf"
+                             + b'[overlay]\r\nsize = "huge"\r\nlines = 2\r\n')
+            size_mod.write(path, {"size": "small"})
+            data = path.read_bytes()
+        self.assertTrue(data.startswith(b"\xef\xbb\xbf"))
+        self.assertIn(b'size = "small"\r\n', data)
+        self.assertNotIn(b"size = \"small\"\n\r", data)
 
     def test_a_missing_key_is_added_where_it_will_be_seen(self):
         text = '[hotkey]\nmode = "hold"\n\n[overlay]\nfont_size = 18\n'
@@ -167,11 +174,16 @@ class WritingItToHisConfig(unittest.TestCase):
         self.assertEqual(config_mod.from_mapping(_toml(after)).overlay.size,
                          "medium")
 
-    def test_a_value_it_cannot_write_safely_is_refused_rather_than_mangled(self):
-        with self.assertRaises(ConfigError):
-            size_mod.set_in_text("[overlay]\n", {"font_family": 'Fira "Code"'})
+    def test_a_setting_this_does_not_own_is_refused_rather_than_written(self):
+        """It writes four things. Anything else reaching this is a programming
+        error, and a config writer that will write anything is a config writer
+        that will eventually write the wrong thing."""
         with self.assertRaises(ConfigError):
             size_mod.set_in_text("[overlay]\n", {"opacity": "0.5"})
+
+    def test_a_font_name_with_a_quote_in_it_is_escaped_rather_than_broken(self):
+        out = size_mod.set_in_text("[overlay]\n", {"font_family": 'Fira "Code"'})
+        self.assertEqual(_toml(out)["overlay"]["font_family"], 'Fira "Code"')
 
     def test_the_file_is_replaced_whole_or_not_at_all(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -182,11 +194,28 @@ class WritingItToHisConfig(unittest.TestCase):
             # The temporary file it writes through is not left behind.
             self.assertEqual([p.name for p in Path(tmp).iterdir()], ["dictate.toml"])
 
-    def test_a_config_file_that_is_not_there_says_which_command_makes_one(self):
+    def test_the_three_are_written_in_the_order_they_are_read_in(self):
+        out = size_mod.set_in_text('[overlay]\nfont_size = 18\n', {
+            "size": "small", "text_size": "", "panel_size": ""})
+        keys = [line.split(" =")[0] for line in out.splitlines() if " =" in line]
+        self.assertEqual(keys[:3], ["size", "text_size", "panel_size"])
+
+    def test_a_file_it_cannot_write_names_the_file_and_the_line_to_type(self):
+        """`config_edit`'s message, deliberately: this is not the path a person
+        reaches - `dictate look` refuses earlier, naming `dictate init` - so
+        what matters here is that a failure still ends in something to do."""
         with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "nowhere" / "dictate.toml"
             with self.assertRaises(ConfigError) as ctx:
-                size_mod.write(Path(tmp) / "nope.toml", {"size": "small"})
-        self.assertIn("dictate init", ctx.exception.remedy)
+                size_mod.write(missing, {"size": "small"})
+        self.assertIn(str(missing), ctx.exception.message)
+        self.assertIn('size = "small"', ctx.exception.remedy)
+
+    def test_the_command_refuses_a_config_file_that_is_not_there_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _, err = run(["--config", str(Path(tmp) / "nope.toml"), "look"])
+        self.assertEqual(code, 2)
+        self.assertIn("dictate init", err)
 
     def test_a_file_written_with_a_byte_order_mark_is_still_readable(self):
         """Notepad and Windows PowerShell both write one, and `config.load`
@@ -228,10 +257,16 @@ class TheConfigKeys(unittest.TestCase):
 
 
 class TheLookCommand(unittest.TestCase):
+    """`config.load` resolves the config's own path, and what the command
+    prints is that resolved one. On Windows that is not pedantry: a temporary
+    folder comes back as its 8.3 short name (`RUNNER~1`) and `resolve()` turns
+    it into the long one - two spellings of one folder, so the tests compare
+    against the spelling the product will use."""
+
     def config(self, tmp: str, text: str = "") -> Path:
         path = Path(tmp) / "dictate.toml"
         path.write_text(text or '[overlay]\nsize = "huge"\n', encoding="utf-8")
-        return path
+        return path.resolve()
 
     def test_it_says_what_the_captions_are_now_and_how_to_change_them(self):
         with tempfile.TemporaryDirectory() as tmp:

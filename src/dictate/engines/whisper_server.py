@@ -9,6 +9,17 @@ Endpoints used (whisper.cpp `examples/server`):
 stdlib ``urllib`` only, deliberately: the client is the piece most likely to need
 debugging on a machine nobody here can reach, and a dependency-free client is one
 fewer thing that can be missing or the wrong version.
+
+**The ``text`` field is one line per segment, not one paragraph.** whisper.cpp's
+``output_str`` writes ``result << speaker << text << "\\n"`` after *every*
+segment (``examples/server/server.cpp``), and that string is what goes into
+``{"text": ...}``. So a two-sentence utterance comes back as
+``"Sentence one.\\nSentence two.\\n"``: the newlines are the server's delimiter
+between segments, not punctuation Whisper chose. `_parse` therefore joins them
+with a space - which is exactly what this module already did on the
+``verbose_json`` branch below, where the segments arrive separately and the
+delimiter is not in the way. Leaving them in is what pressed Enter in the
+product owner's terminal; see `platform/line_breaks.py`.
 """
 
 from __future__ import annotations
@@ -132,7 +143,24 @@ class WhisperServerClient:
         return self._parse(raw)
 
     @staticmethod
-    def _parse(raw: str) -> str:
+    def _join_segments(text: str) -> str:
+        """One line per segment -> one paragraph.
+
+        See the module docstring: the newlines in the ``text`` field are
+        whisper.cpp's delimiter between segments. Blank lines are dropped and
+        each line is stripped of the leading space whisper.cpp puts on every
+        segment, so the result is the sentence anybody would have written.
+
+        Nothing else about the transcript is touched. The words, their order,
+        their capitals and their punctuation are the words Whisper produced -
+        which is what the cleanup pass's subsequence check is measured against,
+        and what the history records as "as Whisper heard it".
+        """
+        lines = [line.strip() for line in text.splitlines()]
+        return " ".join(line for line in lines if line)
+
+    @classmethod
+    def _parse(cls, raw: str) -> str:
         try:
             payload = json.loads(raw)
         except ValueError as exc:
@@ -144,7 +172,7 @@ class WhisperServerClient:
             ) from exc
         if isinstance(payload, dict):
             if "text" in payload:
-                return str(payload["text"]).strip()
+                return cls._join_segments(str(payload["text"]))
             if "error" in payload:
                 raise TranscriptionError(
                     f"The transcription server reported an error: {payload['error']}",

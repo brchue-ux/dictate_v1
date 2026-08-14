@@ -6,6 +6,7 @@
     dictate autostart     start it (or stop it) starting itself when you log in
     dictate doctor        check everything the app needs, and say what to fix
     dictate init          write a config file you can edit
+    dictate hotkey        show or change the combination you hold to talk
     dictate devices       list the microphones dictate can see
     dictate clean         run the cleanup rules over text on stdin
     dictate punctuate     turn spoken marks ("comma") into marks (",")
@@ -268,6 +269,56 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hotkey(args: argparse.Namespace) -> int:
+    """Show or change the hotkey. The typed form of the tray's own item.
+
+    Changing it writes one line of the config file and nothing else. It does
+    NOT reach into a copy that is already running - there is no channel for
+    that, and inventing one to change a setting would be a worse thing than
+    saying so - so it says which of the two things to do instead.
+    """
+    from . import config_edit as edit_mod, hotkey_switch as switch_mod
+    from .platform.hotkey_spec import describe, normalise
+
+    cfg = _load_config(args)
+    if not args.combination:
+        _out(f"the hotkey is  {describe(cfg.hotkey.combination)}"
+             f"   ({cfg.hotkey.combination})")
+        _out("")
+        _out("What the tray icon offers, each of which is one click there:")
+        for combination, why, current in switch_mod.choices_for(cfg.hotkey.combination):
+            mark = "*" if current else " "
+            _out(f" {mark} {describe(combination):<22} {why}")
+        _out("")
+        _out("Any combination of ctrl, alt, shift and win with one other key "
+             "works, not just those:")
+        _out(f"  {switch_mod.EXAMPLE_COMMAND}")
+        return 0
+
+    combination = normalise(args.combination)
+    if cfg.source_path is None:
+        raise DictateError(
+            "There is no config file to write the hotkey into.",
+            "Run `dictate init` first - it writes one you can keep - then run "
+            "this again.",
+        )
+    edit_mod.write_string(cfg.source_path, "hotkey", "combination", combination)
+    # Read it back rather than trusting the write: a config that no longer
+    # loads is dictate refusing to start, and this is the last moment anyone
+    # can be told about it while the fix is still one line.
+    config_mod.load(cfg.source_path)
+    _out(f"the hotkey is now  {describe(combination)}")
+    _out(f"written to         {cfg.source_path}")
+    _out("")
+    if instance_mod.running_instance() is not None:
+        _out("dictate is running, and that copy is still using the old one. "
+             "Either right-click")
+        _out("the icon by the clock and choose the new one there - which "
+             "changes it there and then -")
+        _out("or `dictate stop` and start it again.")
+    return 0
+
+
 def cmd_history(args: argparse.Namespace) -> int:
     """Open what he has dictated, or delete it.
 
@@ -434,7 +485,7 @@ def _save_changes(cfg: config_mod.Config, changes: dict[str, str]) -> None:
     # Said every time rather than only when a copy is running: the honest
     # answer to "why has nothing changed" has to arrive before the question.
     _out("If dictate is running, it keeps the size it started with - restart it,"
-         " or use the tray's caption size items, to see this now.")
+         " or use the tray icon's Caption size menu, to see this now.")
 
 
 def _offer_to_keep(cfg: config_mod.Config, changes: dict[str, str],
@@ -776,6 +827,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_punct.add_argument("--explain", action="store_true",
                          help="say which mark each substitution came from")
     p_punct.set_defaults(func=cmd_punctuate)
+
+    p_key = sub.add_parser("hotkey",
+                           help="show or change the hotkey you hold to talk")
+    p_key.add_argument("combination", nargs="?",
+                       help='e.g. "ctrl + alt + space". Left out, this shows '
+                            "the one you have and the ones the tray offers.")
+    p_key.set_defaults(func=cmd_hotkey)
 
     p_hist = sub.add_parser("history",
                             help="open what you have dictated, or delete it")

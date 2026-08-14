@@ -45,7 +45,7 @@ reason a sloppy caption model is acceptable at all.
 
 ---
 
-## The five constraints that break the product if ignored
+## The six constraints that break the product if ignored
 
 ### 1. The Whisper model stays resident in VRAM *while he is dictating*
 
@@ -220,11 +220,14 @@ display demands. A `compact` panel on a 150% screen is 150% of a compact panel.
 None of it is reachable only by editing a file. `dictate overlay --size small`
 (or `--text`, `--panel`, `--font`) shows the result and *then* asks whether to
 keep it; `dictate look` says what is in force and changes it in one word; and
-the tray has "Make the captions smaller" and "bigger", which take effect on the
-next appearance — rule 2b again, since nothing on screen may resize while it is
-being read. `src/dictate/overlay_size.py` carries the ladder, and the config
-write is one line of one section with every comment left where it was: his
-config file is his.
+the tray has a "Caption size" submenu — the five names, with a tick on the one
+in force — which takes effect on the next appearance, rule 2b again, since
+nothing on screen may resize while it is being read. It is deliberately the same
+shape as "Change the hotkey" beside it, down to writing his config through the
+same `config_edit`: one line of one section, with every comment, line ending and
+byte order mark left where it was. `src/dictate/overlay_size.py` carries the
+ladder and owns which `[overlay]` keys may be written that way. His config file
+is his.
 
 ### 3. The clipboard is preserved — by not touching it
 
@@ -290,6 +293,45 @@ reappear under a new one.
 Measured: 6 threads was **3× worse** than 2 — the per-chunk work is tiny and
 thread synchronisation dominates. `config.validate()` refuses values above 4 and
 says why. This is not a knob to "optimise".
+
+### 6. Dictated text is typed. It does not press keys
+
+He dictates into a terminal, and reported dictate "pasting things in and then
+pressing enter" — an Enter he did not ask for runs whatever is on the command
+line, and he did not notice at the time. Everything else this product has got
+wrong has cost him time; this one can run commands.
+
+**Where the Enter came from.** whisper.cpp's server writes one line per segment.
+`output_str` in `examples/server/server.cpp` is
+`result << speaker << text << "\n"` for *every* segment, and that whole string
+is the `text` field of the JSON reply — so a two-sentence utterance came back as
+`"Sentence one.\nSentence two.\n"`. Nothing downstream had any reason to remove
+it: the cleanup pass collapses runs of `[ \t]` and deliberately leaves line
+breaks alone, and `injection_plan.plan_text` turns a newline into VK_RETURN
+because a keypress is the only thing that puts a line into another application.
+`WhisperServerClient._parse` now joins those lines with a space, which is what
+the same module already did on the `verbose_json` branch where the segments
+arrive separately.
+
+**And the wall behind it.** `[paste] line_breaks` decides what a line break
+does, and `"space"` is the default. `plan_text` will not emit a Return or a Tab
+unless the caller passes `allow_return=True`, so the guarantee is a property of
+the function rather than a check every caller is trusted to have done — a rule
+he writes, a spoken "new line", a model that starts writing line breaks of its
+own, all end up as a space. `line_breaks.apply` runs once in `injector.send`,
+above both paste methods, because a newline in the clipboard submits exactly as
+well as a synthesised one.
+
+`modifier_guard` is the same constraint from the other side: the hotkey listener
+ends the utterance when *any* key of the chord comes up, so Ctrl and Alt can
+still be down when the paste happens ~0.5 s later — and then `the` is Ctrl+T,
+Ctrl+H, Ctrl+E. It waits `[paste] modifier_wait_ms` for them and forces the
+key-up if they are still held.
+
+**The history says when it happened.** `injector.send` returns how many Returns
+it pressed and the entry records it. An Enter he did not notice at the time is
+then something he can look up an hour later, which is the only form of evidence
+that is any use for a thing you do not see happen.
 
 ---
 

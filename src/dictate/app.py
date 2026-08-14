@@ -34,8 +34,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import (
-    history as history_mod, instance, overlay_size, tray as tray_mod,
-    update as update_mod,
+    config_edit, history as history_mod, hotkey_switch, instance, overlay_size,
+    tray as tray_mod, update as update_mod,
 )
 from .cleanup.service import CleanupService
 from .config import Config
@@ -137,6 +137,13 @@ class Application:
             notify=self.notify,
             record=self.history.record,
         )
+        # The paste guard that clears his modifiers has to know when he has
+        # already started the next utterance: a synthesised key-up goes through
+        # the same keyboard hook the hotkey listens on, so forcing one then
+        # would end the recording he has just begun (`platform/modifier_guard`).
+        # Set here rather than passed to the factory, because the pipeline it
+        # asks does not exist until this line.
+        self.injector.is_recording = self.pipeline.is_recording
 
     # -- user-facing messages -------------------------------------------
 
@@ -241,8 +248,8 @@ class Application:
             update_now=self.update_now,
             open_history=self._open_history,
             delete_history=self._delete_history,
-            captions_smaller=lambda: self._resize_captions(-1),
-            captions_bigger=lambda: self._resize_captions(1),
+            set_hotkey=self.change_hotkey,
+            set_caption_size=self.set_caption_size,
         )
         try:
             self.tray = factory.make_tray_icon(
@@ -280,6 +287,7 @@ class Application:
         except DictateError:
             hotkey = self.cfg.hotkey.combination
         return tray_mod.TrayState(status=status, hotkey=hotkey,
+                                  hotkey_combination=self.cfg.hotkey.combination,
                                   model_resident=resident, detail=self._last_error,
                                   updating=self.update_in_flight(),
                                   history=self.history.enabled,
@@ -434,50 +442,147 @@ class Application:
         else:
             self.notify("info", "There was no dictation history to delete.")
 
-    def _resize_captions(self, delta: int) -> None:
-        """The tray's two size items: one step down or up the size ladder.
+    def set_caption_size(self, name: str) -> bool:
+        """The tray's "Caption size", and one named rung of `overlay_size`.
 
-        Two things happen, and the order is the point. The size on this
-        process's own config is changed first, so the *next* caption panel is
-        the new size - the overlay reads these values once per appearance
-        (`platform/windows/overlay.py`), so nothing on screen now moves or
-        resizes, which is the rule the whole look is built on. Then it is
-        written to his config file, so it is still the new size tomorrow.
+        Two things happen and the order is the point, though it is a gentler
+        order than the hotkey's above: nothing here can be refused by Windows.
 
-        A file that cannot be written is worth saying out loud but is not worth
+        1. the size on this process's own config changes, so the *next* caption
+           panel is the new size. The overlay reads these values once per
+           appearance, so a panel on screen right now does not move or resize -
+           rule 2b of the look, and it holds here by doing nothing;
+        2. then it is written to his config file, so it is still that size
+           tomorrow.
+
+        A file that cannot be written is worth saying out loud and is not worth
         losing the change over: he asked for smaller captions and he has them
         for this session. Nothing here may raise - it runs on the thread that
         owns the icon.
         """
-        name = overlay_size.step(self.cfg.overlay.size, delta)
-        if name == self.cfg.overlay.size:
-            self.notify("info", f"The captions are already as "
-                                f"{'small' if delta < 0 else 'big'} as dictate "
-                                f"makes them ({name}).")
-            return
-        # The two overrides go with it: "make it all smaller" is also the way
-        # back from a text size and a panel size he has pulled apart by hand.
+        try:
+            overlay_size.multiplier(name)
+        except DictateError as exc:
+            # A menu id from a copy of the menu built by an older version.
+            log.warning("%s", exc.message)
+            return False
+        if name == self.cfg.overlay.size and not self.cfg.overlay.text_size \
+                and not self.cfg.overlay.panel_size:
+            self.notify("info", f"The captions are already {name}.")
+            return False
+        # The two overrides go with it: choosing a size is also the way back
+        # from a text size and a panel size he has pulled apart by hand.
         self.cfg.overlay.size = name
         self.cfg.overlay.text_size = overlay_size.FOLLOW
         self.cfg.overlay.panel_size = overlay_size.FOLLOW
-        self.notify("info", f"Captions are now {name}. The next one you speak "
-                            f"will be that size.")
+        kept = self._persist_caption_size(name)
+        self.notify("info", f"Captions are now {name}. The next thing you say "
+                            f"will be that size."
+                            + ("" if kept else " It could not be written to your "
+                               "config file, so it lasts until dictate restarts."))
+        self._refresh_tray()
+        return True
+
+    def _persist_caption_size(self, name: str) -> bool:
+        """Write it into his `dictate.toml`, comments untouched.
+
+        Through `overlay_size`, which goes through `config_edit` - the same
+        writer the hotkey above uses, and the only one.
+        """
         if self.cfg.source_path is None:
-            self.notify("warning", "There is no config file to remember that in "
-                                   "- run `dictate init` to keep it.")
-            self._refresh_tray()
-            return
+            return False
         try:
-            overlay_size.write(Path(self.cfg.source_path), {"size": name})
+            overlay_size.write(Path(self.cfg.source_path), {
+                "size": name,
+                "text_size": overlay_size.FOLLOW,
+                "panel_size": overlay_size.FOLLOW,
+            })
         except DictateError as exc:
-            self.notify("warning", f"The new caption size is in use, but "
-                                   f"dictate could not write it to "
-                                   f"{self.cfg.source_path}: {exc.message}")
+            log.error("%s", exc.report())
+            return False
         except Exception:
             log.exception("could not write the caption size")
-            self.notify("warning", "The new caption size is in use, but dictate "
-                                   "could not write it to your config file.")
+            return False
+        return True
+
+    def change_hotkey(self, combination: str) -> bool:
+        """The tray's "Change the hotkey", and `dictate hotkey` for a copy that
+        is already running.
+
+        The order is the whole of the safety here, and it is not negotiable:
+
+        1. register the new combination - Windows is the only thing that can say
+           whether another program already owns it;
+        2. if it will not take it, put the old one back and say so. Nothing has
+           been written down, so a restart brings back the hotkey he had;
+        3. only once it IS registered, write it to his config file, so it
+           survives the restart.
+
+        Doing it the other way round - write, then try - is how somebody ends up
+        with a config naming a hotkey that does not work and no way in but a
+        text editor, which is the one thing he has said he will not do.
+
+        What is decided rather than performed lives in `hotkey_switch`, which is
+        pure and tested; this is the sequence and the two Windows calls.
+        """
+        decision = hotkey_switch.decide(
+            self.cfg.hotkey.combination, combination,
+            recording=self.pipeline.is_recording)
+        if not decision.act:
+            self.notify(decision.level, decision.message)
+            return False
+
+        previous, wanted = self.hotkey, decision.combination
+        try:
+            listener = factory.make_hotkey_listener(self.cfg, wanted)
+            previous.stop()
+            listener.register(self._on_hotkey_press, self._on_hotkey_release)
+            listener.start()
+        except Exception as exc:  # noqa: BLE001 - reported, and the old one is back
+            log.warning("the hotkey could not be changed to %s: %s", wanted, exc)
+            reason = exc.message if isinstance(exc, DictateError) else str(exc)
+            self._restore_hotkey(previous)
+            self.notify("error", hotkey_switch.refused(
+                wanted, self.cfg.hotkey.combination, reason))
+            return False
+
+        self.hotkey = listener
+        self.cfg.hotkey.combination = wanted
+        level, message = hotkey_switch.applied(
+            wanted, config_path=str(self.cfg.source_path) if self.cfg.source_path
+            else None, persisted=self._persist_hotkey(wanted))
+        self.notify(level, message)
         self._refresh_tray()
+        return True
+
+    def _persist_hotkey(self, combination: str) -> bool:
+        """Write it into his `dictate.toml`, one line, comments untouched."""
+        if self.cfg.source_path is None:
+            return False
+        try:
+            config_edit.write_string(self.cfg.source_path, "hotkey",
+                                     "combination", combination)
+        except DictateError as exc:
+            log.error("%s", exc.report())
+            return False
+        return True
+
+    def _restore_hotkey(self, listener) -> None:
+        """Put back the listener that was working a moment ago.
+
+        If even this fails there is no hotkey at all, which is dictate not
+        working - so it is said in the loudest terms this process has, and it
+        names the one command that fixes anything.
+        """
+        try:
+            listener.register(self._on_hotkey_press, self._on_hotkey_release)
+            listener.start()
+            self.hotkey = listener
+        except Exception:
+            log.exception("the previous hotkey could not be registered again")
+            self.notify("error", "dictate has no hotkey now: the one it was "
+                                 "using could not be registered again. Run "
+                                 "`dictate stop` and start it again.")
 
     def request_stop_from_tray(self) -> None:
         """The tray's Stop item. Exactly what `dictate stop` asks for, through

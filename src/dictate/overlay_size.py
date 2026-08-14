@@ -45,10 +45,9 @@ of a `compact` panel. Everything here is plain Python and tested anywhere
 
 from __future__ import annotations
 
-import os
-import re
 from pathlib import Path
 
+from . import config_edit
 from .errors import ConfigError
 
 #: Name -> what it multiplies the `[overlay]` pixel values by. In order, small
@@ -131,12 +130,6 @@ def step(name: str, delta: int) -> str:
     return ladder[max(0, min(len(ladder) - 1, index + delta))]
 
 
-def at_end(name: str, delta: int) -> bool:
-    """True when there is no rung `delta` steps from `name` - so a menu can grey
-    the item rather than offering something that would do nothing."""
-    return step(name, delta) == name
-
-
 def resolve(word: str) -> tuple[str, str]:
     """`(word, kind)` for what someone typed: a size name, or bigger/smaller.
 
@@ -182,120 +175,51 @@ def ladder(text: str, panel: str, font_size: float = 18.0) -> list[str]:
 # ---------------------------------------------------------------------------
 # Writing it back to his config file
 #
-# One line of one section, left exactly where it was, with every comment in the
-# file untouched: these are settings he changes from a preview and then forgets
-# about, not a file he wants rewritten by a program. Anything this cannot do
-# safely it refuses to do, and says which line to type instead.
+# Through `config_edit`, which is the one writer: it changes the line and leaves
+# every other byte - his comments, his CRLF endings, his byte order mark - the
+# byte it was, and it is what the tray's hotkey item already uses. A second
+# implementation of "edit one line of his TOML" is how two ideas of what is safe
+# start to drift apart.
 # ---------------------------------------------------------------------------
 
-#: A section header - `[overlay]` and anything else, including a `[[deletions]]`
-#: style table, so that "the next section starts here" is never wrong.
-_SECTION = re.compile(r"^\s*\[\[?[^\]]+\]\]?\s*(?:#.*)?$")
-_OVERLAY = re.compile(r"^\s*\[overlay\]\s*(?:#.*)?$")
+#: The section all of this lives in, and the keys this module will write. A key
+#: that is not one of these is a programming error, not a thing to guess at.
+SECTION = "overlay"
 
 
-def _assignment(key: str) -> re.Pattern[str]:
-    """`key = ...`, anchored, so that `size` never matches `text_size`."""
-    return re.compile(rf"^\s*{re.escape(key)}\s*=")
-
-
-def _quote(value: str) -> str:
-    if '"' in value or "\n" in value or "\\" in value:
-        raise ConfigError(
-            f"{value!r} cannot be written to a config file by dictate.",
-            "Quotes and backslashes have to be typed into the file by hand.",
-        )
-    return f'"{value}"'
-
-
-def set_in_text(text: str, values: dict[str, str]) -> str:
-    """`text` with each of `values` set in `[overlay]`. Nothing else is touched.
-
-    Three cases per key, in the order they are met: the key is already there and
-    its value is replaced in place, keeping any comment on the line; the section
-    is there without the key, and the line is added at the top of the section;
-    there is no `[overlay]` section at all, and one is added at the end.
-    """
+def _known(values: dict[str, str]) -> None:
     unknown = sorted(set(values) - set(KEYS))
     if unknown:
         raise ConfigError(
             f"dictate does not write {', '.join(unknown)} for you.",
             "Only " + ", ".join(KEYS) + " can be changed this way.",
         )
-    for key in KEYS:                       # a stable order, not dict order
+
+
+def set_in_text(text: str, values: dict[str, str]) -> str:
+    """`text` with each of `values` set in `[overlay]`. Nothing else is touched.
+
+    Written last-listed first, because `config_edit` adds a key it cannot find
+    at the *top* of the section: doing it in this order leaves a file that lists
+    them in `KEYS` order, whichever order he typed the flags in.
+    """
+    _known(values)
+    for key in reversed(KEYS):
         if key in values:
-            text = _set_one(text, key, values[key])
+            text = config_edit.set_string(text, SECTION, key, values[key])
     return text
 
 
-def _set_one(text: str, key: str, value: str) -> str:
-    line = f"{key} = {_quote(value)}"
-    assignment = _assignment(key)
-    lines = text.splitlines()
-    inside = False
-    header_at = None
-    for i, raw in enumerate(lines):
-        if _OVERLAY.match(raw):
-            inside, header_at = True, i
-            continue
-        if inside and _SECTION.match(raw):
-            break                          # the section ended without the key
-        if inside and assignment.match(raw):
-            lines[i] = _replace_value(raw, line)
-            return _joined(lines, text)
-    if header_at is None:
-        return _joined(lines + ["", "[overlay]", line], text)
-    lines.insert(header_at + 1, line)
-    return _joined(lines, text)
-
-
-def _replace_value(old: str, new: str) -> str:
-    """`new`, carrying over `old`'s trailing comment - at its own column.
-
-    The column matters more than it looks: these lines are a block of aligned
-    comments in the file `dictate init` writes, and one line jumping left is how
-    a file starts looking like something a program has been at.
-    """
-    head, hash_, comment = old.partition("#")
-    if not hash_:
-        return new
-    at = len(head)
-    return new + " " * max(3, at - len(new)) + "#" + comment
-
-
-def _joined(lines: list[str], original: str) -> str:
-    return "\n".join(lines) + ("\n" if original.endswith("\n") or not original else "")
-
-
 def write(path: Path, values: dict[str, str]) -> None:
-    """Set `values` in the config file at `path`.
+    """Set `values` in the config file at `path`, one setting at a time.
 
-    The write is a temporary file moved into place, for the reason the history
-    does the same thing: his config is not something an interrupted write may
-    leave half of.
+    One `os.replace` per setting rather than one for all of them, because that
+    is what `config_edit` offers and a second writer is not worth having: every
+    intermediate state is a valid config file that says something true, so an
+    interrupted `dictate look medium` leaves a smaller panel and not a broken
+    one.
     """
-    hand_edit = ", ".join(f'{k} = "{v}"' for k, v in values.items())
-    try:
-        text = path.read_text(encoding="utf-8-sig")
-    except FileNotFoundError:
-        raise ConfigError(
-            f"There is no config file at {path}, so there is nothing to change.",
-            "Run `dictate init` to write one, then try again.",
-        ) from None
-    except OSError as exc:
-        raise ConfigError(
-            f"Could not read {path}: {exc}",
-            f"Check the file is readable, or put {hand_edit} in its [overlay] "
-            f"section yourself.",
-        ) from exc
-    updated = set_in_text(text, values)
-    temp = path.with_name(path.name + ".writing")
-    try:
-        temp.write_text(updated, encoding="utf-8")
-        os.replace(temp, path)
-    except OSError as exc:
-        raise ConfigError(
-            f"Could not write {path}: {exc}",
-            f"Put {hand_edit} in the [overlay] section yourself - it is one "
-            f"line.",
-        ) from exc
+    _known(values)
+    for key in reversed(KEYS):        # see `set_in_text`, for the same reason
+        if key in values:
+            config_edit.write_string(Path(path), SECTION, key, values[key])

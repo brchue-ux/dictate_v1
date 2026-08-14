@@ -82,8 +82,8 @@ decoding_method = "greedy_search"
 #   dictate look                        what it is now, and the sizes there are
 #   dictate look smaller                one step down, no preview
 #
-# The notification-area icon has "Make the captions smaller" and "bigger" too,
-# and they take effect on the next thing you say.
+# The notification-area icon has a "Caption size" submenu too, with a tick on
+# the size you are using; it takes effect on the next thing you say.
 
 size = "compact"             # small, compact, medium, large, huge
 text_size = ""               # empty = follow `size`
@@ -247,6 +247,24 @@ per_char_delay_ms = 0.0
 clipboard_restore_delay_ms = 300
 # Add a space at the end so two dictations in a row do not run together.
 trailing_space = true
+# WHAT A LINE BREAK IN WHAT YOU DICTATED DOES.
+#
+# "space"   paste it as a space. The default, and the safe one: a line break
+#           has to be sent as a Return keypress, and in a terminal, a chat box
+#           or a search field RETURN SUBMITS - it would run your command line
+#           or send your half-written message.
+# "return"  send the Return. This is what you want if you dictate into a
+#           document and you use the "new line" and "new paragraph" spoken
+#           marks. Nothing else brings a line break back.
+#
+# Whichever you choose, dictate writes it down: an entry in your dictation
+# history says so when pasting it pressed Return.
+line_breaks = "space"
+# If you are still holding Ctrl, Alt or Win when the text is ready, dictate
+# waits this long for you to let go before typing - otherwise the target sees
+# Ctrl+T, Ctrl+H, Ctrl+E instead of "the". Anything still held after this is
+# sent a key-up. 0 turns the guard off.
+modifier_wait_ms = 400
 
 
 [tray]

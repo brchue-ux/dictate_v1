@@ -12,7 +12,7 @@ import struct
 import unittest
 from pathlib import Path
 
-from dictate import tray
+from dictate import overlay_size, tray
 
 
 def state(**kwargs) -> tray.TrayState:
@@ -74,39 +74,60 @@ def actions(done: list[str]) -> tray.TrayActions:
         update_now=lambda: done.append("update"),
         open_history=lambda: done.append("history"),
         delete_history=lambda: done.append("history-delete"),
-        captions_smaller=lambda: done.append("smaller"),
-        captions_bigger=lambda: done.append("bigger"),
+        set_hotkey=lambda combination: done.append(f"hotkey:{combination}"),
+        set_caption_size=lambda name: done.append(f"size:{name}"),
     )
 
 
+def hotkey_submenu(**kwargs) -> list[tray.MenuItem]:
+    items = {item.key: item for item in tray.menu(state(**kwargs))}
+    return list(items[tray.HOTKEY].children)
+
+
+def size_submenu(**kwargs) -> list[tray.MenuItem]:
+    items = {item.key: item for item in tray.menu(state(**kwargs))}
+    return list(items[tray.SIZE].children)
+
+
 class WhatItOffers(unittest.TestCase):
-    def test_the_menu_is_status_the_sizes_stop_restart_the_updates_and_the_log(self):
+    def test_the_menu_is_status_size_stop_restart_updates_hotkey_and_the_log(self):
         keys = [item.key for item in tray.menu(state())]
-        self.assertEqual(keys, [tray.STATUS, tray.SMALLER, tray.BIGGER,
-                                tray.STOP, tray.RESTART,
-                                tray.CHECK, tray.UPDATE, tray.LOG])
+        self.assertEqual(keys, [tray.STATUS, tray.SIZE, tray.STOP, tray.RESTART,
+                                tray.CHECK, tray.UPDATE, tray.HOTKEY, tray.LOG])
 
     def test_the_captions_can_be_resized_from_the_only_surface_there_is(self):
         """A panel that is a bit too big must not need a terminal: this is the
         one visible thing a copy started at logon has."""
         items = {item.key: item for item in tray.menu(state())}
-        self.assertEqual(items[tray.SMALLER].command, "dictate look smaller")
-        self.assertEqual(items[tray.BIGGER].command, "dictate look bigger")
-        self.assertFalse(items[tray.SMALLER].default)
-        self.assertFalse(items[tray.BIGGER].default)
+        self.assertEqual(items[tray.SIZE].command, "dictate look")
+        self.assertFalse(items[tray.SIZE].default)
+        offered = [i.key for i in items[tray.SIZE].children]
+        self.assertEqual(offered[:-1],
+                         [tray.SIZE_PREFIX + n for n in overlay_size.names()])
 
-    def test_a_size_step_that_does_not_exist_is_not_offered(self):
-        smallest = {i.key: i for i in tray.menu(state(caption_size="small"))}
-        self.assertFalse(smallest[tray.SMALLER].enabled)
-        self.assertTrue(smallest[tray.BIGGER].enabled)
-        biggest = {i.key: i for i in tray.menu(state(caption_size="huge"))}
-        self.assertTrue(biggest[tray.SMALLER].enabled)
-        self.assertFalse(biggest[tray.BIGGER].enabled)
+    def test_the_size_he_is_on_is_the_one_with_the_tick(self):
+        """The submenu is the only place that says what size the captions are,
+        which is half of what it is for."""
+        ticked = [i for i in size_submenu(caption_size="medium") if i.checked]
+        self.assertEqual([i.key for i in ticked],
+                         [tray.SIZE_PREFIX + "medium"])
 
-    def test_both_are_offered_when_nobody_has_said_what_size_it_is(self):
-        items = {i.key: i for i in tray.menu(state(caption_size=""))}
-        self.assertTrue(items[tray.SMALLER].enabled)
-        self.assertTrue(items[tray.BIGGER].enabled)
+    def test_with_nobody_having_said_the_shipped_size_is_the_ticked_one(self):
+        ticked = [i for i in size_submenu(caption_size="") if i.checked]
+        self.assertEqual([i.key for i in ticked],
+                         [tray.SIZE_PREFIX + overlay_size.DEFAULT])
+
+    def test_each_size_says_what_it_measures_and_names_its_command(self):
+        item = {i.key: i for i in size_submenu()}[tray.SIZE_PREFIX + "compact"]
+        self.assertIn("15 px", item.label)
+        self.assertEqual(item.command, "dictate look compact")
+
+    def test_the_things_a_menu_cannot_do_are_named_rather_than_hidden(self):
+        """The words and the box apart, and the font: a preview-and-judge job,
+        so the submenu's last line points at the command that does it."""
+        last = size_submenu()[-1]
+        self.assertFalse(last.enabled)
+        self.assertIn("dictate overlay", last.command)
 
     def test_a_history_being_kept_can_be_opened_and_deleted_from_here(self):
         """The tray is the only surface a logon-started copy has, so it is
@@ -170,14 +191,95 @@ class WhatItOffers(unittest.TestCase):
         wired = actions(done)
         for item in tray.menu(state(history=True)):
             wired.invoke(item.key)
-        self.assertEqual(done, ["smaller", "bigger", "stop", "restart", "check",
-                                "update", "log", "history", "history-delete"])
+        self.assertEqual(done, ["stop", "restart", "check", "update", "log",
+                                "history", "history-delete"])
+
+    def test_a_size_chosen_from_the_submenu_reaches_the_action_with_its_name(self):
+        """Like the hotkey's, the key carries the value, so the Win32 side
+        still knows nothing but a string."""
+        done: list[str] = []
+        wired = actions(done)
+        self.assertTrue(wired.invoke(tray.SIZE_PREFIX + "medium"))
+        self.assertEqual(done, ["size:medium"])
+
+    def test_a_size_action_that_was_never_supplied_does_nothing(self):
+        bare = tray.TrayActions(stop=lambda: None, restart=lambda: None,
+                                open_log=lambda: None,
+                                check_updates=lambda: None,
+                                update_now=lambda: None)
+        self.assertFalse(bare.invoke(tray.SIZE_PREFIX + "medium"))
+        self.assertFalse(actions([]).invoke(tray.SIZE_PREFIX))
 
     def test_an_unknown_id_does_nothing_rather_than_raising(self):
         done: list[str] = []
         self.assertFalse(actions(done).invoke("nonsense"))
         self.assertFalse(actions(done).invoke(tray.STATUS))
         self.assertEqual(done, [])
+
+    def test_the_hotkey_item_is_a_submenu_of_combinations(self):
+        """He does not have a settings window and will not edit a config file,
+        so the combinations are on the menu and each one is a click."""
+        items = {item.key: item for item in tray.menu(state())}
+        self.assertEqual(items[tray.HOTKEY].command, "dictate hotkey")
+        keys = [child.key for child in items[tray.HOTKEY].children]
+        self.assertTrue(all(k.startswith(tray.HOTKEY_PREFIX)
+                            for k in keys[:-1]), keys)
+        self.assertEqual(keys[-1], tray.HOTKEY_OTHER)
+
+    def test_the_one_he_is_using_is_ticked_and_is_on_the_list(self):
+        children = hotkey_submenu(hotkey_combination="ctrl + alt + space")
+        ticked = [child for child in children if child.checked]
+        self.assertEqual([child.key for child in ticked],
+                         [tray.HOTKEY_PREFIX + "ctrl + alt + space"])
+
+    def test_a_hotkey_of_his_own_is_added_to_the_list_rather_than_hidden(self):
+        """A menu of four alternatives that does not include what he is using
+        cannot be read: there is nothing to say which one he has."""
+        children = hotkey_submenu(hotkey_combination="ctrl + shift + f")
+        ticked = [child for child in children if child.checked]
+        self.assertEqual([child.key for child in ticked],
+                         [tray.HOTKEY_PREFIX + "control + shift + f"])
+        self.assertIn("Ctrl + Shift + F", ticked[0].label)
+
+    def test_a_hotkey_that_cannot_be_parsed_does_not_break_the_menu(self):
+        """The menu is the only surface a logon-started copy has. A config with
+        nonsense in it must not be able to empty it."""
+        children = hotkey_submenu(hotkey_combination="++")
+        self.assertTrue(children)
+        self.assertFalse([child for child in children if child.checked])
+
+    def test_every_combination_names_the_command_that_sets_it(self):
+        for child in hotkey_submenu():
+            if child.key.startswith(tray.HOTKEY_PREFIX):
+                combination = child.key[len(tray.HOTKEY_PREFIX):]
+                self.assertEqual(child.command,
+                                 f'dictate hotkey "{combination}"')
+
+    def test_anything_else_is_a_line_that_names_the_command_and_is_not_clickable(self):
+        other = hotkey_submenu()[-1]
+        self.assertEqual(other.key, tray.HOTKEY_OTHER)
+        self.assertFalse(other.enabled)
+        self.assertIn("dictate hotkey", other.command)
+
+    def test_choosing_one_hands_the_combination_to_the_app(self):
+        done: list[str] = []
+        wired = actions(done)
+        self.assertTrue(wired.invoke(tray.HOTKEY_PREFIX + "ctrl + alt + d"))
+        self.assertEqual(done, ["hotkey:ctrl + alt + d"])
+
+    def test_the_submenu_parent_itself_does_nothing(self):
+        done: list[str] = []
+        self.assertFalse(actions(done).invoke(tray.HOTKEY))
+        self.assertFalse(actions(done).invoke(tray.HOTKEY_OTHER))
+        self.assertFalse(actions(done).invoke(tray.HOTKEY_PREFIX))
+        self.assertEqual(done, [])
+
+    def test_a_hotkey_action_that_was_never_supplied_does_nothing(self):
+        bare = tray.TrayActions(stop=lambda: None, restart=lambda: None,
+                                open_log=lambda: None,
+                                check_updates=lambda: None,
+                                update_now=lambda: None)
+        self.assertFalse(bare.invoke(tray.HOTKEY_PREFIX + "ctrl + alt + d"))
 
     def test_a_history_action_that_was_never_supplied_does_nothing(self):
         """A menu id from before the history was turned off must not reach a
@@ -519,10 +621,13 @@ class WhatTheAppTellsIt(unittest.TestCase):
             said: list[str] = []
             app.notify = lambda level, message: said.append(message)
 
-            app._resize_captions(-1)
-            self.assertEqual(app.cfg.overlay.size, "large")
-            self.assertEqual(config_mod.load(path).overlay.size, "large")
-            self.assertIn("large", said[0])
+            self.assertTrue(app.set_caption_size("small"))
+            self.assertEqual(app.cfg.overlay.size, "small")
+            self.assertEqual(config_mod.load(path).overlay.size, "small")
+            self.assertIn("small", said[0])
+            # Nothing on screen moves: the overlay reads this once, when the
+            # next panel appears.
+            self.assertFalse(app.overlay.states)
 
     def test_resizing_from_the_tray_puts_a_split_pair_back_together(self):
         import tempfile
@@ -537,40 +642,48 @@ class WhatTheAppTellsIt(unittest.TestCase):
             app = self.app()
             app.cfg = config_mod.load(path)
             app.notify = lambda level, message: None
-            app._resize_captions(-1)
+            app.set_caption_size("medium")
             self.assertEqual(app.cfg.overlay.text_size, "")
+            self.assertEqual(config_mod.load(path).overlay.text_size, "")
 
-    def test_the_end_of_the_ladder_is_said_rather_than_done_silently(self):
+    def test_choosing_the_size_it_is_already_on_says_so_and_writes_nothing(self):
         app = self.app()
         said: list[str] = []
         app.notify = lambda level, message: said.append(message)
         app.cfg.overlay.size = "small"
-        app._resize_captions(-1)
-        self.assertEqual(app.cfg.overlay.size, "small")
+        self.assertFalse(app.set_caption_size("small"))
         self.assertIn("already", said[0])
+
+    def test_a_size_from_an_older_menu_does_nothing_rather_than_raising(self):
+        """It runs on the thread that owns the icon, so nothing here may raise
+        - and a menu built by a version with different names is the way an
+        unknown one could arrive."""
+        app = self.app()
+        app.notify = lambda level, message: None
+        self.assertFalse(app.set_caption_size("enormous"))
+        self.assertEqual(app.cfg.overlay.size, "compact")
 
     def test_a_config_it_cannot_write_still_resizes_for_this_session(self):
         """He asked for smaller captions. A read-only config file is worth
-        saying out loud and is not worth refusing him over - and nothing here
-        may raise, because it runs on the thread that owns the icon."""
+        saying out loud and is not worth refusing him over."""
         from pathlib import Path
 
         app = self.app()
         said: list[str] = []
         app.notify = lambda level, message: said.append(message)
         app.cfg.source_path = Path("/nowhere/at/all/dictate.toml")
-        app._resize_captions(1)
+        self.assertTrue(app.set_caption_size("medium"))
         self.assertEqual(app.cfg.overlay.size, "medium")
-        self.assertIn("could not write", said[-1])
+        self.assertIn("could not be written", said[-1])
 
     def test_no_config_file_at_all_is_a_message_and_not_a_crash(self):
         app = self.app()
         said: list[str] = []
         app.notify = lambda level, message: said.append(message)
         app.cfg.source_path = None
-        app._resize_captions(1)
+        self.assertTrue(app.set_caption_size("medium"))
         self.assertEqual(app.cfg.overlay.size, "medium")
-        self.assertIn("dictate init", said[-1])
+        self.assertIn("could not be written", said[-1])
 
     def test_the_menu_shows_the_size_the_running_copy_is_using(self):
         app = self.app()
