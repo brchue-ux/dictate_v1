@@ -397,12 +397,17 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `update.find_install_root()` answers that from the module's own location, because
   the install is editable and updating some other copy would appear to succeed and
   change nothing. The source arrives as an API archive through the GitHub CLI (the
-  repo is private and dictate never handles a token — `gh` does), is unpacked and
+  repo is public since 2026-08-14, but `gh` needs a sign-in for any API call and
+  dictate never handles the token — `gh` does), is unpacked and
   checked outside the install, and is written over a complete backup with a journal
   in `%LOCALAPPDATA%\dictate\updates`; an interrupted run is put back by the next
   `dictate update` or by `--restore`. It never rebuilds whisper.cpp or the models,
   and it never forces a stop. `docs/DESIGN.md` → "Things deliberately not done"
   carries the reasoning; `src/dictate/update.py` carries the ordering.
+  **A 404 from GitHub names no cause**: while the repo was private it was read as
+  "sign in", and that was the fourth instance of this project's oldest defect
+  class the day the repo went public. `api_failure`'s docstring carries it; 401
+  and 403 still name a cause because their answer establishes one.
 - **`.dictate-install.json` is what `dictate --version` cannot be.** The version
   string is 0.1.0 and always will be, so the install folder carries its own record
   of the revision AND a SHA-256 per file — that is what makes "you have edited these

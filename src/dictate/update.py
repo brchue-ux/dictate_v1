@@ -630,10 +630,17 @@ def run_gh(args: list[str], *, executable: str | None = None, find=find_gh,
 def api_failure(path: str, result: ToolResult, repo: str) -> DictateError:
     """Turn what `gh` said into something worth reading.
 
-    The interesting case is 404: on a private repository that is what "you are
-    not signed in" looks like, because GitHub will not admit the repository
-    exists to someone who cannot see it. Saying "not found" alone would send him
-    looking for a deleted repository that is sitting right there.
+    401 and 403 name a cause because the answer itself establishes one: GitHub
+    is saying the stored sign-in is bad, or that it is being refused. 404 does
+    not. While the repository was private a 404 was read as "you cannot see it,
+    so sign in" - GitHub answers 404 rather than 403 to someone who cannot see a
+    private repository. dictate_v1 is public, so that reasoning is gone and the
+    remaining causes (renamed or deleted, a mistyped `--repo`, a fault at
+    GitHub's end) are not told apart by anything in the answer. So the 404
+    branch reports what GitHub said, offers the one check that settles it - open
+    the repository in a browser - and says outright that it cannot tell which
+    cause applies. It must not prescribe signing in: none of those causes is
+    fixed by it, and he would do it, watch it fail again and be no wiser.
     """
     said = result.said
     if "401" in said or "bad credentials" in said.lower():
@@ -645,11 +652,16 @@ def api_failure(path: str, result: ToolResult, repo: str) -> DictateError:
         )
     if "404" in said or "not found" in said.lower():
         return DictateError(
-            f"GitHub would not show dictate's source ({repo}).\n"
+            f"GitHub answered 'not found' for dictate's source ({repo}).\n"
             f"It said: {said}",
-            f"{repo} is a private repository, so this is what it looks like "
-            "when the account\nthis PC is signed in as cannot see it - or when "
-            "it is not signed in at all.\n" + SIGN_IN_REMEDY,
+            f"dictate cannot tell from that answer which of these it is.\n"
+            f"Open https://github.com/{repo} in your browser:\n"
+            "  If it opens, the repository is there and this was a fault at "
+            "GitHub's end or\n  on the way to it - run `dictate update` again.\n"
+            "  If it does not, the repository has been renamed or removed, or "
+            "the name dictate\n  was given is wrong - `dictate update --repo "
+            "<owner/name>` is what sets it.\n"
+            "Nothing has been changed.",
         )
     if "403" in said:
         return DictateError(

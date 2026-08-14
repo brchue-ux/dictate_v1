@@ -227,9 +227,9 @@ future change ever does need one of them, it will say so and name the exact
 `setup.ps1 -Only <step>` to run. Your settings in `%APPDATA%\dictate` are never
 opened either.
 
-**The first time, it will ask you to sign in to GitHub.** The source is in a
-private repository, and your browser only gets in because you are already signed
-in there — a command has no such luck. So:
+**The first time, it will ask you to sign in to GitHub.** The repository is
+public, so the sign-in is not about being let in: the GitHub CLI asks GitHub for
+things through its API, and it will not make an API call at all without one. So:
 
 ```powershell
 winget install --id GitHub.cli     # if you do not have it
@@ -977,7 +977,7 @@ Windows machines. These are things that used to be on the "never run" list:
   holding it, and never mention the internet. This is the failure that stopped
   the product owner updating, and a machine with no Windows cannot produce it:
   file locks are mandatory there and advisory everywhere else.
-* **That `dictate update` really fetches this private repository.** CI signs the
+* **That `dictate update` really fetches this repository.** CI signs the
   GitHub CLI in with the workflow's own token, makes a throwaway editable install
   that is deliberately behind, and runs the real command: the source archive for
   a real revision comes back, a file that is behind is brought forward, a file no

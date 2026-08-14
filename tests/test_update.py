@@ -387,14 +387,23 @@ class TheSignIn(unittest.TestCase):
         self.assertIn("refused the sign-in", error.message)
         self.assertIn("gh auth login", error.remedy)
 
-    def test_a_private_repository_is_not_reported_as_a_deleted_one(self):
-        """404 on a private repository is what "you are not signed in" looks
-        like. Saying only "not found" sends him looking for a repository that is
-        sitting right there."""
+    def test_a_404_names_no_cause_it_cannot_establish(self):
+        """The repository is public, so a 404 no longer means "you cannot see
+        it". It means renamed, removed, mistyped or a fault - and nothing in the
+        answer tells those apart, so the message says so instead of guessing.
+        The claim it must never make again is that the repository is private,
+        and the remedy it must never prescribe again is signing in."""
         error = update.api_failure(
             "repos/x/y", update.ToolResult(1, b"", b"gh: Not Found (HTTP 404)"), "x/y")
-        self.assertIn("private repository", error.remedy)
-        self.assertIn("gh auth login", error.remedy)
+        whole = error.message + "\n" + error.remedy
+        self.assertNotIn("private", whole.lower())
+        self.assertNotIn("gh auth login", whole)
+        self.assertNotIn("sign in", whole.lower())
+        self.assertIn("Not Found (HTTP 404)", error.message)
+        self.assertIn("cannot tell", error.remedy)
+        self.assertIn("https://github.com/x/y", error.remedy)
+        self.assertIn("--repo", error.remedy)
+        self.assertIn("Nothing has been changed", error.remedy)
 
     def test_being_offline_says_so_and_says_nothing_was_changed(self):
         error = update.api_failure(
