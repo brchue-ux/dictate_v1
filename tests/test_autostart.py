@@ -946,6 +946,24 @@ class TheTwoReadingsAreCompared(unittest.TestCase):
         self.assertIn("whisper-server", text)
         self.assertIn("dictate stop", text)
 
+    def test_a_process_the_task_left_alive_is_named_even_once_the_run_is_counted_done(self):
+        """Windows can stop counting the run while the process it started is
+        still there - it is what a copy that broke out of the task's job looks
+        like, and what the modal box looks like once Task Scheduler has given
+        up on it. The process reading leads either way; only the first sentence
+        changes."""
+        verdict = autostart.reconcile(
+            autostart.parse_status(SCHTASKS_FINISHED, registered=True),
+            _logon(alive=True), a_holder())
+        self.assertEqual(verdict.verdict, "not-the-copy")
+        self.assertTrue(verdict.disagrees)
+        alone = autostart.reconcile(
+            autostart.parse_status(SCHTASKS_FINISHED, registered=True),
+            _logon(alive=True), None)
+        self.assertEqual(alone.verdict, "alive-but-serving-nobody")
+        self.assertIn("no longer counts that run as running",
+                      "\n".join(alone.lines))
+
     def test_the_copy_the_task_started_is_reported_as_agreement(self):
         verdict = autostart.reconcile(
             autostart.parse_status(SCHTASKS_RUNNING, registered=True),

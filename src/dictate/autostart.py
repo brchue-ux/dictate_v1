@@ -1244,21 +1244,30 @@ def reconcile(status: AutostartStatus, logon: LogonStart,
             "started - these two readings agree.",
         ])
 
-    if alive is True and logon.alive is True:
+    # The process reading leads whenever it is known, and it leads whether or
+    # not Windows has finished counting the run: a process the task started,
+    # alive, that is not the copy answering the hotkey is the finding either
+    # way. Windows' bookkeeping only decides how the first sentence opens.
+    if logon.alive is True and not matched:
+        what = f" ({logon.image})" if logon.image else ""
         if holder is None:
+            opening = (
+                [f"  Windows says the run it{started_at} has not finished, and "
+                 "the process it",
+                 f"  started ({_which(logon.pid)}{what}) IS still there."]
+                if alive is True else
+                [f"  the process the logon task started ({_which(logon.pid)}"
+                 f"{what}) is still there,",
+                 "  though Windows no longer counts that run as running."])
             return Reconciliation("alive-but-serving-nobody", [
-                DISAGREE_MARK,
-                f"  Windows says the run it{started_at} has not finished, and the "
-                f"process it",
-                f"  started ({_which(logon.pid)}"
-                + (f", {logon.image}" if logon.image else "") + ") IS still there.",
-                "  But nothing holds dictate's lock, so DICTATE IS NOT RUNNING. That",
+                DISAGREE_MARK, *opening,
+                "  Nothing holds dictate's lock, so DICTATE IS NOT RUNNING. That",
                 "  process is alive without being a working dictate.",
             ] + _dialog_note(logon) + _ask_for_evidence())
         return Reconciliation("not-the-copy", [
             DISAGREE_MARK,
-            f"  the process the logon task started ({_which(logon.pid)}"
-            + (f", {logon.image}" if logon.image else "") + ") is still",
+            f"  the process the logon task started ({_which(logon.pid)}{what}) "
+            "is still",
             "  running, and it is NOT the copy answering the hotkey - that one is",
             f"  {_which(holder.pid)}, {_how_started(holder)}. Whatever the logon "
             "task still has",
