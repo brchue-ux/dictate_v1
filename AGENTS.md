@@ -242,6 +242,19 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   keystrokes reach nothing — it would install and start and do nothing. It is a
   per-user Task Scheduler logon task; `src/dictate/autostart.py` carries the reasoning
   and the settings that are load-bearing.
+- **Starting at logon is offered in three places and turned on in none of them.**
+  The mechanism was finished and on his machine for hours while he asked for the
+  feature; what failed was that the only way in was a typed command. So setup asks
+  at the START of its run (`Get-AutostartPlan`, and `Read-YesNoWithTimeout`, which
+  can never hang an unattended install — no answer is no), the tray has **Start
+  when I log in** (`tray.autostart_item`, tick = state, command = what a click
+  does), and a console `dictate run` says it once (`autostart.console_hint`).
+  Adding it to Windows startup without him choosing is still forbidden. None of
+  the three keeps its own idea of whether it is on: the two in-process ones read
+  `autostart.registered_or_unknown` and setup reads `dictate autostart status`
+  back, so they cannot disagree. `None` means "could not read", and is never
+  reported as OFF. The tray's answer is refreshed on the slow watch loop
+  (`app.AUTOSTART_POLL_S`), never from `_tray_state` — the hotkey path calls that.
 - **Only one copy may run**, or two hooks fight over the hotkey and two servers over
   the port. `src/dictate/instance.py` holds an exclusive byte-range lock for the life
   of the process, so the OS releases it on any kind of death and there is no such

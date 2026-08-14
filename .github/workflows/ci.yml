@@ -405,6 +405,16 @@ jobs:
           if ($status -match 'could not read') { throw 'status could not parse what schtasks said' }
           if ($status -notmatch 'pythonw\.exe') { throw 'status did not read back what the task runs' }
 
+          # And the installer reading the SAME answer. setup.ps1 keeps no idea
+          # of its own about whether this is on; it reads this output back, so
+          # what it prints at the end of an install and what `dictate autostart
+          # status` says here cannot disagree. Against the real thing, not a
+          # sample of it.
+          . .\scripts\setup-lib.ps1
+          if ((Test-AutostartStatusOn -Output $status) -ne $true) {
+            throw 'the installer read a registered logon task as not on'
+          }
+
       - name: Turning it off leaves nothing behind
         shell: pwsh
         run: |
@@ -419,6 +429,11 @@ jobs:
           $status = dictate autostart status 2>&1 | Out-String
           Write-Host $status
           if ($status -notmatch 'start at logon:  OFF') { throw 'status did not report it as off' }
+
+          . .\scripts\setup-lib.ps1
+          if ((Test-AutostartStatusOn -Output $status) -ne $false) {
+            throw 'the installer read a removed logon task as still on'
+          }
 
           # Twice must be safe: he will run it again when he is not sure.
           $again = dictate autostart disable 2>&1 | Out-String
@@ -446,7 +461,10 @@ jobs:
           into it - the logon trigger, `InteractiveToken`, `LeastPrivilege`,
           `IgnoreNew`, and the windowless interpreter. `dictate autostart status`
           reads Windows' own answer back and reports it. `disable` removes it,
-          Windows agrees it is gone, and running it twice is safe.
+          Windows agrees it is gone, and running it twice is safe. The
+          installer's own reading of that same output (`Test-AutostartStatusOn`,
+          which is how setup.ps1 knows whether to offer this) is checked against
+          the real answer both ways round, so the two cannot disagree.
 
           **Not proved, and cannot be here:** that it starts at logon. A hosted
           runner never logs on, so nobody has seen the task fire, seen dictate

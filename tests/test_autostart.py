@@ -447,6 +447,45 @@ class TheStatusReport(TempState):
         self.assertIn(str(os.getpid()), lines)
 
 
+class WhereHeWillActuallyRead(TempState):
+    """The three places that mention starting at logon while doing something
+    else - the end of setup, the tray menu, and the startup banner.
+
+    They exist because the feature was finished, correct and installed on his
+    machine, and he asked for it anyway: the only way in was a typed command he
+    had never been shown. Two of the three read `registered_or_unknown`, and
+    that reads `is_registered`, so no two of them can answer differently.
+    """
+
+    def test_a_console_start_is_told_it_did_not_have_to_be_one(self):
+        lines = autostart.console_hint(False)
+        self.assertTrue(lines)
+        self.assertIn("dictate autostart enable", "\n".join(lines))
+        # Once and briefly. This is a banner, not a campaign.
+        self.assertLessEqual(len(lines), 6)
+
+    def test_a_copy_that_already_starts_at_logon_is_told_nothing(self):
+        self.assertEqual(autostart.console_hint(True), [])
+
+    def test_an_answer_nobody_could_read_is_not_turned_into_it_is_off(self):
+        """The whole of the honesty here: `None` is not `False`."""
+        self.assertEqual(autostart.console_hint(None), [])
+
+    @unittest.skipIf(sys.platform == "win32", "this is the non-Windows answer")
+    def test_off_windows_the_answer_is_unknown_rather_than_off(self):
+        self.assertIsNone(autostart.registered_or_unknown())
+
+    def test_schtasks_refusing_to_answer_is_unknown_rather_than_off(self):
+        from unittest import mock
+
+        def refuse():
+            raise DictateError("schtasks could not be run", "…")
+
+        with mock.patch.object(sys, "platform", "win32"), \
+                mock.patch.object(autostart, "is_registered", refuse):
+            self.assertIsNone(autostart.registered_or_unknown())
+
+
 class TheCommands(TempState):
     """The command surface, through `cli.main`, the way he would type it."""
 

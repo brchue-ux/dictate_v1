@@ -389,6 +389,50 @@ def registered_command() -> str:
     return query_status().task_to_run
 
 
+def registered_or_unknown() -> bool | None:
+    """Is the logon task there? `None` when that could not be answered.
+
+    `status_lines` is the report; this is the same question asked in passing, by
+    the two places that mention starting at logon while doing something else -
+    the tray icon's menu and the startup banner of a console `dictate run`. Both
+    of them ask *this*, and this asks `is_registered`, so the answer on the menu
+    and the answer from `dictate autostart status` are the same answer.
+
+    Three values, not two, and the third is the point: off Windows, or when
+    schtasks cannot be run at all, neither caller may say "it is off" - that is a
+    claim about something nobody read. They say nothing instead.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        return is_registered()
+    except DictateError:
+        return None
+
+
+def console_hint(registered: bool | None) -> list[str]:
+    """What a console `dictate run` says about starting at logon, or nothing.
+
+    The product owner read that startup banner many times over one evening while
+    asking for exactly this feature, and it never mentioned it.
+
+    Only when the answer is a definite no: a copy that already starts at logon
+    has nothing to learn from this, and an unreadable answer is not a licence to
+    guess. It is four lines, said once at startup and never again - the console
+    is not somewhere to nag from, and there are now two other places (the tray
+    menu, the end of setup) where the same offer is made.
+    """
+    if registered is not False:
+        return []
+    return [
+        "this window has to stay open for the hotkey to work - but it does not",
+        "have to be this way. dictate can start when you log in, with no window",
+        "at all, and the icon by the clock is how you stop it:",
+        "  dictate autostart enable",
+        "which is also on that icon's menu, as \"Start when I log in\".",
+    ]
+
+
 def enable(cfg: Config, *, config_path: str | None = None,
            executable: str | None = None) -> list[str]:
     """Register the logon task. Returns the lines to show the user."""
