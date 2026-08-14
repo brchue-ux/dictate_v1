@@ -77,8 +77,15 @@ class WindowTracker(Protocol):
 
 @runtime_checkable
 class TextInjector(Protocol):
-    def send(self, text: str, target: TargetWindow | None) -> None:
-        """Deliver `text` to `target`. Raises `InjectionError` on failure."""
+    def send(self, text: str, target: TargetWindow | None) -> int:
+        """Deliver `text` to `target`. Raises `InjectionError` on failure.
+
+        Returns how many Return keypresses delivering it involved - 0 unless
+        `[paste] line_breaks = "return"`, because dictated text is typed and
+        does not press keys (`platform/line_breaks.py`). It is the one thing a
+        paste can do rather than write, so it is reported rather than assumed,
+        and it is what the dictation history records.
+        """
 
     @property
     def describe(self) -> str: ...

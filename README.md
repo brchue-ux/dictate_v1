@@ -241,10 +241,11 @@ You can also right-click **the dictate icon by the clock** — it is there
 whenever dictate is running, including when it started by itself at logon and
 there is no window anywhere. It shows what dictate is doing (grey while it
 waits, gold while it is listening to you, red if something needs reading), and
-carries **Stop**, **Restart**, **Check for updates**, **Update now** and **Open
-the log folder**. Each one is labelled with the command that does the same thing,
-so the icon teaches you the commands rather than replacing them. Turn it off with
-`[tray] enabled = false` if you would rather not have it.
+carries **Stop**, **Restart**, **Check for updates**, **Update now**, **Change
+the hotkey** and **Open the log folder**. Each one is labelled with the command
+that does the same thing, so the icon teaches you the commands rather than
+replacing them. Turn it off with `[tray] enabled = false` if you would rather
+not have it.
 
 ### If something is wrong later
 
@@ -488,6 +489,52 @@ the clipboard at all. (`[paste] method = "clipboard"` is available for the few
 apps that mishandle long keystroke runs; that mode saves and restores your
 clipboard, and refuses to clobber contents it cannot faithfully put back.)
 
+### What is pasted cannot press Enter
+
+**A line break is pasted as a space, not as a Return.** Return has to be a real
+keypress — it is the only way to put a line into another application — and in a
+terminal, a chat box or a search field a Return *submits*: it runs your command
+line, or sends the half-written message. Dictation is not allowed to do that on
+its own.
+
+Whisper's own output is what made this matter: `whisper-server` returns one line
+per segment, so any dictation it split in two arrived with a newline in the
+middle of it and pasted an Enter into the middle of a command. That is fixed
+where it comes from, and this is the wall behind it.
+
+If you dictate into a document and you want line breaks — including the "new
+line" and "new paragraph" spoken marks — turn them on deliberately:
+
+```toml
+[paste]
+line_breaks = "return"
+```
+
+Nothing else brings a Return back. And whichever you choose, it is written down:
+an entry in [what you have dictated](#what-you-have-dictated-kept-so-you-can-look-back-over-it)
+says when pasting it pressed Return.
+
+The same setting's neighbour, `modifier_wait_ms`, covers the other way a paste
+can become a command: if you are still holding Ctrl or Alt when the text is
+ready, dictate waits a moment for you to let go rather than typing `the` into
+the window as Ctrl+T, Ctrl+H, Ctrl+E.
+
+### Changing the hotkey
+
+Right-click the dictate icon by the clock → **Change the hotkey**, and pick one.
+It takes effect immediately and is written into your `dictate.toml`, so it is
+still there tomorrow. If Windows will not give dictate that combination —
+usually because another program already owns it — the old one stays and nothing
+is written.
+
+The same thing typed, for a combination that is not on the menu:
+
+```powershell
+dictate hotkey                        # what it is now, and what the tray offers
+dictate hotkey "ctrl + alt + k"       # set it (a running copy keeps the old one
+                                      #  until you restart it, and says so)
+```
+
 ---
 
 ## What was verified, and what was not
@@ -500,7 +547,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 672 tests, run and passing
+### Verified anywhere — 742 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -586,11 +633,21 @@ python -m unittest discover -s tests -t .
   first one, the one that replaces a crash, and the one an idle release brings
   back. The containment itself is Windows' job and is proved on Windows; that
   nothing slips past it is proved here.
-* **What the tray icon says and offers**: the tooltip, the status line, the six
-  menu items — eight when a dictation history is being kept, and neither of the
-  two extra ones when it is off — that each names the command that does the same
-  thing, and that the icon's own bytes are an icon Windows can read whose colour
-  is the status.
+* **What the tray icon says and offers**: the tooltip, the status line, the
+  seven menu items — nine when a dictation history is being kept, and neither of
+  the two extra ones when it is off — that each names the command that does the
+  same thing, and that the icon's own bytes are an icon Windows can read whose
+  colour is the status.
+* **That nothing dictated can press Enter**, from the shape of whisper-server's
+  own reply through the cleanup pass to the key events: the segment delimiter
+  that produced the stray Enters, the flattening that would catch any other line
+  break, and that a Return takes an explicit `[paste] line_breaks = "return"` —
+  including through a spoken "new line", which is the one rule that inserts one
+  on purpose.
+* **What the tray does about the hotkey**: which combinations it offers and why,
+  that the one in use is always among them and ticked, that a change is refused
+  mid-sentence, and that the config file it writes comes back with one line
+  different — comments, byte order mark and CRLF endings intact.
 * **That an update chosen from the icon runs somewhere else** — a separate
   process, with a console of its own, breaking out of the job that would take it
   down when this copy stops. Doing the work inside the copy being replaced is
@@ -641,7 +698,7 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
-* **The 672 tests above, on Windows** as well as on Linux — which is where the
+* **The 742 tests above, on Windows** as well as on Linux — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.
 * **That a supervised child process cannot outlive its parent.** CI starts a
@@ -742,6 +799,17 @@ misbehaves.
   they appear, and whether clicking Delete really removes the file on his
   machine. The store underneath is tested here; `os.startfile` opening the file
   for him has run nowhere, and `dictate history` from a prompt is the fallback.
+* **Changing the hotkey from the icon, as a click.** Whether the submenu opens
+  and the tick shows against the right line, and — the part only his machine can
+  answer — whether Windows hands over the new combination while dictate is
+  running, and hands the old one back if it will not. The order is what makes
+  that safe (register first, write the config only once it worked), and the
+  order is tested here; the two Windows calls it is wrapped around are not.
+  `dictate hotkey "…"` from a prompt is the fallback, and CI runs that.
+* **Whether a paste ever arrives with Ctrl still held.** dictate now waits for
+  it and then forces the key up, but nobody here has held a chord through a
+  paste. What it costs if the guard is wrong is a wait of at most 400 ms;
+  `[paste] modifier_wait_ms = 0` turns it off.
 * **What the overlay looks like.** Nobody here has run it. The colours, the type
   and the layout arithmetic were checked by rendering the panel at exactly the
   sizes the code uses, with the real Fira Code file, against a white document, a
@@ -795,5 +863,5 @@ transcription.
 
 ## Further reading
 
-`docs/DESIGN.md` — the settled decisions, the five constraints that break the
+`docs/DESIGN.md` — the settled decisions, the six constraints that break the
 product if ignored, the threading model, and what was deliberately not done.

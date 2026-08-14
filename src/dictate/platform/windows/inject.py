@@ -20,6 +20,13 @@ a file list), this falls back to `sendinput` for that paste rather than
 destroying it. That behaviour is deliberate: silently eating the user's
 clipboard would be worse than being slightly slower.
 
+**Neither method may press a key on his behalf.** Whatever the text contains, it
+is delivered as characters unless `[paste] line_breaks` says otherwise: a line
+break becomes a space rather than a Return, because Return runs the command line
+in a terminal. That is applied here, once, to the payload both methods share -
+so the clipboard route cannot submit either, which it would if only the
+keystroke plan knew about it. See `platform/line_breaks.py`.
+
 Prior art: `PinW/whisper-key-local` (MIT) uses the same SendInput +
 KEYEVENTF_UNICODE approach for its own typing path, and reading it confirmed the
 layout-independent Unicode route was the right one. No code was copied.
@@ -32,6 +39,7 @@ import logging
 import time
 
 from ...errors import InjectionError
+from .. import line_breaks, modifier_guard
 from ..base import TargetWindow
 from ..injection_plan import KeyEvent, chunk, plan_text
 from .win32 import (
@@ -52,6 +60,19 @@ log = logging.getLogger(__name__)
 
 #: Clipboard formats we can save and put back byte-for-byte.
 _RESTORABLE_FORMATS = {CF_UNICODETEXT}
+
+#: Virtual keys for the three modifiers `modifier_guard` names. Control and Menu
+#: (which is Alt) are the "either side" codes, which is what `GetAsyncKeyState`
+#: answers for and what a key-up has to name to clear both. Windows has no such
+#: combined code, so both of its keys are listed.
+VK_MENU = 0x12
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
+_MODIFIER_VKS = {
+    modifier_guard.CONTROL: (VK_CONTROL,),
+    modifier_guard.ALT: (VK_MENU,),
+    modifier_guard.WINDOW: (VK_LWIN, VK_RWIN),
+}
 
 
 def _to_input(ev: KeyEvent) -> INPUT:
@@ -89,23 +110,42 @@ class WindowsTextInjector:
 
     def __init__(self, tracker, *, method: str = "sendinput", restore_focus: bool = True,
                  per_char_delay_ms: float = 0.0, clipboard_restore_delay_ms: int = 300,
-                 trailing_space: bool = True) -> None:
+                 trailing_space: bool = True, line_break_mode: str = line_breaks.SPACE,
+                 modifier_wait_ms: int = 400, is_recording=None) -> None:
         self.tracker = tracker
         self.method = method
         self.restore_focus = restore_focus
         self.per_char_delay_ms = per_char_delay_ms
         self.clipboard_restore_delay_ms = clipboard_restore_delay_ms
         self.trailing_space = trailing_space
+        self.line_break_mode = line_break_mode
+        self.modifier_wait_ms = modifier_wait_ms
+        #: "Is he speaking right now?", set by `app.Application` once the
+        #: pipeline exists. The modifier guard needs it and nothing else here
+        #: does - see `_settle_modifiers`.
+        self.is_recording = is_recording
 
     @property
     def describe(self) -> str:
-        if self.method == "clipboard":
-            return "clipboard paste (Ctrl+V), previous clipboard restored"
-        return "direct keystroke synthesis (SendInput, Unicode) - clipboard untouched"
+        how = ("clipboard paste (Ctrl+V), previous clipboard restored"
+               if self.method == "clipboard"
+               else "direct keystroke synthesis (SendInput, Unicode) - "
+                    "clipboard untouched")
+        breaks = ("line breaks sent as Return"
+                  if self.line_break_mode == line_breaks.RETURN
+                  else "line breaks pasted as a space, never Return")
+        return f"{how}, {breaks}"
 
-    def send(self, text: str, target: TargetWindow | None) -> None:
+    def send(self, text: str, target: TargetWindow | None) -> int:
+        """Deliver `text`. Returns how many Return keypresses it sent.
+
+        That count is what the dictation history reports, so an Enter he did not
+        ask for is something he can look up afterwards. With the default
+        `[paste] line_breaks` it is always 0, and that is the point of it.
+        """
         if not text:
-            return
+            return 0
+        text = line_breaks.apply(text, self.line_break_mode)
         payload = text + " " if self.trailing_space and not text.endswith(" ") else text
 
         if target is not None and self.restore_focus:
@@ -118,15 +158,41 @@ class WindowsTextInjector:
                     "your clipboard.",
                 )
 
+        self._settle_modifiers()
         if self.method == "clipboard":
             self._send_via_clipboard(payload)
         else:
             self._send_via_keystrokes(payload)
+        return line_breaks.returns_in(payload)
+
+    # -- his own modifiers ------------------------------------------------
+
+    def _settle_modifiers(self) -> None:
+        """Do not type into a chord he has not finished letting go of.
+
+        Never allowed to raise: this is a guard in front of the paste, and a
+        paste that failed because the guard failed would be strictly worse than
+        the shortcuts it exists to prevent.
+        """
+        try:
+            held, forced = modifier_guard.settle(
+                _modifier_is_down, _force_modifiers_up,
+                wait_s=self.modifier_wait_ms / 1000.0,
+                recording=self.is_recording)
+        except Exception:
+            log.debug("could not check which modifier keys are held", exc_info=True)
+            return
+        if forced:
+            log.warning("pasted with %s still held; sent the key-up so the text "
+                        "was typed rather than run as shortcuts", ", ".join(forced))
+        elif held:
+            log.debug("waited for %s to come up before pasting", ", ".join(held))
 
     # -- keystroke path --------------------------------------------------
 
     def _send_via_keystrokes(self, text: str) -> None:
-        events = plan_text(text)
+        events = plan_text(text,
+                           allow_return=self.line_break_mode == line_breaks.RETURN)
         if self.per_char_delay_ms > 0:
             gap = self.per_char_delay_ms / 1000.0
             for batch in chunk(events, 2):  # one character at a time
@@ -171,6 +237,21 @@ class WindowsTextInjector:
                     _set_clipboard_text(saved)
             except InjectionError:
                 log.exception("could not restore the previous clipboard contents")
+
+
+def _modifier_is_down(name: str) -> bool:
+    """Is he physically holding this modifier right now?
+
+    `GetAsyncKeyState`'s high bit is "down now", which is the question - the low
+    bit is "pressed since last asked" and would answer a different one.
+    """
+    return any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in _MODIFIER_VKS[name])
+
+
+def _force_modifiers_up(names: list[str]) -> None:
+    """Tell Windows those keys are up. Key-ups only: this never presses anything."""
+    events = [KeyEvent("vk", vk, True) for name in names for vk in _MODIFIER_VKS[name]]
+    _send(events)
 
 
 def _open_clipboard(attempts: int = 12, gap_s: float = 0.02) -> None:

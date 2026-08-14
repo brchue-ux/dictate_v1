@@ -33,7 +33,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import history as history_mod, instance, tray as tray_mod, update as update_mod
+from . import (
+    config_edit, history as history_mod, hotkey_switch, instance,
+    tray as tray_mod, update as update_mod,
+)
 from .cleanup.service import CleanupService
 from .config import Config
 from .engines.residency import ResidentModel, Residency
@@ -134,6 +137,13 @@ class Application:
             notify=self.notify,
             record=self.history.record,
         )
+        # The paste guard that clears his modifiers has to know when he has
+        # already started the next utterance: a synthesised key-up goes through
+        # the same keyboard hook the hotkey listens on, so forcing one then
+        # would end the recording he has just begun (`platform/modifier_guard`).
+        # Set here rather than passed to the factory, because the pipeline it
+        # asks does not exist until this line.
+        self.injector.is_recording = self.pipeline.is_recording
 
     # -- user-facing messages -------------------------------------------
 
@@ -238,6 +248,7 @@ class Application:
             update_now=self.update_now,
             open_history=self._open_history,
             delete_history=self._delete_history,
+            set_hotkey=self.change_hotkey,
         )
         try:
             self.tray = factory.make_tray_icon(
@@ -275,6 +286,7 @@ class Application:
         except DictateError:
             hotkey = self.cfg.hotkey.combination
         return tray_mod.TrayState(status=status, hotkey=hotkey,
+                                  hotkey_combination=self.cfg.hotkey.combination,
                                   model_resident=resident, detail=self._last_error,
                                   updating=self.update_in_flight(),
                                   history=self.history.enabled)
@@ -427,6 +439,85 @@ class Application:
             self.notify("info", "The dictation history has been deleted.")
         else:
             self.notify("info", "There was no dictation history to delete.")
+
+    def change_hotkey(self, combination: str) -> bool:
+        """The tray's "Change the hotkey", and `dictate hotkey` for a copy that
+        is already running.
+
+        The order is the whole of the safety here, and it is not negotiable:
+
+        1. register the new combination - Windows is the only thing that can say
+           whether another program already owns it;
+        2. if it will not take it, put the old one back and say so. Nothing has
+           been written down, so a restart brings back the hotkey he had;
+        3. only once it IS registered, write it to his config file, so it
+           survives the restart.
+
+        Doing it the other way round - write, then try - is how somebody ends up
+        with a config naming a hotkey that does not work and no way in but a
+        text editor, which is the one thing he has said he will not do.
+
+        What is decided rather than performed lives in `hotkey_switch`, which is
+        pure and tested; this is the sequence and the two Windows calls.
+        """
+        decision = hotkey_switch.decide(
+            self.cfg.hotkey.combination, combination,
+            recording=self.pipeline.is_recording)
+        if not decision.act:
+            self.notify(decision.level, decision.message)
+            return False
+
+        previous, wanted = self.hotkey, decision.combination
+        try:
+            listener = factory.make_hotkey_listener(self.cfg, wanted)
+            previous.stop()
+            listener.register(self._on_hotkey_press, self._on_hotkey_release)
+            listener.start()
+        except Exception as exc:  # noqa: BLE001 - reported, and the old one is back
+            log.warning("the hotkey could not be changed to %s: %s", wanted, exc)
+            reason = exc.message if isinstance(exc, DictateError) else str(exc)
+            self._restore_hotkey(previous)
+            self.notify("error", hotkey_switch.refused(
+                wanted, self.cfg.hotkey.combination, reason))
+            return False
+
+        self.hotkey = listener
+        self.cfg.hotkey.combination = wanted
+        level, message = hotkey_switch.applied(
+            wanted, config_path=str(self.cfg.source_path) if self.cfg.source_path
+            else None, persisted=self._persist_hotkey(wanted))
+        self.notify(level, message)
+        self._refresh_tray()
+        return True
+
+    def _persist_hotkey(self, combination: str) -> bool:
+        """Write it into his `dictate.toml`, one line, comments untouched."""
+        if self.cfg.source_path is None:
+            return False
+        try:
+            config_edit.write_string(self.cfg.source_path, "hotkey",
+                                     "combination", combination)
+        except DictateError as exc:
+            log.error("%s", exc.report())
+            return False
+        return True
+
+    def _restore_hotkey(self, listener) -> None:
+        """Put back the listener that was working a moment ago.
+
+        If even this fails there is no hotkey at all, which is dictate not
+        working - so it is said in the loudest terms this process has, and it
+        names the one command that fixes anything.
+        """
+        try:
+            listener.register(self._on_hotkey_press, self._on_hotkey_release)
+            listener.start()
+            self.hotkey = listener
+        except Exception:
+            log.exception("the previous hotkey could not be registered again")
+            self.notify("error", "dictate has no hotkey now: the one it was "
+                                 "using could not be registered again. Run "
+                                 "`dictate stop` and start it again.")
 
     def request_stop_from_tray(self) -> None:
         """The tray's Stop item. Exactly what `dictate stop` asks for, through
