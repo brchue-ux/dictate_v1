@@ -137,6 +137,11 @@ $script:VerifyDeferred = New-Object System.Collections.Generic.List[string]
 #: "here is the command", never as "it is off".
 $script:AutostartOn = $null
 $script:AutostartLines = @()
+#: Whether a copy is RUNNING at the end of the run, read back the same way.
+#: Turning the logon task on starts one, so this decides whether the report ends
+#: with "run this to start it" or with "it is already going". $null again means
+#: nobody read it.
+$script:DictateRunning = $null
 
 function Get-WhisperSourceDir { return (Join-Path $Root 'whisper.cpp') }
 function Get-ModelsDir { return (Join-Path $Root 'models') }
@@ -229,6 +234,7 @@ function Invoke-AutostartChoice {
     param([Parameter(Mandatory = $true)][string]$Plan)
 
     $script:AutostartOn = $null
+    $script:DictateRunning = $null
     if ($Plan -eq 'enable') {
         $run = $null
         try {
@@ -241,6 +247,17 @@ function Invoke-AutostartChoice {
             $script:AutostartOn = $true
             $script:AutostartLines = @($run.Output -split "`r?`n" |
                 ForEach-Object { $_.TrimEnd() })
+            # `enable` also starts the windowless copy, and whether THAT worked
+            # is a second question. Ask dictate rather than assume, for the same
+            # reason as everything else here: the report and
+            # `dictate autostart status` may not be able to disagree.
+            try {
+                $after = Invoke-Dictate -Arguments @('autostart', 'status')
+                Write-SetupLog $after.Output
+                $script:DictateRunning = Test-DictateRunningOn -Output $after.Output
+            } catch {
+                Write-SetupLog "autostart status could not be read after enable: $($_.Exception.Message)"
+            }
             return
         }
         # The install is fine; the one thing it was asked to do afterwards is
@@ -264,6 +281,7 @@ function Invoke-AutostartChoice {
         $status = Invoke-Dictate -Arguments @('autostart', 'status')
         Write-SetupLog $status.Output
         $script:AutostartOn = Test-AutostartStatusOn -Output $status.Output
+        $script:DictateRunning = Test-DictateRunningOn -Output $status.Output
     } catch {
         Write-SetupLog "autostart status could not be read: $($_.Exception.Message)"
     }
@@ -1542,7 +1560,13 @@ Invoke-AutostartChoice -Plan $AutostartPlan
 Write-Host '-----------------------------------------------------------------------' -ForegroundColor Green
 Write-Host ('Done in ' + (Format-Duration $overall.Elapsed.TotalSeconds) + '.') -ForegroundColor Green
 Write-Host ''
-if ($script:AutostartOn -eq $true) {
+if ($script:AutostartOn -eq $true -and $script:DictateRunning -eq $true) {
+    # It was started as part of turning autostart on, and dictate confirmed that
+    # when it was asked afterwards. Telling him to run it now would be telling
+    # him to start a second copy, which is refused.
+    Write-Host 'dictate starts with your Windows session from now on, and it is running'
+    Write-Host 'already - there is a dictate icon by the clock, and nothing to type.'
+} elseif ($script:AutostartOn -eq $true) {
     Write-Host 'dictate starts with your Windows session from now on. To use it before'
     Write-Host 'you next log in, open a new PowerShell window and run:'
     Write-Host '  dictate run' -ForegroundColor White
