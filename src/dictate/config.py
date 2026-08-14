@@ -65,12 +65,32 @@ class AudioConfig:
 
 @dataclass
 class CaptionConfig:
+    """The model behind the words that appear while he is still speaking.
+
+    Until 2026-08-13 this was `sherpa-onnx-streaming-zipformer-en-2023-06-26`,
+    trained on LibriSpeech alone - read audiobooks, transcribed in upper case
+    with no punctuation. Dictation is spontaneous speech, and it showed: on the
+    repo's own `assets/jfk.wav` that model printed "AND SAW MY FELLOW AMERICANS
+    ASK NOT WHAT'S YOUR COUNTRY CAN DO FOR YOU AS BUT YOU CAN DO FOR YOUR
+    COUNT" (MEASURED). What ships now is NVIDIA's cache-aware streaming
+    FastConformer, whose training set includes Fisher and Switchboard -
+    conversational speech - and which got that clip right, complete, and at
+    every noise level down to 5 dB SNR. `scripts/models.psd1` carries the
+    provenance; `dictate captions <clip.wav>` re-runs the measurement on his
+    own voice.
+
+    It is still lower case and still unpunctuated, which is deliberate rather
+    than a leftover: the caption stays on screen until the pasted text lands,
+    and `docs/DESIGN.md` constraint 4 leans on it being visibly not that text.
+    """
+
     enabled: bool = True
-    #: Directory holding the sherpa-onnx streaming Zipformer (see scripts/fetch-models.ps1).
-    model_dir: str = r"C:\dictate-gpu\models\sherpa-onnx-streaming-zipformer-en-2023-06-26"
-    encoder: str = "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
-    decoder: str = "decoder-epoch-99-avg-1-chunk-16-left-128.onnx"
-    joiner: str = "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
+    #: Directory holding the sherpa-onnx caption model (see scripts/fetch-models.ps1).
+    model_dir: str = \
+        r"C:\dictate-gpu\models\sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-80ms-int8"
+    encoder: str = "encoder.int8.onnx"
+    decoder: str = "decoder.int8.onnx"
+    joiner: str = "joiner.int8.onnx"
     tokens: str = "tokens.txt"
     #: 2 is the measured optimum. Raising this makes captions slower, not faster.
     num_threads: int = 2

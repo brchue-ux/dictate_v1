@@ -125,11 +125,28 @@ class CaptionOverlay(Protocol):
 
 AudioCallback = Callable[[bytes], None]
 
+#: Called from the audio thread when the operating system reports that input
+#: audio was thrown away before dictate ever saw it, with how many callbacks
+#: were affected. Not a warning about quality: PortAudio's own header says of
+#: `paInputOverflow` that "data prior to the first sample of the input buffer
+#: was discarded due to an overflow", so a recording this happened in has a
+#: hole in it, and the hole is in the audio BOTH the captions and the pasted
+#: text are made from. Must be as cheap as `AudioCallback` - it runs on the
+#: same thread, in the same callback.
+AudioLossCallback = Callable[[int], None]
+
 
 @runtime_checkable
 class AudioCapture(Protocol):
-    def start(self, callback: AudioCallback) -> None:
-        """Begin delivering PCM16 mono blocks to `callback`."""
+    def start(self, callback: AudioCallback,
+              on_loss: AudioLossCallback | None = None) -> None:
+        """Begin delivering PCM16 mono blocks to `callback`.
+
+        `on_loss` is told when the OS discarded input audio. It is optional so
+        that a caller which does not care - `dictate devices`, a smoke test -
+        does not have to supply one, and never so that the loss can go
+        unreported in the running app: `app.Application.start` passes it.
+        """
 
     def stop(self) -> None:
         """Stop delivering blocks. Safe to call when not started."""

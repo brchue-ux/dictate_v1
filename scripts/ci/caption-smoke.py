@@ -8,8 +8,9 @@ the adapter was written from its documented API.
 What it proves when it passes on a Windows runner:
 
   * sherpa-onnx installs and loads on Windows
-  * the streaming Zipformer files the setup downloads are the ones the adapter
-    asks for, by name
+  * the caption-model files the setup downloads are the ones the adapter asks
+    for, by name - which is what catches the model being changed in one place
+    and not the other
   * feeding it audio in the same 32 ms blocks the app uses produces words
   * closing the session really does destroy the caption text, which is the
     guarantee that caption text never reaches the document

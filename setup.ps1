@@ -941,6 +941,16 @@ $($init.Output.Trim())
     $captionDir = Join-Path (Get-ModelsDir) $CaptionModel.Name
     if (Test-Path -LiteralPath $captionDir) {
         Set-TomlValue -Path $configPath -Section 'captions' -Key 'model_dir' -Value $captionDir -Comment $stamp
+        # The three file names go with the folder, always. The caption model
+        # changed on 2026-08-13 and the names inside it changed with it, so a
+        # config written before then would otherwise keep pointing at
+        # encoder-epoch-99-... inside a folder that has no such file - and
+        # dictate would start with live captions off and a message nobody was
+        # expecting. Setting the folder without the names is the bug.
+        Set-TomlValue -Path $configPath -Section 'captions' -Key 'encoder' -Value $CaptionModel.Encoder -Comment $stamp
+        Set-TomlValue -Path $configPath -Section 'captions' -Key 'decoder' -Value $CaptionModel.Decoder -Comment $stamp
+        Set-TomlValue -Path $configPath -Section 'captions' -Key 'joiner'  -Value $CaptionModel.Joiner  -Comment $stamp
+        Set-TomlValue -Path $configPath -Section 'captions' -Key 'tokens'  -Value $CaptionModel.Tokens  -Comment $stamp
     } elseif ($SkipCaptions) {
         Set-TomlValue -Path $configPath -Section 'captions' -Key 'enabled' -Value 'false' -Comment "$stamp (-SkipCaptions)"
     }

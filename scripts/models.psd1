@@ -26,23 +26,45 @@
         Label  = 'Whisper model'
     }
 
-    # The streaming Zipformer behind the live captions. GitHub publishes no
-    # checksum for this release asset (it predates the digest field on their
-    # API), so this SHA-256 was measured by downloading the file and hashing it
-    # on 2026-08-13.
+    # The words that appear on screen while he is still speaking.
+    #
+    # CHANGED 2026-08-13. This was sherpa-onnx-streaming-zipformer-en-2023-06-26
+    # (310 MB), trained on LibriSpeech alone - read audiobooks, transcribed in
+    # upper case with no punctuation. Dictation is spontaneous speech and it
+    # showed: on assets/jfk.wav that model printed "AND SAW MY FELLOW AMERICANS
+    # ASK NOT WHAT'S YOUR COUNTRY CAN DO FOR YOU AS BUT YOU CAN DO FOR YOUR
+    # COUNT", and it got worse with noise. Do not put it back without measuring
+    # the replacement first - `dictate captions <clip.wav>` is that measurement.
+    #
+    # This is NVIDIA's cache-aware streaming FastConformer (NeMo
+    # stt_en_fastconformer_hybrid_large_streaming_80ms), int8, exported to ONNX
+    # by the sherpa-onnx project. English only, CC-BY-4.0, and its training set
+    # includes Fisher and Switchboard - conversational telephone speech - which
+    # is why it survives ordinary talking. Size and SHA-256 are GitHub's own
+    # published digest for the release asset, read from
+    # https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/tags/asr-models
+    # on 2026-08-13 and cross-checked by hashing the downloaded file.
     Captions = @{
-        Name   = 'sherpa-onnx-streaming-zipformer-en-2023-06-26'
-        Uri    = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2'
-        Bytes  = 310414022
-        Sha256 = '639e25b578e9e997131402199419c13a941f8e4e198e2da1ce57dbf5cf401282'
-        Label  = 'Live-caption model'
+        Name    = 'sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-80ms-int8'
+        Uri     = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-80ms-int8.tar.bz2'
+        Bytes   = 102813625
+        Sha256  = '7bd33a914e93370a1ba9c2066d9e841bdcad8613fa2a00537c1ae15d851a14d8'
+        Label   = 'Live-caption model'
+        # The four names setup.ps1 writes into [captions]. They are here rather
+        # than only in the config template because the file names inside the
+        # folder changed with the model, and a config that keeps the old names
+        # beside the new folder finds nothing and turns captions off.
+        Encoder = 'encoder.int8.onnx'
+        Decoder = 'decoder.int8.onnx'
+        Joiner  = 'joiner.int8.onnx'
+        Tokens  = 'tokens.txt'
         # Checked after unpacking: these are the names config/dictate.example.toml
         # expects under [captions].
-        Files  = @(
+        Files   = @(
             'tokens.txt',
-            'encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx',
-            'decoder-epoch-99-avg-1-chunk-16-left-128.onnx',
-            'joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx'
+            'encoder.int8.onnx',
+            'decoder.int8.onnx',
+            'joiner.int8.onnx'
         )
     }
 

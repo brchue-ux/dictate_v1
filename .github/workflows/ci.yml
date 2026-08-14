@@ -7,7 +7,7 @@
 # GPU. So this workflow exists to catch everything that can be caught without
 # one, on the same operating system the product actually runs on.
 #
-#   PROVED HERE  the Python package installs on Windows and its 672 tests pass;
+#   PROVED HERE  the Python package installs on Windows and its 767 tests pass;
 #                the installer's own logic works on Windows PowerShell 5.1,
 #                including a download that really is interrupted and resumed;
 #                whisper.cpp compiles from source with the Vulkan backend on
@@ -828,7 +828,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/models
-          key: caption-model-sherpa-zipformer-en-2023-06-26
+          key: caption-model-sherpa-nemo-fast-conformer-en-80ms-int8
 
       - name: Download the live-caption model, through the installer's own downloader
         if: steps.caption-cache.outputs.cache-hit != 'true'
@@ -865,6 +865,24 @@ jobs:
           "@ | Set-Content -LiteralPath $config -Encoding UTF8
           python scripts\ci\caption-smoke.py $config assets\jfk.wav country
 
+      - name: "`dictate captions` measures that model on Windows"
+        shell: pwsh
+        run: |
+          # The command he is told to run when the captions look wrong. It is
+          # the same model, the same clip and the same 32 ms blocks as the smoke
+          # test above; what this adds is that the CLI wiring around it works on
+          # Windows, because a measurement command nobody can start measures
+          # nothing.
+          $config = "$env:RUNNER_TEMP\captions.toml"
+          $out = python -m dictate --config $config captions assets\jfk.wav 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "dictate captions exited $LASTEXITCODE" }
+          foreach ($needle in 'first words', 'updates every', 'keeps up', 'country') {
+            if ($out -notmatch [regex]::Escape($needle)) {
+              throw "dictate captions did not report '$needle'"
+            }
+          }
+
       - name: Summary
         if: always()
         shell: pwsh
@@ -874,9 +892,11 @@ jobs:
 
           Proved: `pip install -e ".[windows]"` resolves and installs on Windows;
           sounddevice, numpy, sherpa-onnx and global-hotkeys all import; the
-          streaming Zipformer loads and turns the bundled clip into caption text;
-          and closing a caption session destroys that text, which is what keeps
-          it out of the document.
+          streaming caption model loads and turns the bundled clip into caption text;
+          closing a caption session destroys that text, which is what keeps it out
+          of the document; and `dictate captions` measures that model end to end,
+          which is the command he is pointed at when the words on screen look
+          wrong.
 
           Not proved: the caption **overlay** - the always-on-top, click-through,
           never-focused window - which needs a real desktop. Nor the microphone

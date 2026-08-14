@@ -13,6 +13,8 @@
     dictate history       open what you have dictated, or delete it
     dictate overlay       show the caption overlay with sample text
     dictate transcribe    push a .wav through the resident GPU pass and time it
+    dictate captions      measure the live-caption model on a .wav: when the
+                          first words appear, how often they change, what it heard
 
 `doctor`, `init`, `clean` and `punctuate` all work on any platform, on purpose:
 they are the commands you want when the app will not start. So does
@@ -367,11 +369,13 @@ def cmd_history(args: argparse.Namespace) -> int:
 
 
 #: What the preview shows. Ordinary dictated speech, in the shape the caption
-#: model actually produces it - upper case, no punctuation - because that is what
-#: has to look right, not a designer's sample sentence.
+#: model actually produces it - lower case, no punctuation - because that is what
+#: has to look right, not a designer's sample sentence. It was upper case until
+#: the caption model changed on 2026-08-13; if it ever stops matching what the
+#: model prints, this line is wrong, not the model.
 _PREVIEW_WORDS = (
-    "SO THE THING I WANTED TO SAY IS THAT THE OVERLAY SHOULD BE CALM ENOUGH TO "
-    "READ WITHOUT LOOKING STRAIGHT AT IT WHILE I AM STILL TALKING"
+    "so the thing i wanted to say is that the overlay should be calm enough to "
+    "read without looking straight at it while i am still talking"
 ).split()
 
 
@@ -523,6 +527,56 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_captions(args: argparse.Namespace) -> int:
+    """Measure the live-caption model on a WAV file, with nothing on screen.
+
+    The companion to `dictate transcribe`, and the command to run when the words
+    that appear while you speak are wrong or late. It uses YOUR config, so it
+    measures the model you are actually running, and it prints when the first
+    words appeared, how often they changed after that, and what the model
+    finally heard - which is what makes "is this model any good on my voice"
+    answerable with one recording instead of an argument.
+
+    To compare two models: point [captions] model_dir (and encoder / decoder /
+    joiner) at the other one and run it again on the same file.
+    """
+    from .audio import wav as wav_mod
+    from .engines.measure import measure
+    from .engines.sherpa_stream import SherpaStreamingTranscriber
+    from .logging_setup import configure
+
+    cfg = _load_config(args)
+    configure(cfg.logging.level, cfg.logging.file, quiet_console=False)
+    pcm, rate = wav_mod.wav_to_pcm16(Path(args.wav).read_bytes())
+    if rate != cfg.audio.sample_rate:
+        _err(f"! {args.wav} is {rate} Hz and the caption model expects "
+             f"{cfg.audio.sample_rate} Hz. The numbers below are still real, "
+             f"but they are not the numbers dictate would produce.")
+
+    transcriber = SherpaStreamingTranscriber.from_config(cfg)
+    _out(f"model             {transcriber.describe}")
+    _out(f"block size        {cfg.audio.block_ms} ms, the same as the microphone's")
+    _out("")
+    # Load the model before timing anything, exactly as `app._warm_captions`
+    # does at startup. Otherwise the first block carries the model load and the
+    # RTF below describes a cold start he never actually pays for.
+    transcriber.start_session().close()
+    result = measure(transcriber.start_session, pcm, sample_rate=rate,
+                     block_ms=cfg.audio.block_ms)
+    for line in result.report():
+        _out(line)
+    _out("")
+    _out("what it heard:")
+    _out(f"  {result.text}" if result.text else "  (nothing)")
+    if args.timeline:
+        _out("")
+        _out("as it arrived:")
+        for at, text in result.updates:
+            _out(f"  {at:6.2f}s | {text}")
+    transcriber.close()
+    return 0
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -630,9 +684,10 @@ def build_parser() -> argparse.ArgumentParser:
                                "without dictating")
     p_ov.add_argument("--repeat", type=int, default=1,
                       help="run the appear-and-fade cycle this many times")
-    p_ov.add_argument("--rate", type=int, default=320,
-                      help="milliseconds between words (default: 320, the real "
-                           "caption update interval)")
+    p_ov.add_argument("--rate", type=int, default=160,
+                      help="milliseconds between words (default: 160, the real "
+                           "caption update interval - MEASURED, see "
+                           "`dictate captions`)")
     p_ov.add_argument("--error", action="store_true",
                       help="show the error state instead")
     p_ov.set_defaults(func=cmd_overlay)
@@ -641,6 +696,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr.add_argument("wav")
     p_tr.add_argument("--repeat", type=int, default=3)
     p_tr.set_defaults(func=cmd_transcribe)
+
+    p_cap = sub.add_parser(
+        "captions",
+        help="measure the live-caption model on a .wav file: when the first "
+             "words appear, how often they change, and what it heard")
+    p_cap.add_argument("wav")
+    p_cap.add_argument("--timeline", action="store_true",
+                       help="print every change, with how far into the "
+                            "recording it happened")
+    p_cap.set_defaults(func=cmd_captions)
 
     return parser
 

@@ -14,9 +14,20 @@
 
     1. Whisper large-v3-turbo, f16 (1.62 GB) - the transcription that actually
        gets pasted. Runs on the GPU through the Vulkan build.
-    2. The sherpa-onnx streaming Zipformer (310 MB) - the words that appear on
-       screen while you are still talking. This one is display-only; its text is
-       thrown away when you let go of the hotkey.
+    2. The sherpa-onnx streaming caption model (98 MB) - the words that appear
+       on screen while you are still talking. This one is display-only; its text
+       is thrown away when you let go of the hotkey.
+
+    The caption model CHANGED on 2026-08-13, from a LibriSpeech-trained
+    Zipformer to NVIDIA's streaming FastConformer, because the old one got whole
+    phrases wrong on ordinary speech. This script downloads it, but it does not
+    touch your config - that is the install step. To do both:
+
+        powershell -ExecutionPolicy Bypass -File setup.ps1 -Only models,install
+
+    which points [captions] at the new folder AND at the new file names inside
+    it; the names changed with the model, so the folder alone is not enough. The
+    old folder is left where it is - delete it yourself once you are happy.
 
 .PARAMETER Root
     Where to put them. Default C:\dictate-gpu\models. A path ending in \models

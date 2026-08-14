@@ -12,7 +12,7 @@ them — the things that will break the product if a later change ignores them.
 ```
    hold hotkey ──► mic ──► utterance buffer (the whole take, kept in memory)
                      │
-                     ├──► streaming Zipformer, CPU, 2 threads, ~320 ms updates
+                     ├──► streaming FastConformer, CPU, 2 threads, ~160 ms updates
                      │       └──► caption overlay — DISPLAY ONLY,
                      │            discarded on release, never pasted
                      │
@@ -38,7 +38,7 @@ Post-release budget: **2–4 s**. Estimated GPU pass: **0.4–1.0 s**.
 | 1 | **GPU route: whisper.cpp + Vulkan** | Vulkan ships with the ordinary Adrenalin driver. The ROCm alternative is not merely riskier — it is blocked on this exact card: AMD ships rocBLAS kernels for gfx1100+ only, and **zero** files for gfx1030, in all of ROCm 7.1.1 / 7.2 / 7.2.1. Whisper is almost entirely matrix multiplies, so that path has nothing to run them with. `scripts/check-rocm-gfx1030.py` re-checks this in 30 seconds. |
 | 2 | **Build whisper.cpp from source** | No official Windows Vulkan binary exists (whisper.cpp #3673, #3691, both open). The alternative was a stranger's zip. Building it also yields `parakeet-cli.exe`, and — the part that matters operationally — lets you roll back when a Vulkan regression ships, which has happened before on this exact architecture (llama.cpp #22992). `scripts/build-whisper-vulkan.ps1` prints the commit it built and tells you to write it down. |
 | 3 | **Keep Whisper `large-v3-turbo`** | Parakeet was only ever on the table because turbo missed the budget *on CPU*. Moving the batch pass to the GPU removes that reason, and keeping Whisper honours what was originally asked for. |
-| 4 | **Streaming Zipformer for captions, display-only** | Whisper structurally cannot do live captions — it has no partial-audio mode, and every "streaming Whisper" fakes it by re-running on overlapping chunks and rewriting words already shown. The accepted cost is that the caption text visibly differs from the pasted text (ALL CAPS, unpunctuated, occasionally wrong). That cost is contained *by the architecture*: the caption never reaches the document. Constraint 4 below is where that is enforced — and where the timing of what is on screen, which is not the same question, is set out. |
+| 4 | **A streaming transducer for captions, display-only** | Whisper structurally cannot do live captions — it has no partial-audio mode, and every "streaming Whisper" fakes it by re-running on overlapping chunks and rewriting words already shown. The accepted cost is that the caption text visibly differs from the pasted text (lower case, unpunctuated, occasionally wrong). *Which* streaming model is a config change and has been made once — see "The caption model" below; the decision is about the architecture, not the file. That cost is contained *by the architecture*: the caption never reaches the document. Constraint 4 below is where that is enforced — and where the timing of what is on screen, which is not the same question, is set out. |
 
 **These are closed.** Decision 4 in particular is load-bearing: it is the only
 reason a sloppy caption model is acceptable at all.
@@ -77,7 +77,7 @@ What makes it nearly free is **the warm-up starts at hotkey PRESS, not at
 release**. He holds the key and speaks for several seconds before letting go —
 which is the same order of magnitude as the load — so `app.Application.
 _on_hotkey_press` asks for the load first and starts recording second. Live
-captions come from the CPU Zipformer and are untouched, so words keep appearing
+captions come from the CPU caption model and are untouched, so words keep appearing
 while the GPU model loads behind them; that is decision 4 paying for itself a
 second time.
 
@@ -206,7 +206,7 @@ separate and structural:
   hands it straight to the overlay without keeping a reference. The only copy
   anywhere is the overlay's own Tk label.
 * **The value that crosses into the paste path carries audio.** `Utterance` has
-  PCM, a sample rate, a window handle and two numbers — no field a string could
+  PCM, a sample rate, a window handle and four numbers — no field a string could
   travel in.
 * **`injector.send` is called from exactly one place**, in `_finalize`, with
   what came out of `batch.transcribe`.
@@ -229,9 +229,15 @@ anything is happening. So the words now stay up from press until the text lands:
 
 Three things make the held caption safe to look at. It goes grey the moment he
 lets go, so the panel visibly registered the release and the words visibly stop
-being live. It is still ALL CAPS and unpunctuated, so it cannot be read as the
+being live. It is still lower case and unpunctuated, so it cannot be read as the
 finished text. And what removes it is the paste itself, so "the words went" means
 "it landed" rather than "a timer expired".
+
+That middle one is why the caption model was replaced with a lower-case one
+rather than with one of the 2026 models that punctuate and use sentence case: a
+held caption that looks like Whisper's output is a held caption that can be read
+as Whisper's output. The property that is load-bearing is "visibly not the
+finished text", not "upper case".
 
 The release passes `platform.base.KEEP` rather than any text, which is the point:
 the pipeline could not re-send the caption if it wanted to, because it does not
@@ -243,7 +249,10 @@ reappear under a new one.
 
 Measured: 6 threads was **3× worse** than 2 — the per-chunk work is tiny and
 thread synchronisation dominates. `config.validate()` refuses values above 4 and
-says why. This is not a knob to "optimise".
+says why. This is not a knob to "optimise", and it is not the fix for late
+captions — `dictate captions <clip.wav>` is how to find out what is.
+
+---
 
 ### 6. Dictated text is typed. It does not press keys
 
@@ -283,6 +292,56 @@ key-up if they are still held.
 it pressed and the entry records it. An Enter he did not notice at the time is
 then something he can look up an hour later, which is the only form of evidence
 that is any use for a thing you do not see happen.
+
+---
+
+## The caption model
+
+Decision 4 fixes the *architecture*: a small streaming transducer, display-only,
+never Whisper. Which model file runs is four settings in `[captions]`, and it has
+been changed once.
+
+**Until 2026-08-13** it was `sherpa-onnx-streaming-zipformer-en-2023-06-26`,
+trained on LibriSpeech alone — read audiobooks, transcribed in upper case with no
+punctuation. Dictation is spontaneous speech into a desk microphone, which is not
+that, and the reported symptom was that the captions were "crazy wrong" while the
+pasted text was correct.
+
+**MEASURED** (Linux, i5-12500T, 2 threads, `dictate captions` on the clips below;
+absolute times are from a loaded box, the comparison is what is being claimed):
+
+| clip | the LibriSpeech Zipformer | NeMo FastConformer 80 ms |
+|---|---|---|
+| `assets/jfk.wav`, 11.0 s | first words 1.12 s, every 0.32 s — `AND SAW MY FELLOW AMERICANS ASK NOT WHAT'S YOUR COUNTRY CAN DO FOR YOU AS BUT YOU CAN DO FOR YOUR COUNT` | first words 0.93 s, every 0.32 s — `and so my fellow americans ask not what your country can do for you ask what you can do for your country` |
+| LibriSpeech clip, 6.6 s | first words 1.12 s, every 0.32 s — ends `…OF THE BROTHEL` | first words 0.93 s, every 0.16 s — ends `…of the brothels` |
+| LibriSpeech clip, 16.7 s | first words 1.12 s, every 0.32 s — ends `…A BLESSED SOUL IN HE` | first words 0.93 s, every 0.16 s — ends `…a blessed soul in heaven` |
+| `jfk.wav` + noise at 20 / 10 / 5 dB SNR | three more errors appear, and `ASK` is lost entirely | identical and complete at all three |
+| cost, warm, interleaved ×5 | RTF **0.051** | RTF **0.175** — 3.4×, still 5.7× faster than speech |
+| cost on a GitHub Windows runner (`dictate captions`, in CI) | not measured there | RTF **0.582** |
+
+Two things follow, and they are the two halves of what he reported. The words are
+right because the replacement's training set includes Fisher and Switchboard —
+conversational telephone speech — rather than read audiobooks only. And it is
+never a word behind at the moment he lets go, which the old model always was:
+that trailing word is what he was left looking at while the GPU worked, now that
+the caption stays on screen until the text lands.
+
+That last row is the honest ceiling and the reason the drop counter above exists:
+a shared, throttled CI VM leaves less than half the budget spare. His 5800X3D is
+nothing like that machine, but nobody here can prove it — so if the caption
+thread ever does fall behind on his, the message at the release says so, and the
+old model is still one config line away at a fifth of the cost.
+
+It is **NVIDIA NeMo `stt_en_fastconformer_hybrid_large_streaming_80ms`**, int8,
+exported to ONNX by the sherpa-onnx project, CC-BY-4.0, English only: a 98 MB
+download against the old model's 310 MB. `scripts/models.psd1` pins and sources
+it.
+
+**What was measured and NOT taken.** The 2026 X-ASR streaming models punctuate
+and use sentence case and cost about the same as the old model; they got the same
+clips right. They were rejected on constraint 4: a held caption that looks like
+Whisper's output can be read as Whisper's output, and they are also zh-en
+bilingual, which is a script this product has no use for appearing on screen.
 
 ---
 
@@ -458,6 +517,16 @@ about it.
 Caption audio is queued with a bounded queue that drops the oldest block when
 full. Captions are disposable, so dropping them is strictly better than blocking
 the audio callback; the utterance buffer feeding the GPU pass is never dropped.
+
+**Both kinds of dropped audio are counted per utterance and said out loud.** A
+drop from that queue splices what the caption model hears, which is a perfectly
+good reason for the words on screen to be wrong, and it was a `log.debug` nobody
+has ever read. Audio the *operating system* discarded before dictate saw it —
+PortAudio's `paInputOverflow` — is the more serious one, because it is missing
+from the recording Whisper transcribes too, and it was counted process-wide and
+logged on the 1st, 10th and 100th occurrence and then never again. They are two
+messages at the release, never one, because the consequences differ: the first
+affects only the screen, and the second may cost him a word in the document.
 
 ---
 
