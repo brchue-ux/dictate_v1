@@ -32,6 +32,21 @@ class WindowsWindowTracker:
             process=_process_name(hwnd),
         )
 
+    def exists(self, target: TargetWindow) -> bool:
+        """`IsWindow` on the captured handle. Read-only; activates nothing.
+
+        Asked when the paste is about to be held, so that "it has closed" and
+        "you moved" are told apart rather than guessed at. A handle can be
+        re-used by a later window, which would make this say yes about a
+        different window - that costs a sentence's accuracy and never an action,
+        because nothing is pasted either way (`delivery.decide`).
+        """
+        try:
+            return bool(user32.IsWindow(wintypes.HWND(target.handle)))
+        except Exception:
+            log.debug("could not ask whether %s still exists", target, exc_info=True)
+            return True
+
     def focus(self, target: TargetWindow) -> bool:
         """Bring `target` to the foreground if it is not already there.
 

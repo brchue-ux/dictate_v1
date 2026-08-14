@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import overlay_size
+from . import delivery, overlay_size
 from .errors import ConfigError
 from .platform import hotkey_spec
 from .platform.fade import MIN_FADE_MS
@@ -260,8 +260,22 @@ class PasteConfig:
     #: clipboard. "clipboard" copies, sends Ctrl+V, then restores the previous
     #: clipboard contents. See docs/DESIGN.md for the trade-off.
     method: str = "sendinput"
-    #: Re-focus the window that had focus at hotkey press, if it lost focus.
+    #: Whether dictate may call SetForegroundWindow at all. It is what lets a
+    #: window that lost focus to a notification in the last half second be
+    #: brought back before the text is typed into it.
     restore_focus: bool = True
+    #: What happens when the window he pressed the hotkey in is NOT the window
+    #: in front of him at the moment the text is ready - he clicked somewhere
+    #: else while he was speaking, or that window closed. "hold" pastes nowhere
+    #: and keeps the text; "restore" brings that window back to the front and
+    #: pastes into it, which is what dictate did before. There is deliberately
+    #: no third value for "paste into whatever is focused now". See delivery.py.
+    on_focus_change: str = "hold"
+    #: On a hold, put the text on the clipboard so one Ctrl+V places it. The
+    #: exception to constraint 3, and the thing that makes holding recoverable
+    #: rather than a dead end; false leaves the clipboard alone and the text is
+    #: kept in the dictation history only.
+    hold_to_clipboard: bool = True
     #: Some apps drop synthesised keystrokes sent with no gap at all.
     per_char_delay_ms: float = 0.0
     #: How long to wait after Ctrl+V before putting the old clipboard back.
@@ -655,6 +669,24 @@ def validate(cfg: Config) -> Config:
             'pasted as a space, because Return submits in a terminal or a chat '
             'box. Use "return" if you dictate into a document and want the line '
             "break.",
+        )
+    if cfg.paste.on_focus_change not in delivery.MODES:
+        raise ConfigError(
+            f"[paste] on_focus_change must be "
+            f"{' or '.join(repr(m) for m in delivery.MODES)}, got "
+            f"{cfg.paste.on_focus_change!r}.",
+            '"hold" is the default: if you have moved to another window by the '
+            "time the text is ready, dictate pastes nowhere and tells you where "
+            'your words are. "restore" brings the window you started in back to '
+            "the front and pastes there.",
+        )
+    if cfg.paste.on_focus_change == delivery.RESTORE_MODE and not cfg.paste.restore_focus:
+        raise ConfigError(
+            '[paste] on_focus_change = "restore" needs restore_focus = true, and '
+            "it is false.",
+            "Restoring means bringing that window to the front, which is the "
+            "thing restore_focus allows. Set restore_focus = true, or leave "
+            'on_focus_change = "hold".',
         )
     if not 0 <= cfg.paste.modifier_wait_ms <= 5000:
         raise ConfigError(

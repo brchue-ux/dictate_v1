@@ -26,9 +26,19 @@ involved is the one that opens the file for him (`app._open_history`).
   = "return"` to get one at all, so ordinarily this line never appears.
 * **Not how long transcription took.** That answers a developer's question, not
   his, and the log already carries it.
-* **Not the window it was pasted into, and not a failed dictation.** Every line
-  in this file is text he said that landed somewhere; a file that also recorded
-  where he was typing would be a record of his day rather than of his words.
+* **Whether it was pasted at all - and only when it was not.** dictate refuses
+  to paste into a window he did not dictate into, so a dictation he spoke while
+  clicking away from the window he started in is delivered nowhere
+  (`delivery.py`). Those words still exist, and this file is where they keep
+  existing after the clipboard has moved on: the entry says, in his words, that
+  it was not pasted and why. Every line in this file is still text he said; what
+  changed is that "it landed somewhere" is no longer the price of admission,
+  because losing a sentence silently is worse than recording one that went
+  nowhere.
+* **Not the window it was pasted into, and not a failed dictation.** A
+  transcription that failed has no words to keep. And a file that recorded where
+  he was typing would be a record of his day rather than of his words - which is
+  why a held entry names no window either.
 
 **The shape of the file.** Newest first, so opening it shows the last thing he
 said rather than the first. That means the whole file is rewritten each time,
@@ -92,10 +102,16 @@ class Entry:
     #: `[paste] line_breaks = "return"`, and said out loud when it is not,
     #: because a Return is the one thing in a paste that can DO something.
     returns: int = 0
+    #: False when dictate pasted this nowhere - he had moved to another window
+    #: by the time it was ready, so this entry is the copy he gets it back from.
+    #: Defaulted to True so that an entry written by anything that does not know
+    #: about holding is an ordinary one, which is what every entry was before.
+    delivered: bool = True
 
     @classmethod
     def of(cls, text: str, *, raw: str = "", spoke_s: float = 0.0,
-           returns: int = 0, when: float | None = None) -> Entry:
+           returns: int = 0, delivered: bool = True,
+           when: float | None = None) -> Entry:
         text = text.strip()
         raw = raw.strip()
         return cls(
@@ -104,6 +120,7 @@ class Entry:
             text=text,
             raw=raw if raw and raw != text else "",
             returns=max(0, returns),
+            delivered=delivered,
         )
 
     def render(self) -> str:
@@ -111,11 +128,22 @@ class Entry:
         stamp = time.strftime("%a %d %b %Y, %H:%M:%S", time.localtime(self.when))
         parts = [RULE, f"{stamp}   ({self.spoke_s:.1f}s of speaking)", "",
                  _wrap(self.text)]
+        if not self.delivered:
+            # Under the words rather than above them: what he came here for is
+            # the sentence, and the note is why it is here to be found at all.
+            parts += ["", _wrap(self.note_about_holding())]
         if self.raw:
             parts += ["", _wrap(self.raw, first="as Whisper heard it: ")]
         if self.returns:
             parts += ["", _wrap(self.note_about_returns())]
         return "\n".join(parts) + "\n\n"
+
+    def note_about_holding(self) -> str:
+        """Why an entry exists for something that was never pasted."""
+        return ("dictate did not paste this anywhere: you had moved to another "
+                "window by the time it was ready, and dictate only pastes into "
+                "the window you pressed the hotkey in. It is kept here so you "
+                "can copy it out.")
 
     def note_about_returns(self) -> str:
         """Said in what it did, not in what it was: he is not looking for the
@@ -211,14 +239,23 @@ class HistoryStore:
         return f"the last {self.keep} dictations, in {self.path}"
 
     def record(self, text: str, *, raw: str = "", spoke_s: float = 0.0,
-               returns: int = 0) -> bool:
+               returns: int = 0, delivered: bool = True) -> bool:
         """Add one dictation. True if it was written.
 
-        Called from the finalise worker, after the text has been delivered.
+        Called from the finalise worker once the dictation has an outcome:
+        delivered, or held because there was no window it was allowed to go into.
+        The return value matters on the second path - it is what lets the message
+        say "your words are in your dictation history" only when they are.
+
+        `[history] enabled = false` still means nothing is written, including a
+        held one. Turning the record of everything he says off has to mean off;
+        a held dictation is then on the clipboard and nowhere else, and the
+        message he is shown says exactly that.
         """
         if not self.enabled or not text.strip():
             return False
-        entry = Entry.of(text, raw=raw, spoke_s=spoke_s, returns=returns)
+        entry = Entry.of(text, raw=raw, spoke_s=spoke_s, returns=returns,
+                         delivered=delivered)
         try:
             existing = entries_in(self._read())
             self._write(header(self.keep)

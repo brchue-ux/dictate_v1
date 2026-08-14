@@ -161,6 +161,13 @@ class Application:
             min_utterance_ms=cfg.audio.min_utterance_ms,
             max_utterance_s=cfg.audio.max_utterance_s,
             max_caption_chars=cfg.overlay.max_chars,
+            # The three that decide where the finished text is allowed to go
+            # when he has clicked somewhere else since he started speaking. The
+            # decision is `delivery.py`; the injector is only ever asked once
+            # the pipeline has made it.
+            on_focus_change=cfg.paste.on_focus_change,
+            restore_focus=cfg.paste.restore_focus,
+            hold_to_clipboard=cfg.paste.hold_to_clipboard,
             submit=self._submit,
             notify=self.notify,
             record=self.history.record,

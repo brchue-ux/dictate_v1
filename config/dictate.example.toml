@@ -275,6 +275,28 @@ rules_file = "voice-punctuation.toml"    # <<< CHECK THIS (next to this file)
 method = "sendinput"
 # Put focus back on the window you were in before pasting, if something stole it.
 restore_focus = true
+# WHAT HAPPENS IF YOU CLICK SOMEWHERE ELSE WHILE YOU ARE STILL SPEAKING.
+#
+# dictate reads which window to paste into when you PRESS the hotkey, so that
+# the caption panel appearing cannot change it. If you are somewhere else by
+# the time your words are ready, this decides what it does about that.
+#
+# "hold"     paste nowhere. Your words go on your clipboard (press Ctrl+V where
+#            you want them) and into your dictation history, and dictate tells
+#            you so. The default: text appearing in a window you did not
+#            dictate into is the thing this is here to prevent.
+# "restore"  bring the window you started in back to the front and paste there.
+#            What dictate used to do. Choose this if you dictate long passages
+#            into a document and read something else while they transcribe.
+#
+# Clicking away and clicking BACK before the words arrive is not a change at
+# all - it pastes as usual, whichever of these you choose.
+on_focus_change = "hold"
+# On a hold, put the words on your clipboard so one Ctrl+V places them. This is
+# the ONE thing in dictate that overwrites your clipboard without putting it
+# back, and it only happens when the alternative is losing what you just said.
+# false keeps your clipboard and leaves the words in the dictation history only.
+hold_to_clipboard = true
 # Pause between characters, in milliseconds. 0 is fastest; raise it to 1 or 2 if
 # an application drops characters.
 per_char_delay_ms = 0.0

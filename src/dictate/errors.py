@@ -70,4 +70,16 @@ class PlatformUnsupportedError(DictateError):
 
 
 class InjectionError(DictateError):
-    """Text could not be delivered to the target window."""
+    """Text could not be delivered to the target window.
+
+    `partial` is the one thing the caller cannot work out for itself: whether
+    any of the text reached the window before this was raised. It decides
+    whether "your words are on the clipboard, press Ctrl+V" is the whole truth
+    or whether he has to look at the window first - a paste that stopped half
+    way and a clipboard holding the whole sentence is how a dictation gets
+    pasted twice. Delivering nothing is the ordinary case and the default.
+    """
+
+    def __init__(self, message: str, remedy: str = "", partial: bool = False) -> None:
+        super().__init__(message, remedy)
+        self.partial = partial

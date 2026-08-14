@@ -131,11 +131,23 @@ class FakeInjector:
     def __init__(self, error: Exception | None = None) -> None:
         self.sent: list[tuple[str, TargetWindow | None]] = []
         self.error = error
+        #: Every text handed over because it could NOT be pasted. The clipboard,
+        #: on the real thing.
+        self.kept: list[str] = []
+        #: Set to make the clipboard refuse, which is the case where dictate has
+        #: to say the words are only in the history.
+        self.clipboard_fails = False
 
     def send(self, text: str, target: TargetWindow | None) -> None:
         if self.error:
             raise self.error
         self.sent.append((text, target))
+
+    def to_clipboard(self, text: str) -> bool:
+        if self.clipboard_fails:
+            return False
+        self.kept.append(text)
+        return True
 
     @property
     def describe(self) -> str:
@@ -143,12 +155,21 @@ class FakeInjector:
 
 
 class FakeWindows:
-    """A focused window that can move underneath us, like the real thing."""
+    """A focused window that can move underneath us, like the real thing.
+
+    `window` is what `foreground()` answers, so a test moves focus mid-utterance
+    by assigning to it between the press and the release - which is exactly what
+    happens when he clicks on something else while he is speaking.
+    """
 
     def __init__(self, window: TargetWindow | None = None) -> None:
         self.window = window or TargetWindow(handle=4242, title="Notepad", process="notepad.exe")
         self.focused: list[TargetWindow] = []
         self.raise_on_foreground: Exception | None = None
+        #: Handles that no longer name a window - a window closed while he was
+        #: still talking.
+        self.closed: set[int] = set()
+        self.raise_on_exists: Exception | None = None
 
     def foreground(self) -> TargetWindow | None:
         if self.raise_on_foreground:
@@ -158,6 +179,11 @@ class FakeWindows:
     def focus(self, target: TargetWindow) -> bool:
         self.focused.append(target)
         return True
+
+    def exists(self, target: TargetWindow) -> bool:
+        if self.raise_on_exists:
+            raise self.raise_on_exists
+        return target.handle not in self.closed
 
 
 class FakeOverlay:

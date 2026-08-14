@@ -74,6 +74,17 @@ class WindowTracker(Protocol):
     def focus(self, target: TargetWindow) -> bool:
         """Put focus back on `target`. Returns True if it now has focus."""
 
+    def exists(self, target: TargetWindow) -> bool:
+        """Is `target` still a window? Read-only, and never raises it.
+
+        Asked at paste time, when the window that had focus at press is not the
+        one in front any more: "he moved somewhere else" and "the window he was
+        dictating into has closed" are two different sentences to be told, and
+        this is the only thing that can tell them apart. Only the message
+        changes - see `delivery.decide`, which takes the answer and may take
+        `None` for "nobody asked".
+        """
+
 
 @runtime_checkable
 class TextInjector(Protocol):
@@ -85,6 +96,22 @@ class TextInjector(Protocol):
         does not press keys (`platform/line_breaks.py`). It is the one thing a
         paste can do rather than write, so it is reported rather than assumed,
         and it is what the dictation history records.
+        """
+
+    def to_clipboard(self, text: str) -> bool:
+        """Put `text` on the clipboard so he can place it himself. Never raises.
+
+        Used on one path only: the text could not be pasted (`delivery.HOLD`),
+        and the alternative to putting it somewhere he can reach is losing a
+        sentence he has just spoken. Constraint 3 says the clipboard is
+        preserved by not touching it, and that still holds for every *paste* -
+        this is the deliberate exception, it is announced in the same breath by
+        the message that explains why nothing was pasted, and `[paste]
+        hold_to_clipboard = false` turns it off for someone who would rather
+        keep the clipboard and use the dictation history instead.
+
+        Returns whether the text is now on the clipboard, so the message can
+        say where the words are rather than guess.
         """
 
     @property
