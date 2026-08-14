@@ -415,7 +415,7 @@ influence on the structure, and it is deliberate rather than apologetic:
   component that cannot work says so and stops. `tests/test_cli.py` asserts that
   `src/` contains no test doubles at all.
 * **The pipeline, cleanup, config, process supervision, model residency and HTTP
-  client are plain Python** and are tested for real, here — 343 tests, on Linux
+  client are plain Python** and are tested for real, here — 983 tests, on Linux
   and on Windows.
 * **The fiddly bits of the platform code were factored out into pure functions**
   so they could be tested anyway: `platform/geometry.py` (overlay placement and

@@ -136,6 +136,29 @@ def parse_task_name(text: str) -> str:
     return ""
 
 
+def parse_task_rows(text: str) -> list[tuple[str, int]]:
+    """`(image name, pid)` out of `tasklist /FO CSV /NH`, however it was filtered.
+
+    Same rules as `parse_task_name` above, which reads the same output for one
+    pid: quoted CSV, image names and pids untranslated, and a filter that
+    matched nothing answered with an ordinary English sentence rather than an
+    error. A row whose second column is not a number is skipped rather than
+    guessed at - this is read by a report, and a report may not invent a pid.
+    """
+    rows: list[tuple[str, int]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith('"'):
+            continue
+        fields = [part.strip().strip('"') for part in line.split('","')]
+        if len(fields) < 2:
+            continue
+        name, pid = fields[0].strip('"'), fields[1].strip('"')
+        if name and pid.isdigit():
+            rows.append((name, int(pid)))
+    return rows
+
+
 def is_whisper_server(name: str) -> bool:
     return name.strip().lower() in WHISPER_SERVER_NAMES
 

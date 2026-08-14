@@ -319,6 +319,12 @@ class FakeProcessTools:
         self.asked.append(pid)
         return self.names.get(pid, "")
 
+    def pids_named(self, image: str) -> list[int]:
+        wanted = image.strip().lower()
+        gone = () if self.lingering else tuple(self.ended)
+        return sorted(pid for pid, name in self.names.items()
+                      if name.strip().lower() == wanted and pid not in gone)
+
     def end(self, pid: int) -> None:
         if self.refuse is not None:
             raise self.refuse

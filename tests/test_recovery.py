@@ -93,6 +93,25 @@ class WhatWindowsPrints(unittest.TestCase):
         said = "INFO: No tasks are running which match the specified criteria."
         self.assertEqual(recovery.parse_task_name(said), "")
         self.assertEqual(recovery.parse_task_name(""), "")
+        self.assertEqual(recovery.parse_task_rows(said), [])
+
+    def test_it_reads_a_whole_list_of_processes_back(self):
+        """The same output filtered the other way round, for `dictate autostart
+        status --why`: how many whisper-servers there are is what tells two
+        copies of dictate apart from one copy and an orphan."""
+        text = ('"pythonw.exe","8804","Console","1","54,120 K"\n'
+                '"pythonw.exe","22188","Console","1","61,004 K"\n')
+        self.assertEqual(recovery.parse_task_rows(text),
+                         [("pythonw.exe", 8804), ("pythonw.exe", 22188)])
+        self.assertEqual(recovery.parse_task_rows(TASKLIST),
+                         [("whisper-server.exe", 23188)])
+
+    def test_a_row_without_a_number_in_it_is_dropped_rather_than_guessed(self):
+        """A report may not invent a pid. Anything that is not a quoted row
+        with a number in the second column is not one."""
+        self.assertEqual(recovery.parse_task_rows('"pythonw.exe","PID"\n'), [])
+        self.assertEqual(recovery.parse_task_rows('"pythonw.exe"\n'), [])
+        self.assertEqual(recovery.parse_task_rows("pythonw.exe,8804\n"), [])
 
 
 class NothingIsRunning(unittest.TestCase):

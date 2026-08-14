@@ -199,7 +199,19 @@ def cmd_autostart(args: argparse.Namespace) -> int:
         for line in autostart_mod.disable():
             _out(line)
         return 0
-    for line in autostart_mod.status_lines():
+    # `--why` reads the transcription port out of the config, and a config that
+    # will not load is one of the things it exists to explain. So a broken one
+    # costs the port line and nothing else - refusing to report because the
+    # config is the problem would be the report failing at the one moment it is
+    # needed.
+    cfg = None
+    if getattr(args, "why", False):
+        try:
+            cfg = _load_config(args)
+        except DictateError as exc:
+            _err(f"(your config could not be read, so the transcription port is "
+                 f"not checked below: {exc.message})\n")
+    for line in autostart_mod.status_lines(why=getattr(args, "why", False), cfg=cfg):
         _out(line)
     return 0
 
@@ -876,7 +888,16 @@ def build_parser() -> argparse.ArgumentParser:
     auto_sub = p_auto.add_subparsers(dest="autostart_command")
     auto_sub.add_parser("enable", help="start dictate when you log in")
     auto_sub.add_parser("disable", help="stop doing that, and leave nothing behind")
-    auto_sub.add_parser("status", help="is it on, is it running, and did it start")
+    p_auto_status = auto_sub.add_parser(
+        "status", help="is it on, is it running, and did it start")
+    # On both, so that whichever of the two he types works. This is the line the
+    # report itself tells him to run when it finds a disagreement it cannot
+    # settle, and one line with nothing to edit is the whole point of it.
+    why = ("also list what Windows actually has running - the process the logon "
+           "task started, whether it is still there, any whisper-server, and who "
+           "holds the transcription port. Reports; changes nothing")
+    for target in (p_auto, p_auto_status):
+        target.add_argument("--why", action="store_true", help=why)
 
     sub.add_parser("doctor", help="check the setup and say what to fix").set_defaults(
         func=cmd_doctor)
