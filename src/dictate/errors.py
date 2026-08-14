@@ -52,6 +52,18 @@ class AlreadyRunningError(DictateError):
         self.holder = holder
 
 
+class MouseHookError(DictateError):
+    """The low-level mouse hook behind a mouse trigger could not be installed,
+    or has been lost.
+
+    Its own class because it is the one failure that is NOT the end of
+    dictation: the keyboard chord in `[hotkey] keyboard_fallback` is registered
+    alongside it and still works, so this is reported loudly and carried on
+    from rather than raised at the user as a dead product
+    (`platform/trigger_pair.py`).
+    """
+
+
 class PlatformUnsupportedError(DictateError):
     """A platform-specific component was asked for on a platform that has no
     implementation. Raised loudly and early - never silently substituted."""

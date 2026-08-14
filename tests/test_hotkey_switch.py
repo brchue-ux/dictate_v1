@@ -15,6 +15,7 @@ from pathlib import Path
 
 from dictate import config as config_mod, config_edit, hotkey_switch
 from dictate.errors import ConfigError
+from dictate.platform import hotkey_spec
 
 REPO = Path(__file__).resolve().parent.parent
 EXAMPLE = REPO / "config" / "dictate.example.toml"
@@ -32,8 +33,15 @@ class WhatIsOffered(unittest.TestCase):
 
     def test_they_are_spelled_with_letters_and_the_space_bar(self):
         """Nothing here may depend on a key name the hotkey library might not
-        know - an F-key or a media key. Anything else is his to type."""
+        know - an F-key or a media key. Anything else is his to type.
+
+        The mouse buttons on the list are exempt and have their own rule: they
+        do not go through that library at all (`platform/windows/mouse.py`), and
+        `test_mouse_trigger.py` holds what they are allowed to be.
+        """
         for combination, _ in hotkey_switch.CHOICES:
+            if hotkey_spec.is_mouse(combination):
+                continue
             key = combination.split("+")[-1].strip()
             with self.subTest(combination=combination):
                 self.assertTrue(key == "space" or (len(key) == 1 and key.isalpha()))

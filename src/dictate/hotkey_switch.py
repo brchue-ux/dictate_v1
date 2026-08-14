@@ -12,11 +12,20 @@ Opening `dictate.toml` at the right line is the other obvious answer, and he has
 said he will not hand-edit a config file.
 
 So: a handful of combinations that are known to work, on the menu, each one a
-single click. Every one of them is spelled with a letter or the space bar, so
+single click. Every keyboard one is spelled with a letter or the space bar, so
 nothing depends on a key name the hotkey library may or may not know; the one he
 is using now is always among them even if it is not one of these; and the item
 names `dictate hotkey`, which takes anything at all, for the day none of these
 suits him.
+
+**The three mouse buttons are on the same list**, and they are on it because
+this menu is now the answer to "how do I change this": a trigger he cannot pick
+here is one he will not find, and he asked for the thumb button by name. Each of
+them costs him something the keyboard chords do not - the button already had a
+job - so each carries what it costs on the menu line itself and at length in
+`MOUSE_COST`, which is the one place that text lives. `platform/mouse_trigger.py`
+carries what dictate actually does to the button; this file carries what he is
+told about it.
 
 **What "it must not leave him with a hotkey that does not work" means here.**
 The order is: register the new one, and only if Windows accepts it write it to
@@ -25,24 +34,96 @@ old one goes straight back, and nothing has been written down. That ordering is
 `app.Application.change_hotkey`'s to keep; this module decides whether the
 change should be attempted at all and what he is told about it either way.
 
-Pure, and tested in tests/test_hotkey_switch.py.
+Pure, and tested in tests/test_hotkey_switch.py - and, for the mouse buttons, in
+tests/test_mouse_trigger.py.
 """
 
 from __future__ import annotations
 
+import textwrap
 from dataclasses import dataclass
 
 from .errors import ConfigError, DictateError
-from .platform.hotkey_spec import describe, normalise
+from .platform.hotkey_spec import describe, mouse_button, normalise
 
 #: What the tray offers, in order, each with the reason it is on the list.
-#: Letters and the space bar only - see the module docstring.
+#: The keyboard ones are spelled with letters and the space bar only - see the
+#: module docstring - and the mouse ones are every button dictate can hold, in
+#: the order of what using one costs.
 CHOICES: tuple[tuple[str, str], ...] = (
     ("ctrl + alt + space", "the one dictate starts with"),
     ("ctrl + shift + space", "when something else already owns Ctrl+Alt+Space"),
     ("ctrl + alt + d", "off the space bar, for an app that wants Space itself"),
     ("ctrl + shift + d", "the same again, if Ctrl+Alt+D is taken too"),
+    ("mouse 4", "one button, no chord - a quick click still goes Back"),
+    ("mouse 5", "the same, on the button browsers use for Forward"),
+    ("middle mouse button", "one button - but holding it is what starts autoscroll"),
 )
+
+
+@dataclass(frozen=True)
+class MouseCost:
+    """What one mouse button is normally for, and what holding it costs.
+
+    Written down once, here, because the tray, `dictate hotkey` and
+    `dictate doctor` all say it and three copies would drift. Every sentence
+    is about what he LOSES: choosing a trigger is a trade and he should be
+    able to see the trade before he clicks it.
+    """
+
+    #: What a click of it normally does.
+    normally: str
+    #: What HOLDING it normally does - the whole of the middle button's problem.
+    held: str
+    #: The paragraph `dictate hotkey` prints when this is the trigger.
+    cost: str
+
+
+#: Push-to-talk means holding the button down for seconds at a time, so what an
+#: application does with the button HELD is what decides how good a trigger it
+#: is. That is the difference between the thumb buttons and the wheel.
+MOUSE_COST: dict[str, MouseCost] = {
+    "mouse4": MouseCost(
+        normally="Back, in browsers, file managers and most editors",
+        held="nothing - no common application does anything with it held down",
+        cost="A quick click of Mouse 4 still goes Back: dictate holds the "
+             "button back and passes the click on when you let go, a "
+             "millisecond or two later than the click itself. What you lose is "
+             "holding Mouse 4 for anything else, and Back inside a window "
+             "running as administrator, which Windows does not let a program "
+             "like dictate send a click to.",
+    ),
+    "mouse5": MouseCost(
+        normally="Forward, in browsers and file managers",
+        held="nothing - no common application does anything with it held down",
+        cost="A quick click of Mouse 5 still goes Forward, a millisecond or "
+             "two after you let go. It is the cheapest of the three: Forward "
+             "is the least used of the buttons on a mouse. What you lose is "
+             "holding Mouse 5 for anything else, and Forward inside a window "
+             "running as administrator, for the same reason.",
+    ),
+    "mouse3": MouseCost(
+        normally="open a link in a new tab, close a tab, paste in some editors",
+        held="starts autoscroll - the scrolling cursor - in browsers and "
+             "Windows Explorer, and pans in map, drawing and PDF applications",
+        cost="A quick click of the middle button still opens the link in a new "
+             "tab or closes the tab, a millisecond or two after you let go. "
+             "The cost is in the holding: autoscroll is what the middle button "
+             "held down means to a browser, and push-to-talk means holding it "
+             "for seconds at a time. dictate swallows the button while it is "
+             "running, so autoscroll does not start - but anywhere dictate's "
+             "hook does not reach (a window running as administrator, a game "
+             "reading the mouse directly), holding it starts autoscroll in the "
+             "middle of your sentence. It is a worse fit for hold-to-talk than "
+             "Mouse 4 for that reason, on top of losing new-tab and close-tab.",
+    ),
+}
+
+#: Which one this project would pick, and why, said in one line wherever the
+#: choice is offered. Mouse 4 because nothing anywhere does anything with it
+#: HELD, and because what a click of it does - Back - is one keystroke to undo
+#: (Alt+Right) if a click ever does go astray.
+RECOMMENDED_MOUSE = "mouse4"
 
 #: What the menu says for anything not on the list. It is a real command and it
 #: takes any combination `hotkey_spec` can parse.
@@ -52,6 +133,65 @@ EXAMPLE_COMMAND = 'dictate hotkey "ctrl + alt + k"'
 def command_for(combination: str) -> str:
     """The typed form of choosing this combination, which the menu shows."""
     return f'dictate hotkey "{combination}"'
+
+
+def trigger_note(combination: str, *, keyboard_fallback: str = "",
+                 click_through: bool = True) -> list[str]:
+    """What has to be said about a trigger, as lines. Empty for a chord.
+
+    A keyboard chord needs no explanation - he has been holding one for weeks.
+    A mouse button does: it is a button that already had a job, and the whole
+    of what dictate does to that job is here.
+    """
+    try:
+        button = mouse_button(combination)
+    except DictateError:
+        return []
+    if button is None:
+        return []
+    cost = MOUSE_COST[button]
+    lines = _wrapped(
+        f"{describe(button)} is held to talk. Windows reports a mouse button to "
+        f"dictate only through a low-level mouse hook, so dictate installs one: "
+        f"a callback of its own in the path of every mouse event on this "
+        f"machine, which is why it decides and returns and does the work "
+        f"elsewhere.")
+    lines += ([""]
+              + _wrapped(f"That button normally does: {cost.normally}.")
+              + _wrapped(f"Held down, it normally: {cost.held}.")
+              + [""])
+    if click_through:
+        lines += _wrapped(cost.cost)
+    else:
+        lines += _wrapped(
+            f"[hotkey] mouse_click_through is false, so {describe(button)} "
+            f"belongs to dictate entirely while dictate is running: a click of "
+            f"it does not reach the window you clicked in at all. Set it back "
+            f"to true and a click too short to be a dictation is passed on.")
+    if button != RECOMMENDED_MOUSE:
+        lines.append("")
+        lines += _wrapped(
+            f"Of the three, this project would pick "
+            f"{describe(RECOMMENDED_MOUSE)}: nothing common does anything with "
+            f"it HELD DOWN, which is the whole of what push-to-talk asks of a "
+            f"button, and what a click of it does - Back - is one keystroke to "
+            f"undo if a click ever goes astray.")
+    if keyboard_fallback:
+        lines.append("")
+        try:
+            chord = describe(keyboard_fallback)
+        except DictateError:
+            chord = keyboard_fallback
+        lines += _wrapped(
+            f"{chord} still works and always will: it is registered alongside "
+            f"the mouse button, so a hook Windows refuses - or security "
+            f"software removes - leaves dictate working rather than silently "
+            f"doing nothing.")
+    return lines
+
+
+def _wrapped(text: str, width: int = 76) -> list[str]:
+    return textwrap.wrap(text, width=width)
 
 
 def choices_for(current: str) -> list[tuple[str, str, bool]]:

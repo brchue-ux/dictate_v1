@@ -65,6 +65,25 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `docs/DESIGN.md` constraint 6 carries the reasoning. Related, same class:
   `platform/modifier_guard.py` waits for Ctrl/Alt/Win to come up before typing,
   because the chord's other keys can still be down when the paste happens.
+- **The trigger can be one mouse button, and the button keeps its own job on a
+  click.** Windows shows the middle and thumb buttons to nobody except a
+  `WH_MOUSE_LL` hook, so `platform/windows/mouse.py` sits in the path of every
+  mouse event on his machine: it decides and returns, and a worker thread does
+  everything with any weight in it. All the deciding is pure and tested
+  (`platform/mouse_trigger.py`, `platform/hotkey_spec.py`,
+  `platform/trigger_pair.py`, `tests/test_mouse_trigger.py`) - **nothing about
+  the hook itself has ever been run.** Three things are load-bearing: the
+  button-down is always swallowed and the *length of the hold* decides whether
+  the up is swallowed too (a dictation) or the click is replayed to the app (a
+  click), which is the only shape that neither breaks Back all day nor
+  navigates Back on every dictation; the replay is recognised on the way back in
+  by dictate's own `dwExtraInfo` tag, never by "it was injected", so a mouse
+  driver's events still trigger; and `[hotkey] keyboard_fallback` is registered
+  alongside it and always works, because a hook can be refused at install and
+  dropped afterwards and dictate cannot tell the second case from an idle mouse.
+  Left and right are refused by name. `docs/DESIGN.md` → "The mouse trigger"
+  carries the reasoning, and `hotkey_switch.MOUSE_COST` is the one place that
+  says what each button costs - the middle button's autoscroll included.
 - **The tray changes the hotkey by offering a short list, and writes it down.**
   He will not hand-edit a config file, and a running dictate may not show a
   dialog (it holds the instance lock), so "press the keys you want" is out -

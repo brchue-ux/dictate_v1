@@ -48,6 +48,13 @@ class MOUSEINPUT(ctypes.Structure):
     ]
 
 
+INPUT_MOUSE = 0
+MOUSEEVENTF_MIDDLEDOWN = 0x0020
+MOUSEEVENTF_MIDDLEUP = 0x0040
+MOUSEEVENTF_XDOWN = 0x0080
+MOUSEEVENTF_XUP = 0x0100
+
+
 class KEYBDINPUT(ctypes.Structure):
     _fields_ = [
         ("wVk", wintypes.WORD),
@@ -81,6 +88,61 @@ user32.SendInput.restype = wintypes.UINT
 # and the 0x8000 "held down" bit would be read out of a truncated value.
 user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
 user32.GetAsyncKeyState.restype = ctypes.c_short
+
+# -- the low-level mouse hook ------------------------------------------------
+#
+# The only way to see the middle and thumb mouse buttons globally: Windows'
+# RegisterHotKey and the global_hotkeys package behind the keyboard chord are
+# both keyboard-only. A WH_MOUSE_LL hook puts a callback of ours in the path of
+# every mouse event on the machine, which is why `windows/mouse.py` does nothing
+# in it but decide and return - see the warnings there.
+
+WH_MOUSE_LL = 14
+
+WM_MOUSEMOVE = 0x0200
+WM_MBUTTONDOWN = 0x0207
+WM_MBUTTONUP = 0x0208
+WM_XBUTTONDOWN = 0x020B
+WM_XBUTTONUP = 0x020C
+WM_QUIT = 0x0012
+
+#: MSLLHOOKSTRUCT.mouseData, high word: which thumb button it was.
+XBUTTON1 = 0x0001
+XBUTTON2 = 0x0002
+
+#: A hook procedure returns an LRESULT, which is pointer-sized. Declared as a
+#: 32-bit long it works on 32-bit Windows and truncates on 64-bit, and the
+#: symptom is a swallow that does not swallow.
+LRESULT = ctypes.c_ssize_t
+
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("pt", wintypes.POINT),
+        ("mouseData", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
+HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM,
+                              wintypes.LPARAM)
+
+user32.SetWindowsHookExW.argtypes = (ctypes.c_int, HOOKPROC, wintypes.HINSTANCE,
+                                     wintypes.DWORD)
+user32.SetWindowsHookExW.restype = wintypes.HHOOK
+user32.UnhookWindowsHookEx.argtypes = (wintypes.HHOOK,)
+user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+user32.CallNextHookEx.argtypes = (wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM,
+                                  wintypes.LPARAM)
+user32.CallNextHookEx.restype = LRESULT
+user32.GetMessageW.argtypes = (ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                               wintypes.UINT, wintypes.UINT)
+user32.GetMessageW.restype = wintypes.BOOL
+user32.PostThreadMessageW.argtypes = (wintypes.DWORD, wintypes.UINT,
+                                      wintypes.WPARAM, wintypes.LPARAM)
+user32.PostThreadMessageW.restype = wintypes.BOOL
 
 # -- window handling ---------------------------------------------------------
 
@@ -168,6 +230,10 @@ PROCESS_SYSTEM_DPI_AWARE = 1
 PROCESS_PER_MONITOR_DPI_AWARE = 2
 
 kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+# Undeclared, ctypes would return a C int and truncate a 64-bit module handle -
+# and SetWindowsHookExW would then be handed a handle that is not one.
+kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)

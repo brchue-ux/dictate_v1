@@ -7,7 +7,7 @@
 # GPU. So this workflow exists to catch everything that can be caught without
 # one, on the same operating system the product actually runs on.
 #
-#   PROVED HERE  the Python package installs on Windows and its 767 tests pass;
+#   PROVED HERE  the Python package installs on Windows and its 892 tests pass;
 #                the installer's own logic works on Windows PowerShell 5.1,
 #                including a download that really is interrupted and resumed
 #                and an install file another process really is holding open;
@@ -22,6 +22,13 @@
 #                whisper-server impossible; and `dictate update` really fetches
 #                THIS private repository over the GitHub CLI and replaces a real
 #                editable install with what came back.
+#
+#   NOT PROVED   anything about the mouse trigger's hook. A runner has no mouse
+#                and nobody to press one, so `platform/windows/mouse.py` - the
+#                WH_MOUSE_LL hook, the swallow and the replayed click - has run
+#                nowhere. What the step below does prove is that naming a mouse
+#                button in the config parses, writes, reads back and is reported
+#                truthfully on real Windows.
 #
 #   NOT PROVED   anything about the GPU. GitHub's hosted Windows runners have no
 #                AMD card and no Vulkan driver, so Vulkan legitimately finds zero
@@ -133,6 +140,38 @@ jobs:
           Write-Host $bad
           if ($bad -match 'Traceback') { throw 'a bad hotkey printed a stack trace' }
           if ($bad -notmatch 'modifier') { throw "a modifier-only hotkey was not refused: $bad" }
+
+          # A MOUSE BUTTON as the trigger, through the same one line of config.
+          # What this proves is the parsing, the write, the read-back and what
+          # he is told - and nothing whatever about the low-level mouse hook,
+          # which needs a mouse and a desktop with a person at it.
+          $mouse = dictate --config $keyconfig hotkey "mouse 4" 2>&1 | Out-String
+          Write-Host $mouse
+          if ($mouse -match 'Traceback') { throw 'a mouse trigger printed a stack trace' }
+          if ($mouse -notmatch 'Mouse 4') { throw "dictate hotkey did not set the mouse button: $mouse" }
+          if ($mouse -notmatch 'low-level mouse hook') {
+            throw "dictate hotkey did not say how a mouse button is captured: $mouse"
+          }
+          if ($mouse -notmatch 'still works') {
+            throw "dictate hotkey did not say the keyboard chord still works: $mouse"
+          }
+          $shownmouse = dictate --config $keyconfig hotkey 2>&1 | Out-String
+          Write-Host $shownmouse
+          if ($shownmouse -notmatch 'Mouse 4') { throw "the mouse trigger did not survive the write: $shownmouse" }
+          $mousedoctor = dictate --config $keyconfig doctor 2>&1 | Out-String
+          if ($mousedoctor -match 'Traceback') { throw 'doctor printed a stack trace for a mouse trigger' }
+          if ($mousedoctor -notmatch 'Mouse 4, held to talk') {
+            throw "dictate doctor did not report the mouse trigger truthfully: $mousedoctor"
+          }
+          # The two buttons dictate will not take, refused by name and with
+          # what IS accepted, rather than accepted and failing on his machine.
+          $left = dictate --config $keyconfig hotkey "left click" 2>&1 | Out-String
+          Write-Host $left
+          if ($left -match 'Traceback') { throw 'a refused mouse button printed a stack trace' }
+          if ($left -notmatch 'mouse 4') { throw "the refusal did not name what is accepted: $left" }
+          # And back to a chord, so nothing below sees a half-changed file.
+          dictate --config $keyconfig hotkey "ctrl + shift + d" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'the hotkey could not be set back to a chord' }
 
           # `doctor` is meant to report missing pieces, so a non-zero exit here
           # is the correct answer on a bare CI machine. What must never happen

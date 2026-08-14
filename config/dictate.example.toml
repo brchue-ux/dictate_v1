@@ -13,10 +13,30 @@
 
 [hotkey]
 # Hold this to record. Modifiers: ctrl, alt, shift, win.
+#
+# It can be ONE MOUSE BUTTON instead, held exactly the same way:
+#   combination = "mouse 4"              the thumb button browsers use for Back
+#   combination = "mouse 5"              the other thumb button (Forward)
+#   combination = "middle mouse button"  the wheel pressed in
+# A mouse button is held on its own - no ctrl, no alt. What each one costs you
+# is printed by `dictate hotkey`, and the tray icon offers all three.
 combination = "ctrl + alt + space"
 # "hold"   = push-to-talk: record while held (this is the design).
-# "toggle" = press once to start, press again to stop.
+# "toggle" = press once to start, press again to stop. Keyboard only: what
+#            dictate does with a mouse button depends on how long you hold it.
 mode = "hold"
+# Only used when `combination` above is a mouse button. A mouse button is seen
+# through a low-level mouse hook, which Windows can refuse and security software
+# can remove; this combination is registered as well and keeps working, so that
+# is a dictate you can still talk to rather than one that silently stopped.
+keyboard_fallback = "ctrl + alt + space"
+# Only used when `combination` above is a mouse button.
+# true  = a click too short to have been a dictation is passed on to the window
+#         you clicked in, so Back / new tab / Forward still work - a millisecond
+#         or two after you let go rather than as you press. "Too short" is
+#         [audio] min_utterance_ms below.
+# false = the button belongs to dictate alone while dictate is running.
+mouse_click_through = true
 
 
 [audio]

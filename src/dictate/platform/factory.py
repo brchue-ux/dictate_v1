@@ -76,15 +76,46 @@ def make_audio_capture(cfg: Config):
     )
 
 
-def make_hotkey_listener(cfg: Config, combination: str | None = None):
-    """`combination` overrides the config, which is how the tray changes the
-    hotkey while dictate is running: a second listener is built for the new
-    combination and only becomes the one in use if Windows accepts it."""
+def make_hotkey_listener(cfg: Config, combination: str | None = None, *,
+                         notify=None):
+    """The trigger: a keyboard chord, or a mouse button with the chord behind it.
+
+    `combination` overrides the config, which is how the tray changes the
+    trigger while dictate is running: a second listener is built for the new
+    combination and only becomes the one in use if Windows accepts it.
+
+    A mouse button is never returned on its own. It comes back inside a
+    `TriggerPair` with `[hotkey] keyboard_fallback` registered alongside it,
+    because a low-level mouse hook is a thing Windows can refuse and security
+    software can remove, and a trigger that quietly stopped working is the one
+    outcome this repository's rules do not allow. `trigger_pair.py` carries the
+    reasoning.
+    """
     _require_windows("global hotkey")
+    from .hotkey_spec import mouse_button  # noqa: PLC0415
     from .windows.hotkey import WindowsHotkeyListener  # noqa: PLC0415
 
-    return WindowsHotkeyListener(combination or cfg.hotkey.combination,
-                                 cfg.hotkey.mode)
+    wanted = combination or cfg.hotkey.combination
+    button = mouse_button(wanted)
+    if button is None:
+        return WindowsHotkeyListener(wanted, cfg.hotkey.mode)
+
+    from .trigger_pair import TriggerPair  # noqa: PLC0415
+    from .windows.mouse import WindowsMouseTriggerListener  # noqa: PLC0415
+
+    return TriggerPair(
+        WindowsMouseTriggerListener(
+            button,
+            click_through=cfg.hotkey.mouse_click_through,
+            # The same number that already decides a press was a mis-press, so
+            # "too short to be a dictation" and "too short to be anything but a
+            # click" are one setting rather than two that can disagree.
+            min_hold_s=cfg.audio.min_utterance_ms / 1000.0,
+            notify=notify,
+        ),
+        WindowsHotkeyListener(cfg.hotkey.keyboard_fallback, "hold"),
+        notify=notify,
+    )
 
 
 def make_child_guard():

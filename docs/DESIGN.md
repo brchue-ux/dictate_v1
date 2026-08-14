@@ -551,12 +551,92 @@ about it.
 
 ---
 
+## The mouse trigger, and the button's own job
+
+"I don't like having to press three buttons. Can I just press mouse four?" —
+so the trigger became a keyboard chord *or* one mouse button, held identically.
+Three buttons are offered: the two thumb buttons and the wheel. Left and right
+are refused in `hotkey_spec`, because holding a button to talk means swallowing
+it and a machine whose left button does nothing cannot be used, including to
+turn dictate off.
+
+**How a mouse button is seen at all.** Windows has no `RegisterHotKey` for the
+mouse, and the `global_hotkeys` package behind the chord is keyboard-only — its
+own reason for existing is that `RegisterHotKey` reports key-down and
+push-to-talk needs key-up as well. The only global view of the middle and thumb
+buttons is `SetWindowsHookEx(WH_MOUSE_LL)`, which puts a callback of dictate's
+in the path of **every mouse event on the machine**. Everything about the shape
+of `platform/windows/mouse.py` follows from that: the callback does one dict
+lookup, one struct read, one lock and a queue put, and every piece of work —
+starting the recording, finishing the utterance, replaying a click — happens on
+a worker thread. Windows gives a low-level hook `LowLevelHooksTimeout` (300 ms
+by default) to answer and ignores the answer of one that is slower.
+
+**The design question is what happens to Back.** Mouse 4 is Back in every
+browser, file manager and editor, and dictate now runs all day from logon. Both
+blanket answers are unacceptable: swallow always and Back stops working for as
+long as dictate is running; pass through always and every dictation also
+navigates Back in the focused window, which is worse.
+
+The rule is that **the press is provisional**, and it lives in
+`platform/mouse_trigger.py` where it can be tested:
+
+* the button-down is always swallowed, so nothing happens the instant he starts
+  talking;
+* held longer than `[audio] min_utterance_ms` — the number that already decides
+  a press was a mis-press — it was a dictation, and the up is swallowed too;
+* held for less, it was a click, so the up is swallowed and dictate sends a
+  fresh down-and-up of its own. The window gets its click a millisecond or two
+  after he lets go rather than as he presses, and the utterance is dropped for
+  being too short exactly as a tapped hotkey already is. The replayed click
+  carries a tag in `dwExtraInfo` and is recognised by that tag rather than by
+  "it was injected", so a mouse driver's or remapper's events still trigger
+  dictation.
+
+`[hotkey] mouse_click_through = false` turns the last one off and gives dictate
+the button outright while it runs.
+
+**A click therefore flashes the caption panel**, because the press starts an
+utterance and the release drops it for being under the floor — the path a tapped
+hotkey has always taken. The alternative was to hold the press back for a
+fraction of a second to see whether it was a click, and that trades a cosmetic
+flash for the start of every sentence he speaks. It was not taken. If the flash
+turns out to matter, the fix belongs in the pipeline (do not show the panel
+until the utterance is past the floor), not here.
+
+**What that costs, per button**, is in `hotkey_switch.MOUSE_COST` — one copy,
+read by the tray, `dictate hotkey` and `dictate doctor`. The middle button is
+the one with a real problem: push-to-talk means holding a button for seconds,
+and a browser reads the wheel held down as autoscroll. dictate swallowing the
+down is what stops autoscroll appearing, so the moment the hook does not
+apply — an elevated window, a game reading raw input — holding it starts
+autoscroll mid-sentence. Mouse 4 is the recommendation: nothing common does
+anything with it *held*, and its click is one keystroke to undo.
+
+**The keyboard chord stays live behind it.** A hook can be refused when it is
+installed and dropped afterwards, and dictate cannot detect the second case from
+inside — a hook that is never called and an idle mouse look identical. So the
+answer is not detection: `platform/trigger_pair.py` registers
+`[hotkey] keyboard_fallback` alongside the button and keeps it working forever.
+A refused hook is reported at error level (the tray icon goes red) and dictate
+carries on; the trigger that ends an utterance is always the half that started
+it, so a chord tapped mid-sentence cannot cut off a mouse-held one.
+
+**Nothing about the hook has been observed.** No Windows machine and no mouse:
+the parsing, the arming, the swallow rule and the state machine are tested in
+`tests/test_mouse_trigger.py`, and every Win32 call in `windows/mouse.py` has
+run nowhere. The README's "what was verified" list says so in those terms.
+
+---
+
 ## Threading
 
 | Thread | Owns | Rule |
 |---|---|---|
 | main | the Tk overlay message loop | every Tk call happens here; `set_state()` queues from elsewhere |
 | hotkey | the keyboard hook | calls `start_utterance` / `finish_utterance`; every callback is wrapped so an exception cannot wedge the hook and with it the whole keyboard |
+| mouse hook | the `WH_MOUSE_LL` hook and its message loop | only when the trigger is a mouse button. Decides and returns — nothing slow, nothing that can raise, no logging; a hook that answers late is ignored by Windows and the mouse stutters for everybody |
+| mouse trigger | the queue the hook fills | one worker, so a press can never overtake the release before it; this is where the recording starts, the utterance finishes and a click is replayed |
 | audio | PortAudio | calls `push_audio` only, which appends and enqueues — it never runs a model |
 | caption | — | the **only** thread that ever touches a streaming session |
 | finalize | one worker | so two utterances finishing close together paste in the order they were spoken; runs clean → punctuate → paste |

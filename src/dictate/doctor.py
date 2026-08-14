@@ -368,12 +368,36 @@ def check_punctuation_rules(cfg: Config) -> CheckResult:
 
 
 def check_hotkey(cfg: Config) -> CheckResult:
-    from .platform.hotkey_spec import describe
+    """What he holds to talk - and, for a mouse button, what that costs.
+
+    A mouse trigger is reported as what it is rather than as a hotkey: it is
+    seen through a low-level mouse hook, the button keeps its own job on a
+    quick click, and the keyboard chord behind it is still live. All three are
+    things he would otherwise have to find out by pressing something.
+    """
+    from .platform.hotkey_spec import describe, mouse_button
 
     try:
-        return CheckResult("Hotkey", Status.OK, describe(cfg.hotkey.combination))
+        button = mouse_button(cfg.hotkey.combination)
     except DictateError as exc:
         return CheckResult("Hotkey", Status.FAIL, exc.message, exc.remedy)
+    if button is None:
+        return CheckResult("Hotkey", Status.OK, describe(cfg.hotkey.combination))
+
+    from . import hotkey_switch
+
+    normally = hotkey_switch.MOUSE_COST[button].normally.split(",")[0]
+    what = (f"A quick click still does what it normally does ({normally})"
+            if cfg.hotkey.mouse_click_through
+            else "dictate keeps the button entirely while it is running")
+    try:
+        chord = describe(cfg.hotkey.keyboard_fallback)
+    except DictateError:
+        chord = cfg.hotkey.keyboard_fallback
+    return CheckResult(
+        "Hotkey", Status.OK,
+        f"{describe(button)}, held to talk, through a low-level mouse hook. "
+        f"{what}. {chord} still works.")
 
 
 def check_microphone(cfg: Config) -> CheckResult:

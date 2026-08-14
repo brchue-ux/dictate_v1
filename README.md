@@ -634,6 +634,64 @@ dictate hotkey "ctrl + alt + k"       # set it (a running copy keeps the old one
                                       #  until you restart it, and says so)
 ```
 
+### Or one mouse button, held the same way
+
+Three of them are on the same menu, and in the same config setting:
+
+```toml
+[hotkey]
+combination = "mouse 4"               # or "mouse 5", or "middle mouse button"
+```
+
+Hold it, speak, let go — exactly as the chord works. Left and right are refused:
+holding a button to talk means dictate has to swallow it, and a machine whose
+left button does nothing cannot be used, including to turn dictate off again.
+
+**The button keeps its own job, on a click.** dictate swallows the button as it
+goes down — so Back does *not* fire the instant you start talking — and then
+looks at how long you held it. Longer than `[audio] min_utterance_ms` and it was
+a dictation; the button never reaches the window at all. Shorter and it was a
+click, so dictate sends the click on to the window you clicked in, a millisecond
+or two after you let go rather than as you pressed. Set
+`[hotkey] mouse_click_through = false` and the button belongs to dictate alone
+while dictate is running.
+
+One thing you will see either way: **a click flashes the caption panel** for as
+long as the click lasts. Pressing the button starts a recording, and a recording
+shorter than `min_utterance_ms` is thrown away — the same path a tapped hotkey
+already takes. Deferring the start to avoid it would mean throwing away the
+first fraction of a second of everything you say, which is the worse trade.
+
+**What each button costs**, because push-to-talk means holding a button down for
+seconds at a time and that is not the same question as what a click of it does:
+
+| Button | A click of it is | Held down, it normally |
+|---|---|---|
+| **Mouse 4** (recommended) | Back | nothing — no common application does anything with it held |
+| **Mouse 5** | Forward | nothing, same as Mouse 4 |
+| **Middle** (the wheel) | open a link in a new tab, close a tab | **starts autoscroll** — the scrolling cursor — in browsers and Explorer, and pans in map, drawing and PDF applications |
+
+Mouse 4 is the one to pick. Nothing anywhere does anything with it *held*, which
+is the whole of what push-to-talk asks of a button, and what a click of it does
+— Back — is one keystroke to undo if a click ever does go astray. The middle
+button is a materially worse fit: dictate swallows it while dictate is running,
+so autoscroll does not start, but anywhere dictate's hook does not reach (a
+window running as administrator, a game reading the mouse directly) holding it
+starts autoscroll in the middle of your sentence — on top of losing new-tab and
+close-tab to the click-through path. Mouse 5 costs the least of the three;
+Forward is the least-used button on a mouse.
+
+**The keyboard chord keeps working.** A mouse button is visible to dictate only
+through a low-level mouse hook — Windows tells applications about hotkeys, and
+about mouse buttons only that way — and a hook is something Windows can refuse
+and security software can remove. So `[hotkey] keyboard_fallback` (Ctrl + Alt +
+Space unless you change it) is registered alongside it and always works. If the
+hook is refused or lost, dictate says so, turns its icon red, and carries on with
+the chord; it never sits there looking fine while the button does nothing.
+
+`dictate hotkey` prints all of the above for whichever button you are on, and
+`dictate doctor` reports the trigger you actually have.
+
 ---
 
 ## What was verified, and what was not
@@ -646,7 +704,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 767 tests, run and passing
+### Verified anywhere — 892 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -802,7 +860,7 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
-* **The 767 tests above, on Windows** as well as on Linux — which is where the
+* **The 892 tests above, on Windows** as well as on Linux — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.
 * **That a supervised child process cannot outlive its parent.** CI starts a
@@ -958,6 +1016,18 @@ misbehaves.
   is the case to watch. `dpi_awareness = "off"` and `follow_focus = false` are
   both one-line retreats if either misbehaves.
 * **The global hotkey**, including whether press/release feels right in practice.
+* **The mouse trigger's hook — every Windows call in it.** Nobody here has a
+  mouse to press or a machine to install a `WH_MOUSE_LL` hook on, so
+  `platform/windows/mouse.py` has never run: not the hook going in, not the
+  swallow actually stopping Back, not the replayed click arriving in the window
+  you clicked in, and not what any particular security product makes of a
+  process installing a global mouse hook. What *is* tested here is everything
+  that decides — which values name a button, the press/release state machine,
+  the swallow rule and its edges (the button held when dictate starts and when
+  it stops, a click too short to be a dictation, a second press with no release
+  between), and that a hook which will not install leaves the keyboard chord
+  registered and working. The retreat is one line: put a keyboard combination
+  back in `[hotkey] combination`.
 * **Microphone capture** through PortAudio — and with it, whether the new
   caption model is better *on his voice*. Everything measured about it was
   measured on read speech on a Linux box; his microphone, his room and his
