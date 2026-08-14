@@ -29,6 +29,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
+from . import overlay_size
+
 #: The menu item keys. The Win32 side maps these to command ids and back; it
 #: knows nothing else about what the menu means.
 STOP = "stop"
@@ -39,6 +41,8 @@ LOG = "log"
 STATUS = "status"
 HISTORY = "history"
 HISTORY_DELETE = "history-delete"
+SMALLER = "captions-smaller"
+BIGGER = "captions-bigger"
 
 
 class TrayStatus(Enum):
@@ -98,6 +102,10 @@ class TrayState:
     #: mentions one at all: a feature he has turned off has no business being on
     #: the only surface he can see.
     history: bool = False
+    #: The caption size in force, so the two size items can stop offering a step
+    #: there is no room for. Empty when nobody has said - the items are then
+    #: offered, because doing nothing is better than hiding the control.
+    caption_size: str = ""
 
     @property
     def colour(self) -> str:
@@ -153,11 +161,20 @@ def status_line(state: TrayState) -> str:
 def menu(state: TrayState) -> list[MenuItem]:
     """What right-clicking the icon offers.
 
-    Six lines, in four groups: what it is doing, the two that change whether it
-    is running, the two that change which version it is, and the log - plus two
-    more when a dictation history is being kept. None of them needs him to have
-    worked out what went wrong first - Stop clears a stuck copy as well as a
-    healthy one, because `dictate stop` does.
+    Eight lines, in five groups: what it is doing, the two that change how big
+    the captions are, the two that change whether it is running, the two that
+    change which version it is, and the log - plus two more when a dictation
+    history is being kept. None of them needs him to have worked out what went
+    wrong first - Stop clears a stuck copy as well as a healthy one, because
+    `dictate stop` does.
+
+    **The two size items are here because the captions are the thing he sees
+    and the tray is the only surface a logon-started copy has**: a panel that is
+    a bit too big should not require finding a terminal. They step the one knob
+    (`dictate look smaller` / `bigger`), which moves the words and the panel
+    together; splitting those two, or changing the font, is a preview-and-judge
+    job and lives in `dictate overlay`. Each greys out at the end of the ladder
+    rather than offering a step that would do nothing.
 
     **Check for updates changes nothing, ever**, which is why it is offered even
     while an update is already running: it is a report and cannot make anything
@@ -177,6 +194,13 @@ def menu(state: TrayState) -> list[MenuItem]:
     """
     items = [
         MenuItem(STATUS, status_line(state), enabled=False, separator_after=True),
+        MenuItem(SMALLER, "Make the captions smaller", "dictate look smaller",
+                 enabled=not overlay_size.at_end(state.caption_size, -1)
+                 if state.caption_size else True),
+        MenuItem(BIGGER, "Make the captions bigger", "dictate look bigger",
+                 enabled=not overlay_size.at_end(state.caption_size, 1)
+                 if state.caption_size else True,
+                 separator_after=True),
         MenuItem(STOP, "Stop dictate", "dictate stop", default=True),
         MenuItem(RESTART, "Restart dictate", "dictate stop, dictate run",
                  separator_after=True),
@@ -206,6 +230,8 @@ class TrayActions:
     update_now: Callable[[], None]
     open_history: Callable[[], None] | None = None
     delete_history: Callable[[], None] | None = None
+    captions_smaller: Callable[[], None] | None = None
+    captions_bigger: Callable[[], None] | None = None
     handlers: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -216,7 +242,9 @@ class TrayActions:
         # than raising - which is the right answer for a menu id from a copy of
         # the menu built before the history was turned off.
         for key, action in ((HISTORY, self.open_history),
-                            (HISTORY_DELETE, self.delete_history)):
+                            (HISTORY_DELETE, self.delete_history),
+                            (SMALLER, self.captions_smaller),
+                            (BIGGER, self.captions_bigger)):
             if action is not None:
                 self.handlers[key] = action
 

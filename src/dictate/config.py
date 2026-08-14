@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import overlay_size
 from .errors import ConfigError
 from .platform.fade import MIN_FADE_MS
 
@@ -84,6 +85,11 @@ class OverlayConfig:
     Every pixel measurement here is at 100% display scaling. On a monitor set to
     150% they are all multiplied by 1.5, so the overlay is the same physical size
     on every display rather than two thirds the size on the scaled one.
+
+    The pixel values describe the panel at `size = "huge"`. `size` and the two
+    overrides below multiply them, which is how the whole thing is resized
+    without hand-tuning five interdependent numbers; `overlay_size.py` carries
+    the reasoning and `dictate overlay` shows the result.
     """
 
     #: bottom-center | top-center | bottom-left | bottom-right | top-left | top-right
@@ -92,6 +98,15 @@ class OverlayConfig:
     max_width_px: int = 1080
     font_family: str = "Fira Code"
     font_size: int = 18
+    #: The one knob: small | compact | medium | large | huge. It moves the type
+    #: and the box together, so the design stays coherent at every setting.
+    size: str = overlay_size.DEFAULT
+    #: The words on their own. Empty means "follow `size`", which is the shipped
+    #: state and the one that keeps the panel self-similar.
+    text_size: str = overlay_size.FOLLOW
+    #: The box on its own - width, screen margin, padding, shoulder. Empty means
+    #: "follow `size`".
+    panel_size: str = overlay_size.FOLLOW
     #: 1.0 on purpose. A partly transparent panel goes muddy over a white
     #: document, which is where this is looked at most.
     opacity: float = 1.0
@@ -470,6 +485,15 @@ def validate(cfg: Config) -> Config:
                 f"[overlay] {key} is {value}, and it has to be at least 1 pixel.",
                 "Delete the line to get the default back.",
             )
+    # The one knob and its two overrides. Checked here rather than at the point
+    # of use, because a name he mistyped is otherwise a panel that is silently
+    # the wrong size - and `overlay_size.multiplier` is the only definition of
+    # what the names are.
+    overlay_size.multiplier(cfg.overlay.size)
+    for key in ("text_size", "panel_size"):
+        value = getattr(cfg.overlay, key)
+        if value:
+            overlay_size.multiplier(value, key=key)
     if not 1 <= cfg.overlay.lines <= 6:
         raise ConfigError(
             f"[overlay] lines is {cfg.overlay.lines}, which is outside 1-6.",

@@ -119,6 +119,24 @@ jobs:
             throw 'dictate doctor did not tell the user what to do about its findings'
           }
 
+          # How big the captions are, changed the way he changes it. This needs
+          # no screen and no Windows - it reads and writes one line of a config
+          # file - so the whole loop is checked here rather than on his machine.
+          Copy-Item config/dictate.example.toml "$env:RUNNER_TEMP/look.toml"
+          $look = dictate --config "$env:RUNNER_TEMP/look.toml" look 2>&1 | Out-String
+          Write-Host $look
+          if ($look -match 'Traceback') { throw 'dictate look printed a stack trace' }
+          if ($look -notmatch 'compact') { throw 'dictate look did not say what size the captions are' }
+          dictate --config "$env:RUNNER_TEMP/look.toml" look smaller | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'dictate look smaller failed' }
+          $after = Get-Content "$env:RUNNER_TEMP/look.toml" -Raw
+          if ($after -notmatch 'size = "small"') { throw 'dictate look smaller did not write the new size' }
+          # And the file it wrote is still a config file, comments and all.
+          if (($after -split "`n" | Where-Object { $_ -match '^#' }).Count -lt 20) {
+            throw 'dictate look rewrote the config instead of editing one line'
+          }
+          dictate --config "$env:RUNNER_TEMP/look.toml" doctor 2>&1 | Out-Null
+
           # The commands that answer "is it running?" and "stop it now" have to
           # work when nothing is running, which is the state someone is in when
           # they are confused about whether anything is.

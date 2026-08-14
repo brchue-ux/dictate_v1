@@ -19,8 +19,9 @@ import re
 import unittest
 from pathlib import Path
 
-from dictate import config as config_mod
+from dictate import config as config_mod, overlay_size
 from dictate.errors import ConfigError
+from dictate.platform import geometry
 from dictate.platform.fade import MIN_FADE_MS, Fade, ease_in_out_cubic, steps
 from dictate.platform.fonts import FALLBACKS, choose_font, normalise
 from dictate.platform.geometry import (
@@ -68,18 +69,39 @@ DESKTOP = (0, 0, 2560, 1400)
 SECOND_150 = (2560, 0, 4480, 1040)
 
 
-def layout(work=DESKTOP, scale=1.0, **kw):
-    """A slab planned with the shipped defaults unless a test says otherwise."""
+#: Fira Code: 0.6154 em advance, 1.2308 em line spacing, from the font's own
+#: hmtx and hhea tables. The real overlay measures these from Tk rather than
+#: assuming them, which is what lets the family be changed without anything else
+#: changing; here they stand in for that measurement.
+ADVANCE = 0.6154
+LINESPACE = 1.2308
+
+
+def layout(work=DESKTOP, scale=1.0, size=None, text=None, panel=None, **kw):
+    """A slab planned with the shipped defaults unless a test says otherwise.
+
+    `size`, `text` and `panel` are size *names*, as they are written in the
+    config; the font metrics below follow whichever one is in force, exactly as
+    the overlay's own measurement does.
+    """
     cfg = config_mod.OverlayConfig()
+    text_name, panel_name = overlay_size.effective(
+        size or cfg.size, text or cfg.text_size, panel or cfg.panel_size)
+    text_size = overlay_size.multiplier(text_name)
+    panel_size = overlay_size.multiplier(panel_name)
+    font_size = kw.pop("font_size", cfg.font_size)
+    caption = geometry.caption_px(font_size, text_size, scale)
+    status = geometry.status_px(font_size, text_size, scale)
     args = dict(
         position=cfg.position, work=work, scale=scale,
         max_width_px=cfg.max_width_px, margin_px=cfg.margin_px,
-        edge_px=cfg.edge_px, padding_px=cfg.padding_px, font_size=cfg.font_size,
-        status_size=cfg.font_size - 5, lines=cfg.lines,
-        # Fira Code: 0.6154 em advance, 1.2308 em line spacing, from the font's
-        # own hmtx and hhea tables. The real overlay measures these from Tk.
-        status_width_px=round(len("listening") * 0.6154 * 13 * 96 / 72 * scale),
-        line_height_px=round(1.2308 * cfg.font_size * 96 / 72 * scale),
+        edge_px=cfg.edge_px, padding_px=cfg.padding_px, font_size=font_size,
+        lines=cfg.lines,
+        status_width_px=round(len("listening") * ADVANCE * status),
+        line_height_px=round(LINESPACE * caption),
+        char_width_px=round(ADVANCE * caption),
+        max_chars=cfg.max_chars,
+        text_size=text_size, panel_size=panel_size,
     )
     args.update(kw)
     return plan_slab(**args)
@@ -272,13 +294,24 @@ class Placement(unittest.TestCase):
 
 class SlabLayoutArithmetic(unittest.TestCase):
     def test_the_defaults_land_on_a_sane_slab(self):
+        """The shipped panel: `compact`, which is five eighths of the pixel
+        values in the config - those describe it at `huge`."""
         slab = layout()
+        self.assertEqual(slab.width, 675)
+        self.assertGreater(slab.height, 60)
+        self.assertLess(slab.height, 120)
+        self.assertEqual(slab.edge, 5)
+        self.assertEqual(slab.plinth, 10)
+        self.assertGreater(slab.text_width, 500)
+
+    def test_the_panel_as_it_used_to_ship_is_still_one_word_away(self):
+        """`huge` is the old default exactly, so "put it back" is one word and
+        the pixel values in the config still mean what they say."""
+        slab = layout(size="huge")
         self.assertEqual(slab.width, 1080)
-        self.assertGreater(slab.height, 100)
-        self.assertLess(slab.height, 200)
         self.assertEqual(slab.edge, 8)
         self.assertEqual(slab.plinth, 16)
-        self.assertGreater(slab.text_width, 700)
+        self.assertEqual(slab.caption_px, round(18 * 96 / 72))
 
     def test_the_face_plus_the_shoulders_is_exactly_the_window(self):
         slab = layout()
@@ -292,7 +325,7 @@ class SlabLayoutArithmetic(unittest.TestCase):
     def test_the_gutter_holds_the_bar_the_status_word_and_two_paddings(self):
         slab = layout()
         self.assertEqual(slab.gutter, slab.bar + slab.pad_x
-                         + round(len("listening") * 0.6154 * 13 * 96 / 72)
+                         + round(len("listening") * ADVANCE * slab.status_px)
                          + slab.pad_x)
 
     def test_nothing_structural_is_a_hairline(self):
@@ -308,8 +341,11 @@ class SlabLayoutArithmetic(unittest.TestCase):
         base = layout(scale=1.0)
         big = layout(work=SECOND_150, scale=1.5)
         self.assertEqual(big.edge, round(base.edge * 1.5))
-        self.assertEqual(big.plinth, round(base.plinth * 1.5))
-        self.assertEqual(big.pad_x, round(base.pad_x * 1.5))
+        # A pixel either way: each value is rounded from the real number at this
+        # scale, not from the rounded one, which is the whole point of doing the
+        # multiplication on the config value rather than on the laid-out slab.
+        self.assertAlmostEqual(big.plinth, base.plinth * 1.5, delta=1)
+        self.assertAlmostEqual(big.pad_x, base.pad_x * 1.5, delta=1)
         self.assertAlmostEqual(big.caption_px / base.caption_px, 1.5, places=1)
         self.assertGreater(big.height, base.height)
 
@@ -340,15 +376,138 @@ class SlabLayoutArithmetic(unittest.TestCase):
         three = layout(lines=3)
         self.assertEqual(three.height - two.height, two.line_height)
 
-    def test_font_pixel_sizes_come_from_points_and_the_monitor_dpi(self):
+    def test_font_pixel_sizes_come_from_points_the_size_and_the_monitor_dpi(self):
         slab = layout(scale=1.0)
-        self.assertEqual(slab.caption_px, round(18 * 96 / 72))
+        self.assertEqual(slab.caption_px, round(18 * 0.625 * 96 / 72))
         self.assertGreater(slab.caption_px, slab.status_px)
 
     def test_scaled_never_rounds_a_real_measurement_away(self):
         self.assertEqual(scaled(8, 1.0), 8)
         self.assertEqual(scaled(8, 1.5), 12)
         self.assertEqual(scaled(1, 0.01), 1)     # never zero
+
+
+class TheSizeKnobs(unittest.TestCase):
+    """One knob that moves everything, and two that pull it apart on purpose.
+
+    None of this can be looked at from here, so what is held instead is the
+    thing that would actually go wrong: a panel whose parts stopped being in
+    proportion to each other.
+    """
+
+    def test_every_rung_is_the_same_design_at_a_different_size(self):
+        """The point of one knob. Each measurement keeps its ratio to the type,
+        so no size is the one where the padding looks wrong."""
+        for name in overlay_size.names():
+            with self.subTest(size=name):
+                slab = layout(size=name)
+                self.assertAlmostEqual(slab.pad_x / slab.caption_px, 1.08, delta=0.12)
+                self.assertAlmostEqual(slab.edge / slab.caption_px, 0.33, delta=0.05)
+                self.assertAlmostEqual(slab.width / slab.caption_px, 45.0, delta=1.5)
+
+    def test_the_line_holds_about_the_same_words_at_every_size(self):
+        """`max_chars` is one number for all of them, so a smaller panel must
+        not mean a caption tail that no longer fits on two lines."""
+        for name in overlay_size.names():
+            with self.subTest(size=name):
+                slab = layout(size=name)
+                chars = slab.text_width / (slab.caption_px * ADVANCE)
+                self.assertAlmostEqual(chars, 59.7, delta=1.5)
+                self.assertGreaterEqual(round(chars) * slab.lines,
+                                        config_mod.OverlayConfig().max_chars)
+
+    def test_smaller_is_smaller_all_the_way_down_the_ladder(self):
+        widths = [layout(size=name).width for name in overlay_size.names()]
+        heights = [layout(size=name).height for name in overlay_size.names()]
+        self.assertEqual(widths, sorted(widths))
+        self.assertEqual(heights, sorted(heights))
+        self.assertLess(widths[0] * heights[0], widths[-1] * heights[-1] / 2)
+
+    def test_the_shipped_size_is_about_forty_percent_less_type(self):
+        """What he asked for, as a number: the caption text goes from 24 px at
+        100% scaling to 15 px."""
+        was = layout(size="huge").caption_px
+        now = layout().caption_px
+        self.assertEqual((was, now), (24, 15))
+        self.assertAlmostEqual(1 - now / was, 0.40, delta=0.03)
+
+    def test_the_words_can_be_made_bigger_without_the_box_following(self):
+        """The box keeps its own size - its padding, its shoulder, its margin
+        off the screen edge - and grows only as far as the bigger words have to
+        have. Compare the whole panel at that size: that is the ceiling."""
+        both = layout()
+        bigger = layout(text="large")
+        matched = layout(size="large")
+        self.assertGreater(bigger.caption_px, both.caption_px)
+        self.assertGreater(bigger.height, both.height)      # the lines grew
+        self.assertEqual(bigger.pad_x, both.pad_x)          # the box did not
+        self.assertEqual(bigger.edge, both.edge)
+        self.assertLess(bigger.width, matched.width)
+
+    def test_the_box_can_be_made_smaller_without_the_words_following(self):
+        both = layout()
+        smaller = layout(panel="small")
+        self.assertEqual(smaller.caption_px, both.caption_px)
+        self.assertEqual(smaller.line_height, both.line_height)
+        self.assertLess(smaller.width, both.width)
+        self.assertLess(smaller.edge, both.edge)
+        self.assertLess(smaller.height, both.height)
+
+    def test_a_box_smaller_than_its_type_still_leaves_room_to_breathe(self):
+        """The floor that keeps a split pair coherent: padding may not fall
+        below a share of the type it surrounds, however small the box knob."""
+        slab = layout(text="huge", panel="small")
+        self.assertGreaterEqual(slab.pad_x, round(slab.caption_px * 0.75))
+        self.assertGreater(slab.pad_x, layout(size="small").pad_x)
+
+    def test_a_box_smaller_than_its_type_still_fits_a_line_of_it(self):
+        """The other floor: the words win. A panel narrowed under large type
+        would wrap after four words and hide the rest."""
+        slab = layout(text="huge", panel="small")
+        cfg = config_mod.OverlayConfig()
+        per_line = -(-cfg.max_chars // cfg.lines)
+        self.assertGreaterEqual(slab.text_width,
+                                per_line * round(ADVANCE * slab.caption_px))
+        # And no wider than the panel would have been at the text's own size:
+        # at matched sizes the caption tail fits with room to spare.
+        self.assertLessEqual(slab.width, layout(size="huge").width)
+
+    def test_neither_floor_binds_when_the_knobs_agree(self):
+        """They are guard rails for a deliberate mismatch, not part of the
+        design - if one of them fired at the shipped size, the numbers in the
+        config would no longer be what the panel is."""
+        for name in overlay_size.names():
+            with self.subTest(size=name):
+                cfg = config_mod.OverlayConfig()
+                mult = overlay_size.multiplier(name)
+                slab = layout(size=name)
+                self.assertEqual(slab.pad_x, scaled(cfg.padding_px * mult, 1.0))
+                self.assertEqual(slab.width, scaled(cfg.max_width_px * mult, 1.0))
+
+    def test_the_size_knobs_and_the_monitor_scaling_multiply_rather_than_replace(self):
+        """The rule the DPI work settled: every pixel value is at 100% scaling
+        and gets multiplied by the monitor's. A size knob sits on top of that,
+        so a compact panel on a 150% display is 150% of a compact panel."""
+        at_100 = layout(size="medium")
+        at_150 = layout(size="medium", work=SECOND_150, scale=1.5)
+        self.assertEqual(at_150.edge, round(at_100.edge * 1.5))
+        self.assertAlmostEqual(at_150.pad_x, at_100.pad_x * 1.5, delta=1)
+        self.assertAlmostEqual(at_150.caption_px / at_100.caption_px, 1.5, places=1)
+
+    def test_the_state_word_stays_in_proportion_rather_than_five_points_off(self):
+        """It used to be `font_size - 5`, which is a proportion at one size and
+        nonsense at half of it."""
+        for name in overlay_size.names():
+            with self.subTest(size=name):
+                slab = layout(size=name)
+                self.assertLess(slab.status_px, slab.caption_px)
+                self.assertGreaterEqual(slab.status_px, 9)
+
+    def test_a_caller_that_cannot_measure_the_font_gets_no_invented_floor(self):
+        """`char_width_px` is measured from the real font or it is not used -
+        the one thing it must never be is estimated."""
+        narrow = layout(text="huge", panel="small", char_width_px=0)
+        self.assertLess(narrow.width, layout(text="huge", panel="small").width)
 
 
 class OverlayConfigValidation(unittest.TestCase):

@@ -33,7 +33,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import history as history_mod, instance, tray as tray_mod, update as update_mod
+from . import (
+    history as history_mod, instance, overlay_size, tray as tray_mod,
+    update as update_mod,
+)
 from .cleanup.service import CleanupService
 from .config import Config
 from .engines.residency import ResidentModel, Residency
@@ -238,6 +241,8 @@ class Application:
             update_now=self.update_now,
             open_history=self._open_history,
             delete_history=self._delete_history,
+            captions_smaller=lambda: self._resize_captions(-1),
+            captions_bigger=lambda: self._resize_captions(1),
         )
         try:
             self.tray = factory.make_tray_icon(
@@ -277,7 +282,8 @@ class Application:
         return tray_mod.TrayState(status=status, hotkey=hotkey,
                                   model_resident=resident, detail=self._last_error,
                                   updating=self.update_in_flight(),
-                                  history=self.history.enabled)
+                                  history=self.history.enabled,
+                                  caption_size=self.cfg.overlay.size)
 
     def update_in_flight(self) -> bool:
         """Is the update this copy started still going?
@@ -427,6 +433,51 @@ class Application:
             self.notify("info", "The dictation history has been deleted.")
         else:
             self.notify("info", "There was no dictation history to delete.")
+
+    def _resize_captions(self, delta: int) -> None:
+        """The tray's two size items: one step down or up the size ladder.
+
+        Two things happen, and the order is the point. The size on this
+        process's own config is changed first, so the *next* caption panel is
+        the new size - the overlay reads these values once per appearance
+        (`platform/windows/overlay.py`), so nothing on screen now moves or
+        resizes, which is the rule the whole look is built on. Then it is
+        written to his config file, so it is still the new size tomorrow.
+
+        A file that cannot be written is worth saying out loud but is not worth
+        losing the change over: he asked for smaller captions and he has them
+        for this session. Nothing here may raise - it runs on the thread that
+        owns the icon.
+        """
+        name = overlay_size.step(self.cfg.overlay.size, delta)
+        if name == self.cfg.overlay.size:
+            self.notify("info", f"The captions are already as "
+                                f"{'small' if delta < 0 else 'big'} as dictate "
+                                f"makes them ({name}).")
+            return
+        # The two overrides go with it: "make it all smaller" is also the way
+        # back from a text size and a panel size he has pulled apart by hand.
+        self.cfg.overlay.size = name
+        self.cfg.overlay.text_size = overlay_size.FOLLOW
+        self.cfg.overlay.panel_size = overlay_size.FOLLOW
+        self.notify("info", f"Captions are now {name}. The next one you speak "
+                            f"will be that size.")
+        if self.cfg.source_path is None:
+            self.notify("warning", "There is no config file to remember that in "
+                                   "- run `dictate init` to keep it.")
+            self._refresh_tray()
+            return
+        try:
+            overlay_size.write(Path(self.cfg.source_path), {"size": name})
+        except DictateError as exc:
+            self.notify("warning", f"The new caption size is in use, but "
+                                   f"dictate could not write it to "
+                                   f"{self.cfg.source_path}: {exc.message}")
+        except Exception:
+            log.exception("could not write the caption size")
+            self.notify("warning", "The new caption size is in use, but dictate "
+                                   "could not write it to your config file.")
+        self._refresh_tray()
 
     def request_stop_from_tray(self) -> None:
         """The tray's Stop item. Exactly what `dictate stop` asks for, through

@@ -94,6 +94,23 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   by the chosen monitor's DPI in `geometry.plan_slab`. Fonts are sized in pixels
   (Tk's negative-size form), not points, so scaling is decided here rather than
   inferred by Tk from the primary display.
+- **Those pixel values describe the panel at `size = "huge"`, and are multiplied
+  again by the size ladder** in `src/dictate/overlay_size.py` (`small` … `huge`,
+  in eighths; ships at `compact`). Two multiplications, in this order and never
+  folded together: the size knob is what he chose, the DPI scale is what the
+  display demands. `text_size` and `panel_size` split the one knob and default to
+  "follow `size`". Do not "simplify" the ladder into new defaults for
+  `font_size`/`max_width_px`: his `dictate.toml` sets those explicitly, so a
+  default change reaches him not at all. `docs/DESIGN.md` 2c carries the
+  reasoning; `tests/test_overlay.py::TheSizeKnobs` holds the proportions.
+- **`dictate look` writes one line of his config, in place.** Never rewrite that
+  file from the dataclasses: it is the commented file `dictate init` wrote, and
+  the comments are most of it. `overlay_size.set_in_text` replaces the value,
+  keeps the trailing comment at its own column, stops at the next section header
+  and adds the key at the top of `[overlay]` when it is missing;
+  `tests/test_overlay_size.py` holds each of those. The same function is what
+  `dictate overlay --keep` and the tray's two size items use - one writer, one
+  set of rules.
 - **Tk substitutes a missing font family silently.** `platform/fonts.py` compares
   what was asked for against `Font.actual("family")` and reports the substitution on
   startup. Anything that picks a font must go through it; "it looked wrong and

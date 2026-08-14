@@ -70,11 +70,12 @@ import logging
 import queue
 import threading
 
+from ... import overlay_size
 from ...config import OverlayConfig
 from ..base import OverlayState, TargetWindow
 from ..fade import Fade
 from ..fonts import choose_font
-from ..geometry import SlabLayout, plan_slab
+from ..geometry import SlabLayout, caption_px, plan_slab, status_px
 
 log = logging.getLogger(__name__)
 
@@ -157,7 +158,12 @@ class TkCaptionOverlay:
     def describe(self) -> str:
         font = self._font_choice
         family = font.family if font else self.cfg.font_family
-        return (f"{family} {self.cfg.font_size}pt, {self.cfg.position}, "
+        text, panel = overlay_size.effective(
+            self.cfg.size, self.cfg.text_size, self.cfg.panel_size)
+        sizes = f"{text} text" if text == panel else f"{text} text in a {panel} panel"
+        # The family it GOT rather than the one that was asked for, and the size
+        # names rather than the raw points: those are the words he changes.
+        return (f"{family}, {sizes}, {self.cfg.position}, "
                 f"DPI awareness {self._dpi_mode}")
 
     # -- UI thread -------------------------------------------------------
@@ -446,17 +452,24 @@ class TkCaptionOverlay:
         """This appearance's numbers, on this appearance's monitor.
 
         The order matters and is why this is not two functions: the scale comes
-        from the monitor, the font pixel sizes come from the scale, and the
-        gutter width and line height are then *measured* from fonts that are
-        already at those sizes. Estimating either would clip the state word or
-        misjudge the slab's height on a display that is not at 100%.
+        from the monitor, the font pixel sizes come from the scale *and the size
+        knobs*, and the gutter width, line height and average advance are then
+        *measured* from fonts that are already at those sizes. Estimating any of
+        them would clip the state word, misjudge the slab's height on a display
+        that is not at 100%, or - the reason the advance is measured at all -
+        get the width floor wrong for whichever family he has chosen.
+
+        This is also why changing `font_family` needs nothing else to change:
+        every number below comes from the font that is actually in use.
         """
         monitor = self._pick_monitor()
         scale = monitor.scale if self.cfg.dpi_awareness != "off" else 1.0
-        caption_px = max(6, round(self.cfg.font_size * 96 / 72 * scale))
-        status_px = max(5, round(max(7, self.cfg.font_size - 5) * 96 / 72 * scale))
-        self._caption_font.configure(size=-caption_px)
-        self._status_font.configure(size=-status_px)
+        text_size, panel_size = overlay_size.multipliers(
+            self.cfg.size, self.cfg.text_size, self.cfg.panel_size)
+        self._caption_font.configure(
+            size=-caption_px(self.cfg.font_size, text_size, scale))
+        self._status_font.configure(
+            size=-status_px(self.cfg.font_size, text_size, scale))
 
         layout = plan_slab(
             position=self.cfg.position,
@@ -467,10 +480,13 @@ class TkCaptionOverlay:
             edge_px=self.cfg.edge_px,
             padding_px=self.cfg.padding_px,
             font_size=self.cfg.font_size,
-            status_size=max(7, self.cfg.font_size - 5),
             lines=self.cfg.lines,
             status_width_px=self._status_font.measure(_LONGEST_LABEL),
             line_height_px=self._caption_font.metrics("linespace"),
+            char_width_px=self._caption_font.measure("0"),
+            max_chars=self.cfg.max_chars,
+            text_size=text_size,
+            panel_size=panel_size,
         )
         log.debug("caption overlay on %s -> %dx%d at (%d,%d)", monitor,
                   layout.width, layout.height, layout.x, layout.y)

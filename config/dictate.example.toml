@@ -61,27 +61,53 @@ decoding_method = "greedy_search"
 # The caption window. It is always on top, it never takes focus, and clicks pass
 # straight through it to whatever is underneath.
 #
-# To see it without dictating - it shows sample text and runs the whole
-# appear-and-fade cycle, so you can change a value here and look at the result
-# in about two seconds:
+# HOW BIG IT IS - the three things worth changing, all of them one word:
 #
-#   dictate overlay
+#   size         the whole panel, words and box together. The one knob.
+#   text_size    the words on their own, when you want them bigger or smaller
+#                without the box following.
+#   panel_size   the box on its own - width, margin, padding - without the
+#                words following.
 #
-# EVERY PIXEL VALUE BELOW IS AT 100% DISPLAY SCALING. On a monitor set to 150%
-# they are all multiplied by 1.5, so the captions are the same physical size on
-# every screen instead of two thirds the size on the scaled one.
+# Both overrides are empty by default, which means "follow size". Leaving them
+# that way is the design as drawn: the words, the width, the padding and the
+# shoulder all move together, so it looks deliberate at every setting.
+#
+# You do not have to edit this file to change any of it. Try one on screen and
+# keep it if you like it:
+#
+#   dictate overlay --size small        try it, then answer "keep it?"
+#   dictate overlay --text bigger       just the words
+#   dictate overlay --font "Consolas"   just the font (--fonts lists them)
+#   dictate look                        what it is now, and the sizes there are
+#   dictate look smaller                one step down, no preview
+#
+# The notification-area icon has "Make the captions smaller" and "bigger" too,
+# and they take effect on the next thing you say.
+
+size = "compact"             # small, compact, medium, large, huge
+text_size = ""               # empty = follow `size`
+panel_size = ""              # empty = follow `size`
 
 position = "bottom-center"   # bottom-center, bottom-left, bottom-right,
                              # top-center, top-left, top-right
+
+# EVERY PIXEL VALUE BELOW IS AT 100% DISPLAY SCALING, AND DESCRIBES THE PANEL AT
+# size = "huge". `size` multiplies them - "compact" is five eighths of them -
+# and on a monitor set to 150% they are all multiplied again by 1.5, so the
+# captions are the same physical size on every screen instead of two thirds the
+# size on the scaled one. Change `size` rather than these; these are the shape
+# of the design, and they only look right in proportion to each other.
 margin_px = 64               # gap from the edge of the screen's usable area
 max_width_px = 1080          # never more than 72% of the display, whatever this says
 
 # Fira Code, as asked for. If it is not installed dictate uses Consolas instead
-# and SAYS SO when it starts - it never quietly draws a different font.
+# and SAYS SO when it starts - it never quietly draws a different font. Run
+# `dictate overlay --fonts` for the list this machine actually has.
 # Fira Code's other weights install under their own names, so "Fira Code Retina"
 # and "Fira Code Medium" are both valid here if you want it a touch heavier.
 font_family = "Fira Code"
-font_size = 18               # points
+font_size = 18               # points, at size = "huge"
 
 # 1.0 means solid. Anything less lets the window behind show through, which
 # looks appealing on a dark desktop and goes muddy over a white page - the thing
@@ -102,6 +128,7 @@ error = "#c9705c"            # something went wrong
 
 edge_px = 8                  # thickness of that shoulder and of the state bar
 padding_px = 26              # breathing room inside the face
+                             # (both at size = "huge", like every pixel value)
 
 # Caption lines the panel reserves. It is this tall whether you say one word or
 # fifty, so it never grows or shifts while you are talking - which is the thing

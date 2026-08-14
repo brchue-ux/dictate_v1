@@ -180,6 +180,52 @@ slower than in, resuming from the current alpha if it is interrupted. The fade
 out runs after the text has already been pasted, so its length costs nothing.
 `fade = false` restores the old snap.
 
+### 2c. How big it is, is one word — and the pixel values are the design
+
+The product owner saw the panel on his own screen and said the text was too
+large by "like 40%", and that the panel therefore took up a lot of the screen.
+The fix is *not* to change five numbers in the config, because those five
+numbers only look right in relation to each other: type, padding, shoulder,
+width and screen margin are one proportion, and hand-tuning any of them alone
+produces a small line of text floating in a large slab. He also will not
+hand-tune anything, and said so.
+
+So the pixel values in `[overlay]` were left exactly as they are — they are the
+drawing, at `size = "huge"` — and a named ladder multiplies all of them at once:
+`small`, `compact`, `medium`, `large`, `huge`, in eighths, which lands the
+caption text on 12, 15, 18, 21 and 24 pixels at 100% scaling. **It ships at
+`compact`.** Two consequences are load-bearing:
+
+* His existing `dictate.toml`, written by `dictate init` before any of this,
+  sets `font_size = 18` and the rest explicitly. A change of *defaults* would
+  therefore have done nothing for him at all. A multiplier is what makes a file
+  with no new key get the smaller panel.
+* Because the whole design scales together, the text column works out at about
+  60 characters a line at *every* rung, so `max_chars` stays right and no size
+  is the one where the padding looks wrong.
+
+`text_size` and `panel_size` split that one knob when he wants the words bigger
+than the box, or the box smaller than the words; both are empty by default,
+meaning "follow `size`". Where they are split, two floors in `plan_slab` decide
+it, and both are the words winning: padding may not fall below
+`MIN_PADDING_SHARE` of the type it surrounds, and the panel may not be narrowed
+until `max_chars` no longer fit on the lines it reserves — which would silently
+clip the *newest* words off the bottom while he is still speaking. Neither floor
+moves anything while the two agree.
+
+**The size knobs are a second multiplication on top of the DPI scaling, never a
+replacement for it.** `size` is what he chose; the monitor's scale is what the
+display demands. A `compact` panel on a 150% screen is 150% of a compact panel.
+
+None of it is reachable only by editing a file. `dictate overlay --size small`
+(or `--text`, `--panel`, `--font`) shows the result and *then* asks whether to
+keep it; `dictate look` says what is in force and changes it in one word; and
+the tray has "Make the captions smaller" and "bigger", which take effect on the
+next appearance — rule 2b again, since nothing on screen may resize while it is
+being read. `src/dictate/overlay_size.py` carries the ladder, and the config
+write is one line of one section with every comment left where it was: his
+config file is his.
+
 ### 3. The clipboard is preserved — by not touching it
 
 Default paste method is `sendinput`: the text is synthesised as Unicode

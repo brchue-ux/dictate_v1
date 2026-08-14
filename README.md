@@ -370,10 +370,47 @@ whole appear, fill, hold, clear and fade cycle:
 dictate overlay
 ```
 
-Change something in the `[overlay]` block of your config, run that again, and you
-see the result in about two seconds instead of a record-speak-release round trip.
 `dictate overlay --error` shows the failure state, `--repeat 3` loops it, and
 `--rate 150` runs the words in faster than real dictation does.
+
+#### Making it bigger or smaller, or changing the font
+
+Three things are worth changing, and none of them needs you to open a file or to
+work out a pixel measurement:
+
+| You want | Type this |
+|---|---|
+| the whole panel a bit smaller | `dictate look smaller` |
+| the whole panel a set size | `dictate look medium` |
+| **just the words** bigger or smaller | `dictate look --text bigger` |
+| **just the panel** bigger or smaller | `dictate look --panel small` |
+| a different font | `dictate look --font "Consolas"` |
+| to see what fonts you have | `dictate look --fonts` |
+| to *try* any of those before keeping it | `dictate overlay --size small` |
+
+The sizes are `small`, `compact`, `medium`, `large` and `huge`; **it ships at
+`compact`**, and `huge` is the panel exactly as it was before this existed. Each
+step is about three pixels of caption text — 12, 15, 18, 21, 24 at 100% display
+scaling.
+
+`dictate overlay --size small` (or `--text`, `--panel`, `--font`) shows you the
+result and then asks whether to keep it, so you can look at three sizes in half a
+minute and never type a number. Answering `y` writes the one line into your
+config; `--keep` skips the question. `dictate look` on its own says what the
+captions are now and what is a step either side.
+
+The **one knob is `size`** and it is the one to use: it moves the words, the
+width, the padding and the shoulder together, so the panel looks deliberate at
+every setting rather than like a small line of text in a large box. `--text` and
+`--panel` split that apart when you want them split — a smaller box will still
+grow enough to fit the words you asked for, because text vanishing off the
+bottom of the panel while you speak is worse than a box that is wider than you
+asked for.
+
+The notification-area icon has **Make the captions smaller** and **bigger** too,
+and those take effect on the very next thing you say. Everything else about the
+panel — the colours, the position, the fade — is still the `[overlay]` block of
+your config; change a value there and run `dictate overlay` to see it.
 
 **What it shows, at each moment:**
 
@@ -402,7 +439,9 @@ Three other things about it are worth knowing:
   `[overlay]` is at 100% scaling and is multiplied by that display's own
   scaling, so a second screen at 150% gets captions the same physical size
   rather than two thirds the size. If that misbehaves, `dpi_awareness = "off"`
-  hands the scaling back to Windows.
+  hands the scaling back to Windows. `size` sits on top of that rather than
+  instead of it: a `compact` panel on a 150% screen is 150% of a compact
+  panel.
 * **It is set in Fira Code**, which is already installed on this PC. If it ever
   is not, dictate uses Consolas and **says so when it starts** — it will not
   quietly draw a different font and leave you wondering.
@@ -742,12 +781,15 @@ misbehaves.
   they appear, and whether clicking Delete really removes the file on his
   machine. The store underneath is tested here; `os.startfile` opening the file
   for him has run nowhere, and `dictate history` from a prompt is the fallback.
-* **What the overlay looks like.** Nobody here has run it. The colours, the type
-  and the layout arithmetic were checked by rendering the panel at exactly the
-  sizes the code uses, with the real Fira Code file, against a white document, a
-  dark editor and a photo wallpaper — but that is a picture of the design, drawn
-  by a different renderer, not a screenshot of the Tk window. `dictate overlay`
-  is how it gets looked at for real, and it takes about ten seconds.
+* **What the overlay looks like, at any size.** Nobody here has run it. The
+  colours, the type and the layout arithmetic were checked by rendering the
+  panel at exactly the sizes the code uses — the smaller default and each rung
+  of the size ladder were drawn from the product's own layout code, with a
+  stand-in monospace font, against a document page — but that is a picture of
+  the design by a different renderer, not a screenshot of the Tk window.
+  Whether `compact` is the right *default* on his display is his call, and
+  `dictate overlay --size medium` is how he makes it: it takes about ten
+  seconds and asks whether to keep what he saw.
 * **How Fira Code's ligatures render here.** Fira Code puts all of them in the
   OpenType `calt` feature — it has no `liga` table at all (checked against the
   6.2 release). Tk draws text through GDI on Windows, which is not expected to
