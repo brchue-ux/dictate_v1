@@ -828,11 +828,19 @@ jobs:
             }
             # The whole bug: this failure used to be reported as a network
             # problem, and he went and checked his connection and his proxy.
-            if ($output -match '(?i)internet connection|proxy setting|blocking\s+pypi') {
-              throw 'setup blamed the network for a file another program had open'
-            }
+            #
+            # The message is required to mention the internet EXACTLY ONCE, in
+            # the sentence that rules it out. So that sentence is taken away
+            # first and then nothing may mention it at all - which is stricter
+            # than listing today's blame wordings, and does not go off on the
+            # exculpation itself the way a plain grep for "internet connection"
+            # does.
             if ($output -notmatch '(?i)nothing to do with your internet') {
               throw 'setup did not rule the network out by name'
+            }
+            $rest = $output -replace '(?i)nothing to do with your internet connection[\s\S]*?does not use the network\.', ''
+            if ($rest -match '(?i)internet|proxy|pypi') {
+              throw 'setup blamed the network for a file another program had open'
             }
             if ($output -notmatch '(?i)Task Manager') { throw 'setup gave him nothing to do' }
             if ($output -notmatch '(?i)antivirus') { throw 'setup did not mention the antivirus case' }

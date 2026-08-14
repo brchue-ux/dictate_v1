@@ -1561,9 +1561,13 @@ function Wait-ForFilesReplaceable {
             $announced = $true
             & $OnWaiting $blocked $TimeoutSeconds
         }
-        Start-Sleep -Milliseconds ([int]([math]::Min(2.0, $poll) * 1000))
         # Back off rather than hammering the file: a scanner that is reading it
-        # finishes sooner if nothing keeps interrupting.
+        # finishes sooner if nothing keeps interrupting. Clamped to what is left
+        # of the budget as well as to 2 seconds, so that a run which says "up to
+        # 20 seconds" does not then report having waited 22.
+        $left = $TimeoutSeconds - $clock.Elapsed.TotalSeconds
+        $nap = [math]::Min([math]::Min(2.0, $poll), $left)
+        if ($nap -gt 0) { Start-Sleep -Milliseconds ([int]($nap * 1000)) }
         $poll = $poll * 2
     }
     $clock.Stop()
