@@ -7,7 +7,7 @@
 # GPU. So this workflow exists to catch everything that can be caught without
 # one, on the same operating system the product actually runs on.
 #
-#   PROVED HERE  the Python package installs on Windows and its 691 tests pass;
+#   PROVED HERE  the Python package installs on Windows and its 767 tests pass;
 #                the installer's own logic works on Windows PowerShell 5.1,
 #                including a download that really is interrupted and resumed;
 #                whisper.cpp compiles from source with the Vulkan backend on
@@ -105,6 +105,33 @@ jobs:
           Write-Host $marks
           if ($marks -match 'Traceback') { throw 'dictate punctuate printed a stack trace' }
           if ($marks -notmatch 'hello, world') { throw "dictate punctuate did not punctuate: $marks" }
+
+          # Changing the hotkey writes one line of a real config file. It is
+          # done here on a copy rather than on the checkout, and read back
+          # through `dictate hotkey` - which is the half of the tray's own item
+          # that can be run without a notification area. Windows is where this
+          # matters: the file is CRLF and may carry a byte order mark, and both
+          # have to come back out the way they went in.
+          $keyconfig = Join-Path $env:RUNNER_TEMP 'hotkey-dictate.toml'
+          Copy-Item config/dictate.example.toml $keyconfig -Force
+          $before = (Get-Item $keyconfig).Length
+          $set = dictate --config $keyconfig hotkey "ctrl + shift + d" 2>&1 | Out-String
+          Write-Host $set
+          if ($set -match 'Traceback') { throw 'dictate hotkey printed a stack trace' }
+          if ($set -notmatch 'Ctrl \+ Shift \+ D') { throw "dictate hotkey did not set it: $set" }
+          $shown = dictate --config $keyconfig hotkey 2>&1 | Out-String
+          Write-Host $shown
+          if ($shown -notmatch 'Ctrl \+ Shift \+ D') { throw "the hotkey did not survive the write: $shown" }
+          # A one-line change to a one-line setting: the file must not have been
+          # rewritten, reflowed, or had its line endings translated.
+          $after = (Get-Item $keyconfig).Length
+          if ([math]::Abs($after - $before) -gt 8) {
+            throw "dictate hotkey rewrote the config file ($before -> $after bytes)"
+          }
+          $bad = dictate --config $keyconfig hotkey "ctrl + alt" 2>&1 | Out-String
+          Write-Host $bad
+          if ($bad -match 'Traceback') { throw 'a bad hotkey printed a stack trace' }
+          if ($bad -notmatch 'modifier') { throw "a modifier-only hotkey was not refused: $bad" }
 
           # `doctor` is meant to report missing pieces, so a non-zero exit here
           # is the correct answer on a bare CI machine. What must never happen

@@ -77,6 +77,10 @@ class INPUT(ctypes.Structure):
 
 user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
 user32.SendInput.restype = wintypes.UINT
+# Declared, like everything else here: undeclared, ctypes would return a C int
+# and the 0x8000 "held down" bit would be read out of a truncated value.
+user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
+user32.GetAsyncKeyState.restype = ctypes.c_short
 
 # -- window handling ---------------------------------------------------------
 

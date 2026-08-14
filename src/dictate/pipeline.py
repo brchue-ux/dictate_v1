@@ -98,8 +98,9 @@ class Utterance:
 Notify = Callable[[str, str], None]
 Submit = Callable[[Callable[[], None]], None]
 #: Called once per dictation that was actually delivered, with the text that
-#: landed, the text Whisper produced before the cleanup rules ran, and how long
-#: he spoke for. What is kept out of that, in what shape, and for how long is
+#: landed, the text Whisper produced before the cleanup rules ran, how long he
+#: spoke for, and how many Return keypresses delivering it involved. What is
+#: kept out of that, in what shape, and for how long is
 #: `history.HistoryStore`'s business, not this module's.
 Record = Callable[..., None]
 
@@ -429,6 +430,13 @@ class Pipeline:
             duration = len(pcm) / 2 / self.sample_rate
             self._pending += 1
 
+        # Said at every release, with how long the key was actually held. It is
+        # one line and it is the only record of an utterance that ended when he
+        # did not mean it to - a chord half-released ends the recording, by
+        # design, and afterwards there is otherwise nothing to look at but a
+        # sentence that stops early.
+        log.info("recording stopped after %.1fs of audio", duration)
+
         # The words stay on screen and the panel says "thinking": he can still
         # read what he said while the GPU works, which is the moment he would
         # otherwise be watching an empty slab and wondering.
@@ -498,7 +506,7 @@ class Pipeline:
                 self.notify("info", "dictate did not hear any words in that, so "
                                     "nothing was pasted.")
                 return
-            self.injector.send(final, utt.target)
+            returns = self.injector.send(final, utt.target) or 0
             self.completed += 1
             log.info("delivered %d chars to %s in %.2fs",
                      len(final), utt.target or "the focused window", self.clock() - t0)
@@ -507,7 +515,7 @@ class Pipeline:
             # the word "pasted" is the one arrangement in which he could take
             # the caption for what was pasted.
             self.overlay.set_state(OverlayState.DONE, "")
-            self._remember(final, raw=text, utt=utt)
+            self._remember(final, raw=text, utt=utt, returns=returns)
         except DictateError as exc:
             log.error("%s", exc.report())
             self._fail(exc.report())
@@ -545,16 +553,21 @@ class Pipeline:
                                    + result.rejected_reason + ".")
         return result.text
 
-    def _remember(self, final: str, *, raw: str, utt: Utterance) -> None:
+    def _remember(self, final: str, *, raw: str, utt: Utterance,
+                  returns: int = 0) -> None:
         """Hand the finished dictation to whoever is keeping the record.
 
         Called only after the text has actually been delivered, so every line in
         the history is text that landed somewhere. It is guarded here rather
         than trusted to the callback: a history that cannot be written must
         never turn a dictation that worked into a reported failure.
+
+        `returns` is what the injector reports it pressed Return for. It is the
+        answer to "did that just submit something?", which is a question he
+        should be able to ask an hour later rather than only in the moment.
         """
         try:
-            self.record(final, raw=raw, spoke_s=utt.duration_s)
+            self.record(final, raw=raw, spoke_s=utt.duration_s, returns=returns)
         except Exception:
             log.exception("the dictation history could not be written; the text "
                           "was pasted and nothing else is affected")

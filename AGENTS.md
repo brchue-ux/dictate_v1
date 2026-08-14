@@ -4,7 +4,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 ## Where the real documentation is
 
-- **`docs/DESIGN.md`** — the four settled decisions, the five constraints that break the
+- **`docs/DESIGN.md`** — the four settled decisions, the six constraints that break the
   product if ignored, the threading model, and what was deliberately not done. Read it
   before changing anything in `src/dictate/platform/` or `src/dictate/engines/`.
 - **`README.md` → "What was verified, and what was not"** — the honest split between what
@@ -51,6 +51,30 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **`config/cleanup-rules.toml` is TOML**: plain settings must come *before* the
   `[[deletions]]` blocks, or they silently become fields of the last one. Same
   trap, same rule, in `config/voice-punctuation.toml`.
+- **Nothing dictated may press a key, and `whisper-server` replies in lines.**
+  whisper.cpp's `output_str` writes `"\n"` after EVERY segment, so the JSON
+  `text` field is one line per segment; `WhisperServerClient._parse` joins them
+  with a space, exactly as the `verbose_json` branch beside it always did.
+  Leaving that newline in is what pressed Enter in his terminal and ran a
+  command. Behind it, `plan_text` emits Return or Tab only when the caller
+  passes `allow_return=True`, and `injector.send` applies
+  `platform/line_breaks.py` once, above both paste methods - a newline on the
+  clipboard submits just as well as a synthesised one. `[paste] line_breaks =
+  "return"` is the only way back, and it is what makes the spoken "new line"
+  mark do anything. `tests/test_stray_enter.py` holds the whole chain, and
+  `docs/DESIGN.md` constraint 6 carries the reasoning. Related, same class:
+  `platform/modifier_guard.py` waits for Ctrl/Alt/Win to come up before typing,
+  because the chord's other keys can still be down when the paste happens.
+- **The tray changes the hotkey by offering a short list, and writes it down.**
+  He will not hand-edit a config file, and a running dictate may not show a
+  dialog (it holds the instance lock), so "press the keys you want" is out -
+  `src/dictate/hotkey_switch.py` carries that reasoning and the choices. Order
+  is the safety: register the new combination, and only if Windows accepts it
+  write the config, so a combination another program owns leaves both the
+  hotkey and the file as they were (`app.change_hotkey`). The write is a
+  one-line text edit, never a re-serialised TOML - `config_edit.py` preserves
+  his comments, his CRLF endings and his byte order mark, and is the module to
+  reuse for any other setting the tray ever changes.
 - **Spoken punctuation is a stage of its own and must stay one.** It substitutes,
   which the cleanup pass is built to make impossible, so it lives in
   `src/dictate/punctuation/` and runs *after* cleanup — never inside it, never

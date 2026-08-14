@@ -74,14 +74,20 @@ def actions(done: list[str]) -> tray.TrayActions:
         update_now=lambda: done.append("update"),
         open_history=lambda: done.append("history"),
         delete_history=lambda: done.append("history-delete"),
+        set_hotkey=lambda combination: done.append(f"hotkey:{combination}"),
     )
 
 
+def hotkey_submenu(**kwargs) -> list[tray.MenuItem]:
+    items = {item.key: item for item in tray.menu(state(**kwargs))}
+    return list(items[tray.HOTKEY].children)
+
+
 class WhatItOffers(unittest.TestCase):
-    def test_the_menu_is_status_stop_restart_the_updates_and_the_log(self):
+    def test_the_menu_is_status_stop_restart_the_updates_the_hotkey_and_the_log(self):
         keys = [item.key for item in tray.menu(state())]
         self.assertEqual(keys, [tray.STATUS, tray.STOP, tray.RESTART,
-                                tray.CHECK, tray.UPDATE, tray.LOG])
+                                tray.CHECK, tray.UPDATE, tray.HOTKEY, tray.LOG])
 
     def test_a_history_being_kept_can_be_opened_and_deleted_from_here(self):
         """The tray is the only surface a logon-started copy has, so it is
@@ -153,6 +159,71 @@ class WhatItOffers(unittest.TestCase):
         self.assertFalse(actions(done).invoke("nonsense"))
         self.assertFalse(actions(done).invoke(tray.STATUS))
         self.assertEqual(done, [])
+
+    def test_the_hotkey_item_is_a_submenu_of_combinations(self):
+        """He does not have a settings window and will not edit a config file,
+        so the combinations are on the menu and each one is a click."""
+        items = {item.key: item for item in tray.menu(state())}
+        self.assertEqual(items[tray.HOTKEY].command, "dictate hotkey")
+        keys = [child.key for child in items[tray.HOTKEY].children]
+        self.assertTrue(all(k.startswith(tray.HOTKEY_PREFIX)
+                            for k in keys[:-1]), keys)
+        self.assertEqual(keys[-1], tray.HOTKEY_OTHER)
+
+    def test_the_one_he_is_using_is_ticked_and_is_on_the_list(self):
+        children = hotkey_submenu(hotkey_combination="ctrl + alt + space")
+        ticked = [child for child in children if child.checked]
+        self.assertEqual([child.key for child in ticked],
+                         [tray.HOTKEY_PREFIX + "ctrl + alt + space"])
+
+    def test_a_hotkey_of_his_own_is_added_to_the_list_rather_than_hidden(self):
+        """A menu of four alternatives that does not include what he is using
+        cannot be read: there is nothing to say which one he has."""
+        children = hotkey_submenu(hotkey_combination="ctrl + shift + f")
+        ticked = [child for child in children if child.checked]
+        self.assertEqual([child.key for child in ticked],
+                         [tray.HOTKEY_PREFIX + "control + shift + f"])
+        self.assertIn("Ctrl + Shift + F", ticked[0].label)
+
+    def test_a_hotkey_that_cannot_be_parsed_does_not_break_the_menu(self):
+        """The menu is the only surface a logon-started copy has. A config with
+        nonsense in it must not be able to empty it."""
+        children = hotkey_submenu(hotkey_combination="++")
+        self.assertTrue(children)
+        self.assertFalse([child for child in children if child.checked])
+
+    def test_every_combination_names_the_command_that_sets_it(self):
+        for child in hotkey_submenu():
+            if child.key.startswith(tray.HOTKEY_PREFIX):
+                combination = child.key[len(tray.HOTKEY_PREFIX):]
+                self.assertEqual(child.command,
+                                 f'dictate hotkey "{combination}"')
+
+    def test_anything_else_is_a_line_that_names_the_command_and_is_not_clickable(self):
+        other = hotkey_submenu()[-1]
+        self.assertEqual(other.key, tray.HOTKEY_OTHER)
+        self.assertFalse(other.enabled)
+        self.assertIn("dictate hotkey", other.command)
+
+    def test_choosing_one_hands_the_combination_to_the_app(self):
+        done: list[str] = []
+        wired = actions(done)
+        self.assertTrue(wired.invoke(tray.HOTKEY_PREFIX + "ctrl + alt + d"))
+        self.assertEqual(done, ["hotkey:ctrl + alt + d"])
+
+    def test_the_submenu_parent_itself_does_nothing(self):
+        done: list[str] = []
+        self.assertFalse(actions(done).invoke(tray.HOTKEY))
+        self.assertFalse(actions(done).invoke(tray.HOTKEY_OTHER))
+        self.assertFalse(actions(done).invoke(tray.HOTKEY_PREFIX))
+        self.assertEqual(done, [])
+
+    def test_a_hotkey_action_that_was_never_supplied_does_nothing(self):
+        bare = tray.TrayActions(stop=lambda: None, restart=lambda: None,
+                                open_log=lambda: None,
+                                check_updates=lambda: None,
+                                update_now=lambda: None)
+        self.assertFalse(bare.invoke(tray.HOTKEY_PREFIX + "ctrl + alt + d"))
 
     def test_a_history_action_that_was_never_supplied_does_nothing(self):
         """A menu id from before the history was turned off must not reach a

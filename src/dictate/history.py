@@ -19,6 +19,11 @@ involved is the one that opens the file for him (`app._open_history`).
   what a spoken mark turned into, which is the thing most worth being able to
   argue with. When neither stage touched the sentence the line would be the same
   sentence twice, so it is not written.
+* **Whether delivering it pressed Return** - and only when it did. Return
+  submits in a terminal, a chat box and most search fields, so a dictation that
+  contained one may have run a command; that is a thing to be able to look up
+  afterwards rather than only to catch happening. It takes `[paste] line_breaks
+  = "return"` to get one at all, so ordinarily this line never appears.
 * **Not how long transcription took.** That answers a developer's question, not
   his, and the log already carries it.
 * **Not the window it was pasted into, and not a failed dictation.** Every line
@@ -83,10 +88,14 @@ class Entry:
     #: ran. Empty when neither changed it, because then it is the same sentence
     #: twice.
     raw: str = ""
+    #: How many Return keypresses delivering it involved. Zero unless he has set
+    #: `[paste] line_breaks = "return"`, and said out loud when it is not,
+    #: because a Return is the one thing in a paste that can DO something.
+    returns: int = 0
 
     @classmethod
     def of(cls, text: str, *, raw: str = "", spoke_s: float = 0.0,
-           when: float | None = None) -> Entry:
+           returns: int = 0, when: float | None = None) -> Entry:
         text = text.strip()
         raw = raw.strip()
         return cls(
@@ -94,6 +103,7 @@ class Entry:
             spoke_s=max(0.0, spoke_s),
             text=text,
             raw=raw if raw and raw != text else "",
+            returns=max(0, returns),
         )
 
     def render(self) -> str:
@@ -103,7 +113,19 @@ class Entry:
                  _wrap(self.text)]
         if self.raw:
             parts += ["", _wrap(self.raw, first="as Whisper heard it: ")]
+        if self.returns:
+            parts += ["", _wrap(self.note_about_returns())]
         return "\n".join(parts) + "\n\n"
+
+    def note_about_returns(self) -> str:
+        """Said in what it did, not in what it was: he is not looking for the
+        word "keypress", he is looking for why something ran."""
+        many = self.returns > 1
+        return (f"dictate pressed Return {self.returns} times while pasting this"
+                if many else "dictate pressed Return once while pasting this") + \
+            (" - in a terminal or a chat box that submits. Set [paste] "
+             'line_breaks = "space" in your dictate.toml to have line breaks '
+             "pasted as a space instead.")
 
 
 def _wrap(text: str, *, first: str = "") -> str:
@@ -188,14 +210,15 @@ class HistoryStore:
             return "off ([history] enabled = false)"
         return f"the last {self.keep} dictations, in {self.path}"
 
-    def record(self, text: str, *, raw: str = "", spoke_s: float = 0.0) -> bool:
+    def record(self, text: str, *, raw: str = "", spoke_s: float = 0.0,
+               returns: int = 0) -> bool:
         """Add one dictation. True if it was written.
 
         Called from the finalise worker, after the text has been delivered.
         """
         if not self.enabled or not text.strip():
             return False
-        entry = Entry.of(text, raw=raw, spoke_s=spoke_s)
+        entry = Entry.of(text, raw=raw, spoke_s=spoke_s, returns=returns)
         try:
             existing = entries_in(self._read())
             self._write(header(self.keep)

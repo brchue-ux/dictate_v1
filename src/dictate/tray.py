@@ -29,6 +29,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
+from . import hotkey_switch
+from .errors import DictateError
+from .platform.hotkey_spec import describe
+
 #: The menu item keys. The Win32 side maps these to command ids and back; it
 #: knows nothing else about what the menu means.
 STOP = "stop"
@@ -39,6 +43,12 @@ LOG = "log"
 STATUS = "status"
 HISTORY = "history"
 HISTORY_DELETE = "history-delete"
+HOTKEY = "hotkey"
+#: One key per offered combination: the key carries the combination itself, so
+#: the Win32 side still knows nothing but a string, and `TrayActions.invoke`
+#: is the only thing that has to read it.
+HOTKEY_PREFIX = "hotkey="
+HOTKEY_OTHER = "hotkey-other"
 
 
 class TrayStatus(Enum):
@@ -85,6 +95,9 @@ class TrayState:
     status: TrayStatus = TrayStatus.STARTING
     #: The hotkey, in the words `dictate doctor` uses.
     hotkey: str = ""
+    #: The same hotkey as it is written in the config file. The menu needs it to
+    #: tick the one he is using; the tooltip wants the pretty one above.
+    hotkey_combination: str = ""
     #: Whether the transcription model is in the graphics card right now.
     model_resident: bool = False
     #: One line about what went wrong, when status is ERROR.
@@ -135,6 +148,12 @@ class MenuItem:
     enabled: bool = True
     default: bool = False
     separator_after: bool = False
+    #: A submenu. An item with children is not clickable itself and has no
+    #: action; the Win32 side hangs a popup menu off it.
+    children: tuple[MenuItem, ...] = ()
+    #: Shown with a tick. Used for "this is the hotkey you have", which is the
+    #: only thing on this menu with a current value to show.
+    checked: bool = False
 
     @property
     def text(self) -> str:
@@ -150,14 +169,46 @@ def status_line(state: TrayState) -> str:
     return text
 
 
+def hotkey_items(state: TrayState) -> list[MenuItem]:
+    """The submenu under "Change the hotkey".
+
+    A click and it is in force, and in his config file, and it is the tick that
+    tells him which one that is. What is offered and why is
+    `hotkey_switch.CHOICES`; the last line is the command that takes anything
+    at all, greyed because it is a thing to type rather than a thing to click.
+    """
+    items: list[MenuItem] = []
+    listed = hotkey_switch.choices_for(state.hotkey_combination)
+    for combination, why, is_current in listed:
+        try:
+            label = describe(combination)
+        except DictateError:
+            label = combination
+        items.append(MenuItem(
+            HOTKEY_PREFIX + combination,
+            label if is_current else f"{label} - {why}",
+            hotkey_switch.command_for(combination),
+            checked=is_current,
+            separator_after=combination == listed[-1][0],
+        ))
+    items.append(MenuItem(HOTKEY_OTHER, "Any other combination",
+                          hotkey_switch.EXAMPLE_COMMAND, enabled=False))
+    return items
+
+
 def menu(state: TrayState) -> list[MenuItem]:
     """What right-clicking the icon offers.
 
-    Six lines, in four groups: what it is doing, the two that change whether it
-    is running, the two that change which version it is, and the log - plus two
-    more when a dictation history is being kept. None of them needs him to have
-    worked out what went wrong first - Stop clears a stuck copy as well as a
-    healthy one, because `dictate stop` does.
+    Seven lines, in five groups: what it is doing, the two that change whether
+    it is running, the two that change which version it is, the hotkey, and the
+    log - plus two more when a dictation history is being kept. None of them
+    needs him to have worked out what went wrong first - Stop clears a stuck
+    copy as well as a healthy one, because `dictate stop` does.
+
+    **Change the hotkey is the only item with a submenu**, and the only one that
+    shows a current value. It is also the only one that writes to his config
+    file; `hotkey_switch` carries why it is a list of combinations rather than
+    "press the keys you want" or "here is your config file, edit it".
 
     **Check for updates changes nothing, ever**, which is why it is offered even
     while an update is already running: it is a report and cannot make anything
@@ -183,6 +234,8 @@ def menu(state: TrayState) -> list[MenuItem]:
         MenuItem(CHECK, "Check for updates", "dictate update --check"),
         MenuItem(UPDATE, "Update now", "dictate update",
                  enabled=not state.updating, separator_after=True),
+        MenuItem(HOTKEY, "Change the hotkey", "dictate hotkey",
+                 children=tuple(hotkey_items(state)), separator_after=True),
         MenuItem(LOG, "Open the log folder"),
     ]
     if state.history:
@@ -206,6 +259,9 @@ class TrayActions:
     update_now: Callable[[], None]
     open_history: Callable[[], None] | None = None
     delete_history: Callable[[], None] | None = None
+    #: Takes the combination the menu item carries. The only action here that is
+    #: given anything, which is why it is not in `handlers` with the rest.
+    set_hotkey: Callable[[str], None] | None = None
     handlers: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -223,6 +279,12 @@ class TrayActions:
     def invoke(self, key: str) -> bool:
         """Run the action for `key`. False if there is nothing to run, which is
         the right answer for the status line and for a stale menu id."""
+        if key.startswith(HOTKEY_PREFIX):
+            combination = key[len(HOTKEY_PREFIX):]
+            if self.set_hotkey is None or not combination:
+                return False
+            self.set_hotkey(combination)
+            return True
         handler = self.handlers.get(key)
         if handler is None:
             return False
