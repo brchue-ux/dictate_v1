@@ -218,6 +218,27 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   asking for a restart. Every tool in the toolchain step carries its own such
   `Check`, run straight after its install so a failure is reported where it
   happened.
+- **A step may only name a cause it has established, and "I do not know" is a
+  real answer.** Twice now setup has asserted one it had not: the Vulkan step
+  announced an SDK had installed when none had, and the install step blamed the
+  internet for `[WinError 5] Access is denied` on `Scripts\dictate.exe` — the
+  product owner went and checked his connection and his proxy. `Get-PipFailureKind`
+  in `scripts/setup-lib.ps1` is the shape to copy: it reads what the tool printed
+  and returns `locked`/`network`/`disk`/`unknown`, and `unknown` prints
+  `Get-ToolErrorLines` under "Setup does not know why". Anything that ends a step
+  reports evidence, not the most common explanation.
+- **A process check can never answer "can this file be replaced".**
+  `dictate stop --stale-only` looks at the instance lock and the transcription
+  port; the lock belongs to the *python* process, while `Scripts\dictate.exe` is
+  the launcher process above it, and antivirus and the Windows indexer hold
+  freshly written executables without being dictate at all. So `Invoke-Install`
+  asks the files themselves (`Test-FileReplaceable`), waits 20 s for a transient
+  holder (`Wait-ForFilesReplaceable` — the port precedent is ~2 s), and only then
+  stops, naming the holder via the Restart Manager (`Get-FileHolder`, rstrtmgr.dll,
+  no admin rights, falls back to an image-path scan and never throws). CI holds a
+  real handle from a real second process on the real `dictate.exe` and requires
+  both outcomes; the unit tests skip that part off Windows via `Test-WindowsCase`,
+  because file locks are mandatory only there.
 - **Native commands in PowerShell go through `Invoke-Tool`.** git, cmake and pip write
   ordinary progress to stderr, which Windows PowerShell turns into a terminating error
   under `$ErrorActionPreference = 'Stop'`. Exit codes are what decide success.

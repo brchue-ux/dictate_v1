@@ -824,6 +824,15 @@ Windows machines. These are things that used to be on the "never run" list:
   to come out as the text `System.Management.Automation.RemoteException` in the
   middle of the install report. Both halves of that are tested on the real
   Windows PowerShell 5.1 that ships with Windows.
+* **That an install file another program is holding open is survived, and then
+  reported honestly.** CI installs dictate, has a *second real process* take a
+  *real handle* on the `Scripts\dictate.exe` that came out, and runs
+  `setup.ps1 -Only install` against it — twice. Once with a holder that lets go,
+  where setup has to wait it out and carry on; once with a holder that never
+  does, where setup has to stop, name the file, name the process Windows says is
+  holding it, and never mention the internet. This is the failure that stopped
+  the product owner updating, and a machine with no Windows cannot produce it:
+  file locks are mandatory there and advisory everywhere else.
 * **That `dictate update` really fetches this private repository.** CI signs the
   GitHub CLI in with the workflow's own token, makes a throwaway editable install
   that is deliberately behind, and runs the real command: the source archive for
@@ -879,6 +888,15 @@ misbehaves.
   reload actually takes on your card, has been observed by nobody. Task
   Manager's Dedicated GPU memory figure, five minutes after you stop dictating,
   is the check.
+* **Which program was actually holding `Scripts\dictate.exe` on your PC.** The
+  install now waits for it and, if it will not let go, asks Windows itself
+  through the Restart Manager and prints the answer — but that answer has only
+  ever been read on a CI runner, where the holder was a test. On your machine it
+  could be a `dictate.exe` launcher that outlived the copy it started, or your
+  antivirus scanning a freshly written executable, and those want different
+  remedies. **The next time it happens, the message names the program: that line
+  is the measurement, and nobody here can take it for you.** If it does not
+  happen again, the wait absorbed it and there is nothing to chase.
 * **The toolchain install** — winget fetching Python, CMake, the Vulkan SDK and
   the C++ build tools. CI machines already have most of those and do not use
   winget at all, so step 2 of setup is the one part of it no machine here has

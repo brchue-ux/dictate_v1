@@ -9,7 +9,8 @@
 #
 #   PROVED HERE  the Python package installs on Windows and its 767 tests pass;
 #                the installer's own logic works on Windows PowerShell 5.1,
-#                including a download that really is interrupted and resumed;
+#                including a download that really is interrupted and resumed
+#                and an install file another process really is holding open;
 #                whisper.cpp compiles from source with the Vulkan backend on
 #                Windows; the binary that comes out really transcribes audio;
 #                dictate's resident-process supervision and HTTP client drive
@@ -772,6 +773,124 @@ jobs:
           .\scripts\tests\setup-lib.tests.ps1
           if ($LASTEXITCODE -ne 0) { throw 'installer tests failed' }
 
+      # -------------------------------------------------------------------
+      # The product owner's install stopped with
+      #   OSError: [WinError 5] Access is denied: ...\Scripts\dictate.exe
+      # and setup told him to check his internet connection. Nobody on this
+      # team has Windows, so a real handle on a real file, held by a real
+      # separate process, is something only these runners can produce - and it
+      # is exactly what the two steps below do.
+      # -------------------------------------------------------------------
+      - name: Install dictate, so there is a real dictate.exe to hold open
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[windows]
+          $scripts = & python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+          $exe = Join-Path $scripts 'dictate.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "pip installed no launcher at $exe" }
+          Write-Host "the file the next two steps hold open: $exe"
+          "DICTATE_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: A holder that never lets go stops the install, and it says what is holding it
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          . .\scripts\setup-lib.ps1
+          $exe = $env:DICTATE_EXE
+          $holder = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden `
+            -ArgumentList @('-NoProfile', '-Command',
+              "`$h = [IO.File]::Open('$exe','Open','Read','Read'); Start-Sleep -Seconds 300")
+          try {
+            $deadline = (Get-Date).AddSeconds(30)
+            while ((Test-FileReplaceable -Path $exe).Replaceable -and (Get-Date) -lt $deadline) {
+              Start-Sleep -Milliseconds 200
+            }
+            if ((Test-FileReplaceable -Path $exe).Replaceable) { throw 'the holder never took the file' }
+            Write-Host "process $($holder.Id) is holding $exe"
+
+            $output = & powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 `
+              -Only install -Root "$env:RUNNER_TEMP\dictate-locked" 2>&1 | Out-String
+            Write-Host $output
+
+            if ($LASTEXITCODE -eq 0) { throw 'setup carried on past a file it could not replace' }
+            if ($output -match 'at <ScriptBlock>|System\.Management\.Automation') {
+              throw 'setup showed the user a stack trace'
+            }
+            if ($output -notmatch 'What to do:') { throw 'setup stopped without saying what to do' }
+            # It names the file, and the process Windows says has it.
+            if ($output -notmatch [regex]::Escape($exe)) { throw 'setup did not name the file' }
+            if ($output -notmatch "\(process $($holder.Id)\)") {
+              throw "setup did not name process $($holder.Id) as the holder"
+            }
+            # The whole bug: this failure used to be reported as a network
+            # problem, and he went and checked his connection and his proxy.
+            if ($output -match '(?i)internet connection|proxy setting|blocking\s+pypi') {
+              throw 'setup blamed the network for a file another program had open'
+            }
+            if ($output -notmatch '(?i)nothing to do with your internet') {
+              throw 'setup did not rule the network out by name'
+            }
+            if ($output -notmatch '(?i)Task Manager') { throw 'setup gave him nothing to do' }
+            if ($output -notmatch '(?i)antivirus') { throw 'setup did not mention the antivirus case' }
+            exit 0
+          } finally {
+            Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: A holder that does let go is waited out, and the install carries on
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          . .\scripts\setup-lib.ps1
+          $exe = $env:DICTATE_EXE
+          $sentinel = Join-Path $env:RUNNER_TEMP 'let-go-now'
+          Remove-Item -LiteralPath $sentinel -Force -ErrorAction SilentlyContinue
+          # A holder that lets go on a signal, so the release really does land
+          # while setup is already waiting rather than before it looks.
+          $holder = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden `
+            -ArgumentList @('-NoProfile', '-Command',
+              "`$h = [IO.File]::Open('$exe','Open','Read','Read'); " +
+              "`$stop = (Get-Date).AddSeconds(180); " +
+              "while (-not (Test-Path '$sentinel') -and (Get-Date) -lt `$stop) { Start-Sleep -Milliseconds 200 }; " +
+              "`$h.Dispose()")
+          try {
+            $deadline = (Get-Date).AddSeconds(30)
+            while ((Test-FileReplaceable -Path $exe).Replaceable -and (Get-Date) -lt $deadline) {
+              Start-Sleep -Milliseconds 200
+            }
+            if ((Test-FileReplaceable -Path $exe).Replaceable) { throw 'the holder never took the file' }
+
+            $job = Start-Job -ScriptBlock {
+              param($cwd, $root)
+              Set-Location $cwd
+              $text = & powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 `
+                -Only install -Root $root 2>&1 | Out-String
+              return @{ Output = $text; Code = $LASTEXITCODE }
+            } -ArgumentList (Get-Location).Path, "$env:RUNNER_TEMP\dictate-waited"
+
+            # Long enough that setup has certainly reached the check and is
+            # waiting, and far inside the 20 seconds it is willing to wait.
+            Start-Sleep -Seconds 10
+            New-Item -ItemType File -Path $sentinel -Force | Out-Null
+
+            $result = Receive-Job -Job $job -Wait
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+            Write-Host $result.Output
+
+            if ($result.Code -ne 0) { throw "setup stopped anyway, with code $($result.Code)" }
+            if ($result.Output -notmatch 'Waited \d+ seconds for another program to let go') {
+              throw 'setup did not wait for the holder - it got through by luck, not by design'
+            }
+            if ($result.Output -match 'Windows would not let the installer replace') {
+              throw 'setup reported a lock it went on to survive'
+            }
+            exit 0
+          } finally {
+            Remove-Item -LiteralPath $sentinel -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue
+          }
+
       - name: setup.ps1 reports a missing tool in plain language rather than crashing
         shell: powershell
         run: |
@@ -829,9 +948,16 @@ jobs:
           parser), integrity checking, and the resumable downloader against a
           local HTTP server that genuinely drops the connection mid-transfer.
 
+          Also covered, with a REAL handle held by a REAL second process on the
+          REAL `Scripts\dictate.exe` this job installed: the install step waits
+          for a holder that lets go and carries on, and for one that never does
+          it stops, names the file, names the process Windows says is holding
+          it, and never mentions the internet.
+
           Not covered: winget installing the toolchain, the direct download of
-          the Vulkan SDK from LunarG and the Authenticode check on it, and
-          anything that needs a GPU or a desktop.
+          the Vulkan SDK from LunarG and the Authenticode check on it, whatever
+          antivirus does on the product owner's own PC, and anything that needs
+          a GPU or a desktop.
           '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
   # =========================================================================
