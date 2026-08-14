@@ -121,7 +121,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             _err(doctor_mod.format_report(failures))
             _err("\nRun `dictate doctor` for the full check.")
             return 2
-        code = app_mod.run(cfg, console=_err)
+        # This is the copy started by hand, in a window that has to stay open.
+        # It is the one that says, once, that it did not have to be.
+        code = app_mod.run(cfg, console=_err, suggest_autostart=True)
     finally:
         # Before the restart below, always: the new copy takes this lock the
         # moment it starts, and one that raced its own predecessor would be

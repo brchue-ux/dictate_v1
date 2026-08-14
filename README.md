@@ -44,9 +44,10 @@ move together.)*
 **Double-click `setup.cmd`.**
 
 That is the whole thing. Windows will ask for permission to install software —
-click **Yes** — and then it runs by itself for about half an hour, mostly
-downloading. You do not have to answer anything else, and there is nothing to
-edit afterwards.
+click **Yes** — and then, before it starts, one question: whether dictate should
+start by itself when you log in. Answer it (or do not — thirty seconds of silence
+means no, and it carries on either way), and the rest runs by itself for about
+half an hour, mostly downloading. There is nothing to edit afterwards.
 
 If you would rather see it in a window you started yourself, this is the same
 thing:
@@ -76,6 +77,19 @@ dictate run
 Hold **Ctrl + Alt + Space**, speak, let go. Ctrl+C in that window to quit.
 
 ### Or have it start by itself when you log in
+
+**Setup asks you.** Right at the start of the run — while you are still at the
+keyboard, not half an hour later — it asks whether dictate should start when you
+log in, and carries the answer out at the end once everything has been checked.
+No answer within thirty seconds, or a scripted run with nobody there, means no
+and nothing is registered. `-Autostart yes` (or `no`) answers it up front and
+skips the question.
+
+You can also settle it at any time afterwards, in either of two places:
+
+* the right-click menu of the dictate icon by the clock — **Start when I log
+  in**, ticked when it is on, one click either way;
+* the command, which is what that menu item names:
 
 ```powershell
 dictate autostart enable
@@ -116,9 +130,14 @@ Two other things worth knowing:
   `%LOCALAPPDATA%\dictate\autostart.log`. `dictate autostart status` prints that
   reason back to you. Nothing disappears into a window that closed.
 
-Turning it off is one command and leaves nothing behind: it is a single Windows
-scheduled task, which you can also see and delete in Task Scheduler under the
-name `dictate`.
+Turning it off is one command — or the same tray item, unticked — and leaves
+nothing behind: it is a single Windows scheduled task, which you can also see
+and delete in Task Scheduler under the name `dictate`.
+
+All three places answer this question by asking Windows the same way, so setup,
+the tray tick and `dictate autostart status` cannot disagree. The tray reads it
+afresh every half minute, so a `dictate autostart enable` typed in a window
+shows up on the menu a moment later rather than at the next restart.
 
 ### If setup stops part way
 
@@ -245,8 +264,9 @@ You can also right-click **the dictate icon by the clock** — it is there
 whenever dictate is running, including when it started by itself at logon and
 there is no window anywhere. It shows what dictate is doing (grey while it
 waits, gold while it is listening to you, red if something needs reading), and
-carries **Stop**, **Restart**, **Check for updates**, **Update now**, **Change
-the hotkey** and **Open the log folder**. Each one is labelled with the command
+carries **Caption size**, **Stop**, **Restart**, **Check for updates**, **Update
+now**, **Change the hotkey**, **Start when I log in** — ticked when it is on,
+one click either way — and **Open the log folder**. Each one is labelled with the command
 that does the same thing, so the icon teaches you the commands rather than
 replacing them. Turn it off with `[tray] enabled = false` if you would rather
 not have it.
@@ -713,10 +733,15 @@ python -m unittest discover -s tests -t .
   back. The containment itself is Windows' job and is proved on Windows; that
   nothing slips past it is proved here.
 * **What the tray icon says and offers**: the tooltip, the status line, the
-  seven menu items — nine when a dictation history is being kept, and neither of
+  nine menu items — eleven when a dictation history is being kept, and neither of
   the two extra ones when it is off — that each names the command that does the
   same thing, and that the icon's own bytes are an icon Windows can read whose
   colour is the status.
+* **What the tray does about starting at logon**: that the item shows the state
+  it was given rather than one it assumed, that off is one click exactly as on
+  is, that an answer Windows would not give is said as "cannot tell" instead of
+  "off", and that which way a click goes is read at the moment of the click
+  rather than from the label that was drawn.
 * **That nothing dictated can press Enter**, from the shape of whisper-server's
   own reply through the cleanup pass to the key events: the segment delimiter
   that produced the stray Enters, the flattening that would catch any other line
@@ -936,6 +961,12 @@ misbehaves.
   `MessageBoxW` call and it is wrapped so that failing to show it cannot change
   anything, but it has never been displayed. The log entry behind it is written
   either way, and that part *is* tested.
+* **The three places that now offer to start dictate at logon**, as seen. What
+  each one decides is tested here; what nobody has watched is setup's question
+  appearing in a real console and taking a real keypress (the timeout and the
+  no-console path are tested, the keystroke is not), the **Start when I log in**
+  item drawn with its tick in a real notification-area menu, and a click on it
+  reaching Task Scheduler and coming back with the tick the other way round.
 
 If any of it is wrong, `dictate doctor` and the log file are the two things to
 look at, and the failures should be legible rather than silent.

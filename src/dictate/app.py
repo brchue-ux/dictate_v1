@@ -34,8 +34,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import (
-    config_edit, history as history_mod, hotkey_switch, instance, overlay_size,
-    tray as tray_mod, update as update_mod,
+    autostart as autostart_mod, config_edit, history as history_mod,
+    hotkey_switch, instance, overlay_size, tray as tray_mod,
+    update as update_mod,
 )
 from .cleanup.service import CleanupService
 from .config import Config
@@ -57,10 +58,30 @@ log = logging.getLogger(__name__)
 EXIT_RESTART = 7
 
 
+#: How often the tray re-asks Windows whether the logon task is still there.
+#: Deliberately not on the hotkey path and not on every tray refresh - schtasks
+#: is a process, and this is a setting that changes about once a year. It is
+#: asked on the one loop that already ticks slowly, so that the tick beside
+#: "Start when I log in" still catches up with a `dictate autostart enable` typed
+#: in another window.
+AUTOSTART_POLL_S = 30.0
+
+
 class Application:
-    def __init__(self, cfg: Config, *, console=None) -> None:
+    def __init__(self, cfg: Config, *, console=None,
+                 suggest_autostart: bool = False) -> None:
         self.cfg = cfg
         self.console = console or (lambda msg: print(msg, file=sys.stderr, flush=True))
+        #: Whether this copy was started by hand in a console, and so is the one
+        #: that should mention that it need not have been. A logon-started copy
+        #: passes False: it is the proof the offer has already been taken.
+        self.suggest_autostart = suggest_autostart
+        #: Does dictate start when he logs in? `None` until it has been asked,
+        #: and whenever Windows would not say. Read from one place
+        #: (`autostart.registered_or_unknown`) so the menu and
+        #: `dictate autostart status` cannot answer differently.
+        self._autostart_on: bool | None = None
+        self._autostart_read_at = 0.0
         self._stopping = threading.Event()
         self._threads: list[threading.Thread] = []
         self._started_at = time.time()
@@ -228,9 +249,31 @@ class Application:
         self.hotkey.register(self._on_hotkey_press, self._on_hotkey_release)
         self.hotkey.start()
         self.console(f"dictate: hotkey         {self.hotkey.describe}")
+        # Once, before the tray is built, so that the icon's tick and the line
+        # below are the same answer rather than two readings a moment apart.
+        self._read_autostart(force=True)
         self._start_tray()
         self.console("dictate: ready. Hold the hotkey and speak. Ctrl+C here to quit,")
         self.console("dictate: or `dictate stop` from any other window.")
+        self._offer_autostart()
+
+    def _offer_autostart(self) -> None:
+        """Tell a console start, once, that it did not have to be a console.
+
+        This is the third place the same offer is made - the end of setup and the
+        tray menu are the other two - and it exists because the product owner
+        watched this banner all evening while asking for a feature that was
+        already installed on his machine. It says nothing when dictate already
+        starts at logon, and nothing when that could not be read.
+        """
+        if not self.suggest_autostart:
+            return
+        lines = autostart_mod.console_hint(self._autostart_on)
+        if not lines:
+            return
+        self.console("dictate:")
+        for line in lines:
+            self.console(f"dictate: {line}")
 
     # -- the icon in the notification area -------------------------------
 
@@ -254,6 +297,7 @@ class Application:
             delete_history=self._delete_history,
             set_hotkey=self.change_hotkey,
             set_caption_size=self.set_caption_size,
+            toggle_autostart=self.toggle_autostart,
         )
         try:
             self.tray = factory.make_tray_icon(
@@ -295,7 +339,8 @@ class Application:
                                   model_resident=resident, detail=self._last_error,
                                   updating=self.update_in_flight(),
                                   history=self.history.enabled,
-                                  caption_size=self.cfg.overlay.size)
+                                  caption_size=self.cfg.overlay.size,
+                                  autostart=self._autostart_on)
 
     def update_in_flight(self) -> bool:
         """Is the update this copy started still going?
@@ -509,6 +554,71 @@ class Application:
             return False
         return True
 
+    # -- starting when he logs in -----------------------------------------
+
+    def _read_autostart(self, *, force: bool = False, now: float | None = None) -> None:
+        """Ask Windows whether the logon task is there, at most now and then.
+
+        Called from the slow watch loop and after this copy has changed it -
+        never from the hotkey or transcription path, and never from
+        `_tray_state`, which those two do call. The cost of asking is a process;
+        the cost of a stale answer is a tick that is up to `AUTOSTART_POLL_S` out
+        of date on a menu he opens by hand.
+        """
+        now = time.time() if now is None else now
+        if not force and now - self._autostart_read_at < AUTOSTART_POLL_S:
+            return
+        self._autostart_read_at = now
+        try:
+            self._autostart_on = autostart_mod.registered_or_unknown()
+        except Exception:  # noqa: BLE001 - a menu tick may never stop anything
+            log.debug("could not read whether dictate starts at logon", exc_info=True)
+            self._autostart_on = None
+
+    def toggle_autostart(self) -> None:
+        """The tray's "Start when I log in", both ways.
+
+        It is `dictate autostart enable` and `dictate autostart disable` and
+        nothing else: `autostart.py` registers and removes the task, this only
+        decides which of the two a click means. That decision is made from a
+        fresh reading rather than from the label that was drawn - the menu can
+        be a moment old, and turning it off when he meant to turn it on is the
+        one mistake here that would matter.
+
+        Nothing is asked. Turning it on registers a task and prints what it did;
+        turning it off deletes it and leaves nothing behind. A running dictate
+        may not show a dialog (it holds the instance lock, and the box would
+        block the thread that owns the icon), so the item says what it does and
+        the tick says what happened.
+        """
+        self._read_autostart(force=True)
+        if self._autostart_on is None:
+            self.notify("warning",
+                        "dictate could not tell whether it is set to start when "
+                        "you log in, so it has changed nothing. `dictate "
+                        "autostart status` shows what Windows answered.")
+            return
+        was_on = self._autostart_on
+        try:
+            lines = (autostart_mod.disable() if was_on else
+                     autostart_mod.enable(
+                         self.cfg,
+                         config_path=str(self.cfg.source_path)
+                         if self.cfg.source_path else None))
+        except DictateError as exc:
+            what = "disable" if was_on else "enable"
+            self.notify("error", f"dictate autostart {what} did not work: "
+                                 f"{exc.message}")
+            log.error("%s", exc.report())
+        else:
+            for line in lines:
+                self.console(line)
+        # Whatever happened, the tick now says what Windows says - including
+        # after a failure, where nothing changed and the menu must not pretend
+        # otherwise.
+        self._read_autostart(force=True)
+        self._refresh_tray()
+
     def change_hotkey(self, combination: str) -> bool:
         """The tray's "Change the hotkey", and `dictate hotkey` for a copy that
         is already running.
@@ -665,9 +775,12 @@ class Application:
                     instance.clear_stop_request()
                     self.overlay.close()  # ends run_forever, which triggers stop()
                     return
-                # The same tick keeps the tray honest about the one thing it
+                # The same tick keeps the tray honest about the two things it
                 # cannot be told about: the model being released after an idle
-                # spell, which nothing else in this process announces.
+                # spell, which nothing else in this process announces, and
+                # `dictate autostart enable` typed in another window.
+                if self.tray is not None:
+                    self._read_autostart()
                 self._refresh_tray()
             except Exception:
                 log.exception("stop-request watch failed; continuing")
@@ -745,10 +858,16 @@ class Application:
             tray.close()
 
 
-def run(cfg: Config, *, console=None) -> int:
+def run(cfg: Config, *, console=None, suggest_autostart: bool = False) -> int:
     """Build and run. Any `DictateError` raised here reaches `cli.main`, which
-    prints its message and its remedy - never a traceback."""
-    return Application(cfg, console=console).run()
+    prints its message and its remedy - never a traceback.
+
+    `suggest_autostart` is what `dictate run` in a console passes and the logon
+    task does not: only the copy he started by hand has anything to learn from
+    being told it could have started itself.
+    """
+    return Application(cfg, console=console,
+                       suggest_autostart=suggest_autostart).run()
 
 
 def config_search_note(path: Path) -> str:

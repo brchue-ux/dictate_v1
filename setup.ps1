@@ -47,6 +47,14 @@
     Skip the informational ROCm check in step 1 (it needs the internet and
     changes nothing either way).
 
+.PARAMETER Autostart
+    Whether dictate should start when you log in: ask (the default), yes or no.
+    The question is asked at the START of the run, while you are still at the
+    keyboard, and acted on at the end once everything has been checked. With
+    nobody there to answer - a redirected or scripted run, or no answer within
+    30 seconds - the answer is no and nothing is registered. Use -Autostart yes
+    to say so up front and never see the question.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File setup.ps1
 
@@ -67,7 +75,9 @@ param(
     [string]$Ref = '',
     [switch]$Rebuild,
     [switch]$SkipCaptions,
-    [switch]$SkipDiagnostic
+    [switch]$SkipDiagnostic,
+    [ValidateSet('ask', 'yes', 'no')]
+    [string]$Autostart = 'ask'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -121,6 +131,12 @@ $script:VerifyProblems = New-Object System.Collections.Generic.List[string]
 #: could not be carried out, and calling that "not working yet" is how a setup
 #: with nothing wrong with it told the product owner it was broken.
 $script:VerifyDeferred = New-Object System.Collections.Generic.List[string]
+#: Whether dictate starts when he logs in, as `dictate autostart status` answers
+#: it AFTER this run has done whatever it was asked to, and the lines that say so
+#: in the final report. $null means nothing could be read - which is said as
+#: "here is the command", never as "it is off".
+$script:AutostartOn = $null
+$script:AutostartLines = @()
 
 function Get-WhisperSourceDir { return (Join-Path $Root 'whisper.cpp') }
 function Get-ModelsDir { return (Join-Path $Root 'models') }
@@ -196,6 +212,92 @@ function Clear-StaleTranscriptionPort {
     if ($run.ExitCode -eq 0) { $state = 'clear' }
     elseif ($run.ExitCode -eq 3) { $state = 'running' }
     return @{ State = $state; Output = $run.Output }
+}
+
+function Invoke-AutostartChoice {
+    <# The last word on starting at logon: carry out what was decided at the
+       START of the run, then say what is now true.
+
+       Called only on a successful install, and it never disables anything: a
+       re-run must not take away a logon task he asked for the first time.
+
+       It answers "is it on?" by reading `dictate autostart status` rather than
+       by remembering what it just did, so the line printed here, the tick on the
+       tray menu and that command cannot disagree. What it decides is left in
+       $script:AutostartOn ($true, $false, or $null when nothing could be read)
+       so the rest of the report can be written in the right tense. #>
+    param([Parameter(Mandatory = $true)][string]$Plan)
+
+    $script:AutostartOn = $null
+    if ($Plan -eq 'enable') {
+        $run = $null
+        try {
+            $run = Invoke-Dictate -Arguments @('autostart', 'enable')
+        } catch {
+            Write-SetupLog "autostart enable could not be run: $($_.Exception.Message)"
+        }
+        if ($run) { Write-SetupLog $run.Output }
+        if ($run -and $run.ExitCode -eq 0) {
+            $script:AutostartOn = $true
+            $script:AutostartLines = @($run.Output -split "`r?`n" |
+                ForEach-Object { $_.TrimEnd() })
+            return
+        }
+        # The install is fine; the one thing it was asked to do afterwards is
+        # not. Say which, and claim nothing about what Windows now holds -
+        # $null, not $false, because nobody read it back.
+        $said = @()
+        if ($run) {
+            $said = @($run.Output -split "`r?`n" |
+                Where-Object { $_.Trim() } | ForEach-Object { '  ' + $_.TrimEnd() })
+        }
+        $script:AutostartLines = @(
+            'You asked for dictate to start when you log in, and that part did NOT',
+            'work. Nothing has been registered with Windows; everything else is',
+            'installed and working.') + $said + @(
+            'Try that one part again with:',
+            '  dictate autostart enable')
+        return
+    }
+
+    try {
+        $status = Invoke-Dictate -Arguments @('autostart', 'status')
+        Write-SetupLog $status.Output
+        $script:AutostartOn = Test-AutostartStatusOn -Output $status.Output
+    } catch {
+        Write-SetupLog "autostart status could not be read: $($_.Exception.Message)"
+    }
+    if ($script:AutostartOn -eq $true) {
+        $script:AutostartLines = @(
+            'dictate already starts when you log in, and setup has left that alone.',
+            'To stop it:',
+            '  dictate autostart disable')
+        return
+    }
+    # $false is "it is off"; $null is "nobody could read it", and the difference
+    # is one sentence that would otherwise be a claim about his Task Scheduler.
+    $opening = @('Whether dictate starts when you log in could not be read here. To',
+                 'have it start by itself - so that you never open a PowerShell window',
+                 'for this again:')
+    if ($script:AutostartOn -eq $false) {
+        $opening = @('dictate does not start by itself. When you want it to - so that you',
+                     'never open a PowerShell window for this again:')
+    }
+    $script:AutostartLines = $opening + @(
+        '  dictate autostart enable',
+        'It is on the right-click menu of the dictate icon by the clock too, as',
+        '"Start when I log in", so it is not a command you have to remember.',
+        'It costs your graphics card nothing between dictation sessions: the model',
+        'is handed back after a few idle minutes and taken again when you press the',
+        'hotkey. `dictate autostart enable` prints the exact number from your config.',
+        '  dictate autostart status   is it on, is it running, and did it start',
+        '  dictate autostart disable  turn it off again, leaving nothing behind')
+}
+
+function Write-AutostartLines {
+    <# What Invoke-AutostartChoice decided, printed. #>
+    Write-Host ''
+    foreach ($line in $script:AutostartLines) { Write-Host -Object $line }
 }
 
 function Write-DictateLines {
@@ -1178,8 +1280,24 @@ Write-Host 'dictate_v1 setup' -ForegroundColor White
 Write-Host '----------------'
 Write-Host "Installing into:  $Root"
 Write-Host "Full log:         $script:DictateLogPath"
-Write-SetupLog "setup.ps1 started; Root=$Root Only=$($Only -join ',') Ref=$Ref Rebuild=$Rebuild SkipCaptions=$SkipCaptions"
+Write-SetupLog "setup.ps1 started; Root=$Root Only=$($Only -join ',') Ref=$Ref Rebuild=$Rebuild SkipCaptions=$SkipCaptions Autostart=$Autostart"
 Write-SetupLog "PowerShell $($PSVersionTable.PSVersion); admin=$(Test-IsAdministrator)"
+
+# Asked HERE, before the half hour of downloading and compiling, because this is
+# the moment he is at the keyboard - he has just typed the command. It is acted
+# on at the end, once the install has been checked, and the answer is no unless
+# he says otherwise. See the notes above Get-AutostartPlan in setup-lib.ps1.
+$installing = @($steps | Where-Object { $_.Key -eq 'install' }).Count -gt 0
+$AutostartPlan = Get-AutostartPlan -Requested $Autostart -Installing $installing `
+    -CanAsk (Test-CanAskQuestion)
+if ($AutostartPlan -eq 'ask') {
+    if (Read-YesNoWithTimeout -Prompt (Get-AutostartQuestion) -TimeoutSeconds 30 -Default $false) {
+        $AutostartPlan = 'enable'
+    } else {
+        $AutostartPlan = 'leave'
+    }
+}
+Write-SetupLog "start at logon: plan is $AutostartPlan"
 
 $overall = [Diagnostics.Stopwatch]::StartNew()
 $number = 0
@@ -1227,6 +1345,15 @@ if ($script:VerifyProblems.Count -gt 0) {
     Write-Host ''
     foreach ($problem in $script:VerifyProblems) { Write-Host "  - $problem" }
     Write-Host ''
+    if ($AutostartPlan -eq 'enable') {
+        # He said yes half an hour ago. Registering a logon task for something
+        # that does not work yet would only make it fail at every logon.
+        Write-Host 'You asked for dictate to start when you log in. That has NOT been set up:'
+        Write-Host 'it would only start something that is not working yet. Once the above is'
+        Write-Host 'fixed, one command turns it on:'
+        Write-Host '  dictate autostart enable' -ForegroundColor White
+        Write-Host ''
+    }
     Write-Host 'Fix those, then re-run just the checks:' -ForegroundColor Yellow
     Write-Host '  powershell -ExecutionPolicy Bypass -File setup.ps1 -Only verify'
     Write-Host '-----------------------------------------------------------------------' -ForegroundColor Yellow
@@ -1246,15 +1373,28 @@ if ($script:VerifyDeferred.Count -gt 0) {
     Write-Host 'Everything else passed. To run that last check as well:' -ForegroundColor Green
     Write-Host '  dictate stop' -ForegroundColor White
     Write-Host '  powershell -ExecutionPolicy Bypass -File setup.ps1 -Only verify'
+    Invoke-AutostartChoice -Plan $AutostartPlan
+    Write-AutostartLines
     Write-Host '-----------------------------------------------------------------------' -ForegroundColor Green
     exit 0
 }
 
+# Whatever was asked for at the start of the run happens here, before a word of
+# the report is written: the first line of it is "how do you start this", and
+# the honest answer is different when it now starts itself.
+Invoke-AutostartChoice -Plan $AutostartPlan
+
 Write-Host '-----------------------------------------------------------------------' -ForegroundColor Green
 Write-Host ('Done in ' + (Format-Duration $overall.Elapsed.TotalSeconds) + '.') -ForegroundColor Green
 Write-Host ''
-Write-Host 'To start dictating, open a new PowerShell window and run:'
-Write-Host '  dictate run' -ForegroundColor White
+if ($script:AutostartOn -eq $true) {
+    Write-Host 'dictate starts with your Windows session from now on. To use it before'
+    Write-Host 'you next log in, open a new PowerShell window and run:'
+    Write-Host '  dictate run' -ForegroundColor White
+} else {
+    Write-Host 'To start dictating, open a new PowerShell window and run:'
+    Write-Host '  dictate run' -ForegroundColor White
+}
 Write-Host ''
 Write-Host 'Then hold Ctrl + Alt + Space, speak, and let go.'
 Write-Host ''
@@ -1264,16 +1404,8 @@ Write-Host 'this clears all of it, and you do not need to know which it was:'
 Write-Host '  dictate stop' -ForegroundColor White
 Write-Host 'There is also a dictate icon by the clock while it runs, with Stop and'
 Write-Host 'Restart on it, so you never have to remember that either.'
-Write-Host ''
-Write-Host 'Once you are happy with it, you can have it start by itself when you'
-Write-Host 'log in, so you never type that again:'
-Write-Host '  dictate autostart enable' -ForegroundColor White
-Write-Host 'That costs your graphics card nothing between dictation sessions: the'
-Write-Host 'model is handed back after a few idle minutes and taken again when you'
-Write-Host 'press the hotkey. `dictate autostart enable` prints the exact number'
-Write-Host 'from your config.'
-Write-Host '  dictate autostart status   is it on, is it running, and did it start'
-Write-Host '  dictate autostart disable  turn it off again, leaving nothing behind'
+
+Write-AutostartLines
 Write-Host ''
 Write-Host 'And when there is a newer version, this is the whole of getting it -'
 Write-Host 'seconds, not the half hour this took. It says what changed:'

@@ -76,6 +76,7 @@ def actions(done: list[str]) -> tray.TrayActions:
         delete_history=lambda: done.append("history-delete"),
         set_hotkey=lambda combination: done.append(f"hotkey:{combination}"),
         set_caption_size=lambda name: done.append(f"size:{name}"),
+        toggle_autostart=lambda: done.append("autostart"),
     )
 
 
@@ -90,10 +91,11 @@ def size_submenu(**kwargs) -> list[tray.MenuItem]:
 
 
 class WhatItOffers(unittest.TestCase):
-    def test_the_menu_is_status_size_stop_restart_updates_hotkey_and_the_log(self):
+    def test_the_menu_is_status_size_stop_restart_updates_the_settings_and_the_log(self):
         keys = [item.key for item in tray.menu(state())]
         self.assertEqual(keys, [tray.STATUS, tray.SIZE, tray.STOP, tray.RESTART,
-                                tray.CHECK, tray.UPDATE, tray.HOTKEY, tray.LOG])
+                                tray.CHECK, tray.UPDATE, tray.HOTKEY,
+                                tray.AUTOSTART, tray.LOG])
 
     def test_the_captions_can_be_resized_from_the_only_surface_there_is(self):
         """A panel that is a bit too big must not need a terminal: this is the
@@ -149,6 +151,42 @@ class WhatItOffers(unittest.TestCase):
         # Not the default: a click on the icon must never be able to hit it.
         self.assertFalse(items[tray.HISTORY_DELETE].default)
 
+    def test_starting_at_logon_is_on_the_menu_with_its_current_state(self):
+        """The defect this item exists for: the feature was finished, shipped
+        and on his machine, and he asked for it anyway because the only way in
+        was a command he had never been shown."""
+        on = {item.key: item for item in tray.menu(state(autostart=True))}[
+            tray.AUTOSTART]
+        off = {item.key: item for item in tray.menu(state(autostart=False))}[
+            tray.AUTOSTART]
+        self.assertEqual(on.label, "Start when I log in")
+        self.assertEqual(off.label, "Start when I log in")
+        # The tick is the state, and the command is what clicking will do.
+        self.assertTrue(on.checked)
+        self.assertFalse(off.checked)
+        self.assertEqual(on.command, "dictate autostart disable")
+        self.assertEqual(off.command, "dictate autostart enable")
+        self.assertTrue(on.enabled)
+        self.assertTrue(off.enabled)
+
+    def test_off_is_exactly_as_easy_as_on(self):
+        """One click either way, from the same item, in the same place."""
+        for value in (True, False):
+            item = {i.key: i for i in tray.menu(state(autostart=value))}[
+                tray.AUTOSTART]
+            self.assertTrue(item.enabled)
+            self.assertFalse(item.children)
+            self.assertFalse(item.default)
+
+    def test_a_state_windows_would_not_answer_is_said_rather_than_guessed(self):
+        """Claiming "it is off" about something nobody could read is how a
+        menu ends up disagreeing with `dictate autostart status`."""
+        item = {i.key: i for i in tray.menu(state(autostart=None))}[tray.AUTOSTART]
+        self.assertFalse(item.enabled)
+        self.assertFalse(item.checked)
+        self.assertIn("cannot tell", item.label)
+        self.assertEqual(item.command, "dictate autostart status")
+
     def test_the_status_line_is_not_clickable(self):
         items = {item.key: item for item in tray.menu(state())}
         self.assertFalse(items[tray.STATUS].enabled)
@@ -191,8 +229,8 @@ class WhatItOffers(unittest.TestCase):
         wired = actions(done)
         for item in tray.menu(state(history=True)):
             wired.invoke(item.key)
-        self.assertEqual(done, ["stop", "restart", "check", "update", "log",
-                                "history", "history-delete"])
+        self.assertEqual(done, ["stop", "restart", "check", "update",
+                                "autostart", "log", "history", "history-delete"])
 
     def test_a_size_chosen_from_the_submenu_reaches_the_action_with_its_name(self):
         """Like the hotkey's, the key carries the value, so the Win32 side
@@ -290,6 +328,13 @@ class WhatItOffers(unittest.TestCase):
                                 update_now=lambda: None)
         self.assertFalse(bare.invoke(tray.HISTORY_DELETE))
         self.assertFalse(bare.invoke(tray.HISTORY))
+
+    def test_an_autostart_action_that_was_never_supplied_does_nothing(self):
+        bare = tray.TrayActions(stop=lambda: None, restart=lambda: None,
+                                open_log=lambda: None,
+                                check_updates=lambda: None,
+                                update_now=lambda: None)
+        self.assertFalse(bare.invoke(tray.AUTOSTART))
 
 
 class WhatItLooksLike(unittest.TestCase):
@@ -401,6 +446,10 @@ class WhatTheAppTellsIt(unittest.TestCase):
         app._last_error = ""
         app._published_activity = None
         app._update = None
+        # Nothing here is Windows, so "does it start at logon?" has no answer
+        # unless a test supplies one.
+        app._autostart_on = kwargs.pop("autostart", None)
+        app._autostart_read_at = 0.0
         app.batch = SimpleNamespace(state=kwargs.pop("residency", Residency.RESIDENT))
         for key, value in kwargs.items():
             setattr(app, key, value)
@@ -689,6 +738,111 @@ class WhatTheAppTellsIt(unittest.TestCase):
         app = self.app()
         app.cfg.overlay.size = "small"
         self.assertEqual(app._tray_state().caption_size, "small")
+
+    def _autostart_app(self, registered):
+        """An app whose only window on Task Scheduler is a list of calls.
+
+        `autostart.enable` and `autostart.disable` are the real ones everywhere
+        else and refuse to run off Windows, deliberately; what is under test here
+        is which of the two a click reaches, and what the tick says afterwards.
+        """
+        from dictate import autostart as autostart_mod
+
+        app = self.app()
+        calls: list[str] = []
+        said: list[tuple[str, str]] = []
+        app.notify = lambda level, message: said.append((level, message))
+        app._refresh_tray = lambda: None
+
+        def enable(cfg, config_path=None):
+            calls.append("enable")
+            registered[0] = True
+            return ["dictate will now start when you log in."]
+
+        def disable():
+            calls.append("disable")
+            registered[0] = False
+            return ["dictate will no longer start when you log in."]
+
+        self._patch(autostart_mod, "enable", enable)
+        self._patch(autostart_mod, "disable", disable)
+        self._patch(autostart_mod, "registered_or_unknown", lambda: registered[0])
+        return app, calls, said
+
+    def _patch(self, module, name, value):
+        previous = getattr(module, name)
+        setattr(module, name, value)
+        self.addCleanup(setattr, module, name, previous)
+
+    def test_the_tray_turns_starting_at_logon_on_and_off_again(self):
+        """Off has to stay exactly as easy as on: the same item, one click."""
+        registered = [False]
+        app, calls, _said = self._autostart_app(registered)
+
+        app.toggle_autostart()
+        self.assertEqual(calls, ["enable"])
+        self.assertTrue(app._tray_state().autostart)
+
+        app.toggle_autostart()
+        self.assertEqual(calls, ["enable", "disable"])
+        self.assertFalse(app._tray_state().autostart)
+
+    def test_which_way_a_click_goes_is_read_now_rather_than_from_the_menu(self):
+        """He can have enabled it in a PowerShell window since the menu was
+        drawn. Turning it off when he meant to turn it on is the one mistake
+        here that would matter."""
+        registered = [False]
+        app, calls, _said = self._autostart_app(registered)
+        app._autostart_on = False        # what the menu was drawn from
+        registered[0] = True             # what is true now
+        app.toggle_autostart()
+        self.assertEqual(calls, ["disable"])
+
+    def test_a_state_that_cannot_be_read_changes_nothing(self):
+        registered = [None]
+        app, calls, said = self._autostart_app(registered)
+        app.toggle_autostart()
+        self.assertEqual(calls, [])
+        self.assertIn("could not tell", said[0][1])
+        self.assertIsNone(app._tray_state().autostart)
+
+    def test_a_refusal_from_windows_leaves_the_tick_where_windows_left_it(self):
+        """An enable Windows would not accept must not draw a tick: the menu
+        would then be the only thing on the machine that believes it is on."""
+        from dictate import autostart as autostart_mod
+        from dictate.errors import DictateError
+
+        registered = [False]
+        app, _calls, said = self._autostart_app(registered)
+
+        def refuse(cfg, config_path=None):
+            raise DictateError("Windows did not accept the task.", "Try again.")
+
+        self._patch(autostart_mod, "enable", refuse)
+        app.toggle_autostart()
+        self.assertEqual(said[0][0], "error")
+        self.assertIn("did not work", said[0][1])
+        self.assertFalse(app._tray_state().autostart)
+
+    def test_the_answer_is_not_re_asked_on_every_refresh(self):
+        """`schtasks` is a process. The hotkey and transcription paths call
+        `_tray_state`; neither may pay for a menu tick."""
+        from dictate import autostart as autostart_mod
+        from dictate.app import AUTOSTART_POLL_S
+
+        asked = []
+        self._patch(autostart_mod, "registered_or_unknown",
+                    lambda: (asked.append(1), True)[1])
+        app = self.app()
+        app._read_autostart(force=True, now=1000.0)
+        for _ in range(50):
+            app._tray_state()
+        app._read_autostart(now=1001.0)
+        self.assertEqual(len(asked), 1)
+        # ...and it does catch up, on the slow loop, with a change made in
+        # another window.
+        app._read_autostart(now=1000.0 + 2 * AUTOSTART_POLL_S)
+        self.assertEqual(len(asked), 2)
 
     def test_restart_from_the_tray_shuts_down_first_and_says_so(self):
         from dictate.app import EXIT_RESTART

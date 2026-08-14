@@ -1269,3 +1269,136 @@ function Get-TomlValue {
     }
     return $null
 }
+
+# ---------------------------------------------------------------------------
+# Starting when he logs in
+#
+# The feature itself is `dictate autostart enable`, and it works. What did not
+# work is that it is a typed command he was never shown: he spent an evening
+# starting dictate by hand in a PowerShell window and asking for a feature that
+# was already installed on his machine. So setup settles the question at the
+# moment he is at the keyboard - which is the START of the run, not the end of
+# it, because the end is half an hour later and he is not watching by then.
+#
+# Two rules bound all of it. A question that can hang is worse than no question
+# at all, so this can always answer without him. And a product does not add
+# itself to Windows startup unless it was asked to, so every path that is not a
+# clear yes leaves the machine exactly as it found it.
+# ---------------------------------------------------------------------------
+
+function Test-CanAskQuestion {
+    <# Is there somebody at a keyboard to answer? #>
+    try {
+        if ([Console]::IsInputRedirected) { return $false }
+        $null = [Console]::KeyAvailable
+        return $true
+    } catch {
+        # A host with no console behind it - the ISE, a scheduled run, a remote
+        # session that pipes its input. Not an error, just nobody to ask.
+        return $false
+    }
+}
+
+function Get-AutostartPlan {
+    <# What this run should do about starting at logon, decided before anything
+       is installed and carried out after everything has been verified.
+
+       Returns 'enable', 'ask' or 'leave'. 'leave' means exactly that: it never
+       disables anything, so a re-run cannot take away a logon task he asked for
+       the first time. #>
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('ask', 'yes', 'no')][string]$Requested,
+        [Parameter(Mandatory = $true)][bool]$Installing,
+        [Parameter(Mandatory = $true)][bool]$CanAsk
+    )
+    # -Only verify (or -Only build) is somebody checking an installation, not
+    # somebody installing one. It may not change what happens at logon.
+    if (-not $Installing) { return 'leave' }
+    if ($Requested -eq 'yes') { return 'enable' }
+    if ($Requested -eq 'no') { return 'leave' }
+    if ($CanAsk) { return 'ask' }
+    # Unattended, and nobody said yes. The one answer that is always safe.
+    return 'leave'
+}
+
+function Get-AutostartQuestion {
+    <# The question itself. Both answers are spelled out, because "no" is a real
+       answer here and not a way of getting out of a dialog. #>
+    return @'
+Should dictate start by itself when you log in?
+
+  Yes  It starts with your Windows session - no PowerShell window, nothing on
+       screen until you speak. The dictate icon by the clock is how you stop
+       it, change the hotkey, or turn this back off.
+  No   You start it yourself with `dictate run` each time, and leave that
+       window open while you use it.
+
+Either way you can change your mind whenever you like, from that icon or with
+`dictate autostart enable` / `dictate autostart disable`.
+'@
+}
+
+function Read-YesNoWithTimeout {
+    <# A yes/no question that cannot hang.
+
+       Setup runs unattended for half an hour, and it is often started and
+       walked away from. A `Read-Host` here would leave it sitting at a prompt
+       until somebody came back to the machine - which is the one failure a
+       question at the start of a long install must not have. So this reads a
+       single key, gives up after $TimeoutSeconds, and treats no answer as
+       $Default. #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [int]$TimeoutSeconds = 30,
+        [bool]$Default = $false
+    )
+    $shown = 'y/N'
+    if ($Default) { $shown = 'Y/n' }
+    Write-Host ''
+    foreach ($line in ($Prompt -split "`r?`n")) { Write-Host -Object $line }
+    Write-Host ''
+    $answer = 'No'
+    if ($Default) { $answer = 'Yes' }
+    Write-Host ("[$shown]  (no answer within $TimeoutSeconds seconds means $answer, " +
+                'and setup carries on)') -ForegroundColor Yellow -NoNewline
+    Write-Host ' ' -NoNewline
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    try {
+        while ((Get-Date) -lt $deadline) {
+            if ([Console]::KeyAvailable) {
+                $key = [Console]::ReadKey($true)
+                $char = ([string]$key.KeyChar).ToLowerInvariant()
+                if ($char -eq 'y') { Write-Host 'yes'; return $true }
+                if ($char -eq 'n') { Write-Host 'no'; return $false }
+                if ($key.Key -eq [ConsoleKey]::Enter) {
+                    Write-Host $answer.ToLowerInvariant()
+                    return $Default
+                }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    } catch {
+        # No console to read a key from after all. The default is the answer,
+        # and the run carries on - this is never a reason to stop an install.
+        Write-SetupLog "the yes/no question could not be asked here: $($_.Exception.Message)"
+    }
+    Write-Host ("no answer - taking that as $answer")
+    return $Default
+}
+
+function Test-AutostartStatusOn {
+    <# Read `dictate autostart status` output back: $true, $false, or $null when
+       it did not say.
+
+       Setup does not keep its own idea of whether the logon task exists. It
+       asks dictate, and dictate asks Windows, so the line setup prints at the
+       end and the answer `dictate autostart status` gives cannot disagree. #>
+    param([string]$Output)
+    if (-not $Output) { return $null }
+    if ($Output -match '(?im)^\s*start at logon:\s*ON\s*$') { return $true }
+    if ($Output -match '(?im)^\s*start at logon:\s*OFF\s*$') { return $false }
+    # REGISTERED BUT DISABLED, "not available on ...", or a line this does not
+    # know: report nothing rather than a guess.
+    return $null
+}

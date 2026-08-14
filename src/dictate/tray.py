@@ -49,6 +49,7 @@ SIZE = "caption-size"
 #: the same reason: the Win32 side carries a string and knows nothing about it.
 SIZE_PREFIX = "caption-size="
 SIZE_OTHER = "caption-size-other"
+AUTOSTART = "autostart"
 #: One key per offered combination: the key carries the combination itself, so
 #: the Win32 side still knows nothing but a string, and `TrayActions.invoke`
 #: is the only thing that has to read it.
@@ -120,6 +121,11 @@ class TrayState:
     #: there is no room for. Empty when nobody has said - the items are then
     #: offered, because doing nothing is better than hiding the control.
     caption_size: str = ""
+    #: Whether dictate starts when he logs in - `None` when that could not be
+    #: read (off Windows, or schtasks would not answer). Three values on purpose:
+    #: the menu must be able to say "I do not know" rather than "it is off",
+    #: which would be a claim about something nobody read.
+    autostart: bool | None = None
 
     @property
     def colour(self) -> str:
@@ -228,22 +234,54 @@ def size_items(state: TrayState) -> list[MenuItem]:
     return items
 
 
+def autostart_item(state: TrayState) -> MenuItem:
+    """"Start when I log in": the setting, its current value, and the toggle.
+
+    It is here because the feature was already finished and he never found it.
+    `dictate autostart enable` had been on his machine for hours while he was
+    saying he did not want to keep a PowerShell window open - it is opt-in, it is
+    typed, and he has said he will not remember commands. The menu is where he
+    actually looks, so this is where the answer to "does it start by itself?"
+    belongs.
+
+    The tick is the state, the label is the setting, and the command is what
+    clicking will do - which is the same shape as the hotkey list above, and the
+    same rule the whole menu keeps: every item names the command that does the
+    same thing.
+
+    A state that could not be read is shown greyed and says so. Toggling needs
+    to know which way to go, and dictate does not guess about the contents of
+    somebody's Task Scheduler.
+    """
+    if state.autostart is None:
+        return MenuItem(AUTOSTART,
+                        "Start when I log in - dictate cannot tell if this is on",
+                        "dictate autostart status", enabled=False,
+                        separator_after=True)
+    return MenuItem(AUTOSTART, "Start when I log in",
+                    "dictate autostart disable" if state.autostart
+                    else "dictate autostart enable",
+                    checked=state.autostart, separator_after=True)
+
+
 def menu(state: TrayState) -> list[MenuItem]:
     """What right-clicking the icon offers.
 
-    Eight lines, in six groups: what it is doing, how big the captions are,
+    Nine lines, in six groups: what it is doing, how big the captions are,
     the two that change whether it is running, the two that change which
-    version it is, the hotkey, and the log - plus two more when a dictation
-    history is being kept. None of them needs him to have worked out what went
-    wrong first - Stop clears a stuck copy as well as a healthy one, because
-    `dictate stop` does.
+    version it is, the two settings that outlive this process, and the log -
+    plus two more when a dictation history is being kept. None of them needs
+    him to have worked out what went wrong first - Stop clears a stuck copy as
+    well as a healthy one, because `dictate stop` does.
 
     **Caption size and Change the hotkey are the two items with a submenu**, and
-    the two that show a current value. They are also the two that write to his
-    config file, through the same `config_edit`; `hotkey_switch` carries why the
-    hotkey is a list of combinations rather than "press the keys you want" or
-    "here is your config file, edit it", and `overlay_size` carries why the
-    caption size is one named ladder rather than five pixel measurements.
+    with **Start when I log in** they are the three that show a current value.
+    Two of them write to his config file, through the same `config_edit`;
+    `hotkey_switch` carries why the hotkey is a list of combinations rather than
+    "press the keys you want" or "here is your config file, edit it", and
+    `overlay_size` carries why the caption size is one named ladder rather than
+    five pixel measurements. The third writes to Task Scheduler instead, and
+    `autostart_item` carries why starting at logon is on this menu at all.
 
     **Caption size is on the tray because the captions are the thing he looks
     at** and this is the only surface a logon-started copy has: a panel that is
@@ -279,7 +317,8 @@ def menu(state: TrayState) -> list[MenuItem]:
         MenuItem(UPDATE, "Update now", "dictate update",
                  enabled=not state.updating, separator_after=True),
         MenuItem(HOTKEY, "Change the hotkey", "dictate hotkey",
-                 children=tuple(hotkey_items(state)), separator_after=True),
+                 children=tuple(hotkey_items(state))),
+        autostart_item(state),
         MenuItem(LOG, "Open the log folder"),
     ]
     if state.history:
@@ -303,6 +342,10 @@ class TrayActions:
     update_now: Callable[[], None]
     open_history: Callable[[], None] | None = None
     delete_history: Callable[[], None] | None = None
+    #: Turns starting at logon on when it is off and off when it is on. Which of
+    #: those a click means is decided by the app, from the state it read - never
+    #: from the label that was drawn, which may be a moment old.
+    toggle_autostart: Callable[[], None] | None = None
     #: These two take what the menu item carries - a combination, a size name.
     #: The only actions here that are given anything, which is why they are not
     #: in `handlers` with the rest.
@@ -318,7 +361,8 @@ class TrayActions:
         # than raising - which is the right answer for a menu id from a copy of
         # the menu built before the history was turned off.
         for key, action in ((HISTORY, self.open_history),
-                            (HISTORY_DELETE, self.delete_history)):
+                            (HISTORY_DELETE, self.delete_history),
+                            (AUTOSTART, self.toggle_autostart)):
             if action is not None:
                 self.handlers[key] = action
 

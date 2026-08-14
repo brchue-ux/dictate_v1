@@ -973,6 +973,67 @@ Test-Case 'a non-zero exit code from a tool becomes a plain-language failure' {
     Assert-ExitCode -Code 0 -Problem 'never seen' -NextAction 'never seen'
 }
 
+
+# ---------------------------------------------------------------------------
+# Starting when he logs in: the decision, not the Task Scheduler call
+# ---------------------------------------------------------------------------
+
+Test-Case 'an install with nobody at the keyboard never registers a logon task' {
+    # The rule: a product does not add itself to Windows startup unless it was
+    # asked to. An unattended run is not an answer of yes.
+    Assert-Equal 'leave' (Get-AutostartPlan -Requested 'ask' -Installing $true -CanAsk $false)
+}
+
+Test-Case 'an install with somebody there is asked the question' {
+    Assert-Equal 'ask' (Get-AutostartPlan -Requested 'ask' -Installing $true -CanAsk $true)
+}
+
+Test-Case '-Autostart yes and no are taken at their word and never ask' {
+    Assert-Equal 'enable' (Get-AutostartPlan -Requested 'yes' -Installing $true -CanAsk $true)
+    Assert-Equal 'enable' (Get-AutostartPlan -Requested 'yes' -Installing $true -CanAsk $false)
+    Assert-Equal 'leave' (Get-AutostartPlan -Requested 'no' -Installing $true -CanAsk $true)
+}
+
+Test-Case 'a run that installs nothing cannot change what happens at logon' {
+    # -Only verify is somebody checking an installation, not installing one.
+    foreach ($requested in @('ask', 'yes', 'no')) {
+        Assert-Equal 'leave' (Get-AutostartPlan -Requested $requested -Installing $false -CanAsk $true)
+    }
+}
+
+Test-Case 'the question names both answers and how to change your mind' {
+    $question = Get-AutostartQuestion
+    Assert-Contains $question 'start by itself when you log in'
+    Assert-Contains $question 'dictate run'
+    Assert-Contains $question 'dictate autostart disable'
+}
+
+Test-Case 'a question nobody answers gives up rather than hanging the install' {
+    # Setup runs unattended for half an hour and is often walked away from. A
+    # prompt that waits forever is the one failure this must not have.
+    $started = Get-Date
+    $answer = Read-YesNoWithTimeout -Prompt 'Answer nothing at all.' -TimeoutSeconds 1 -Default $false
+    $elapsed = ((Get-Date) - $started).TotalSeconds
+    Assert-False $answer 'no answer means no'
+    if ($elapsed -gt 20) { throw "it waited $elapsed seconds for an answer nobody gave" }
+}
+
+Test-Case 'setup reads the state back out of dictate rather than keeping its own' {
+    # Whatever the tray tick says and whatever `dictate autostart status` says
+    # are the same answer, because this is the only thing setup reads.
+    Assert-True (Test-AutostartStatusOn -Output "start at logon:  ON`r`n  task: ...") 'ON is on'
+    Assert-False (Test-AutostartStatusOn -Output "start at logon:  OFF`r`n") 'OFF is off'
+}
+
+Test-Case 'an answer setup cannot read is not turned into "it is off"' {
+    foreach ($output in @('', 'start at logon:  REGISTERED BUT DISABLED',
+                          'start at logon:  not available on linux - it is a Windows scheduled task',
+                          'something else entirely')) {
+        $state = Test-AutostartStatusOn -Output $output
+        if ($null -ne $state) { throw "[$output] should have been unreadable, was [$state]" }
+    }
+}
+
 # ===========================================================================
 
 Write-Host ''

@@ -592,6 +592,18 @@ affects only the screen, and the second may cost him a word in the document.
   2 and 3 above, so a service would install, start, and do nothing. Starting at
   logon is a **per-user Task Scheduler logon task** running in his own session -
   see `src/dictate/autostart.py`, which carries the rest of the reasoning.
+* **Starting at logon is never turned on for him.** He asked for it in general
+  terms - "I thought it was gonna run like a service" - and the answer to that
+  is still not to add ourselves to Windows startup on his behalf. Setup asks,
+  once, at the START of the run while he is still at the keyboard, and takes no
+  answer as no; the tray offers it as a toggle; a console `dictate run` mentions
+  it once in its banner. Three offers and no default. What went wrong was never
+  the mechanism - `dictate autostart enable` had been on his machine for hours -
+  it was that the only way in was a typed command he had never been shown, and a
+  discoverability defect is not fixed by making the product decide for him.
+  `src/dictate/tray.autostart_item` and `setup-lib.Get-AutostartPlan` carry the
+  rest, and neither keeps its own idea of whether it is on: both read what
+  `dictate autostart status` reads, so the three answers cannot differ.
 * **No installer, no Windows CI.** Separate follow-up task.
 * **Nothing on top of the dictation history but opening it.** No re-pasting from
   it, no search, no window of its own. It is a text file he reads; each of those
