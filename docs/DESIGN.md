@@ -766,6 +766,26 @@ affects only the screen, and the second may cost him a word in the document.
   `src/dictate/tray.autostart_item` and `setup-lib.Get-AutostartPlan` carry the
   rest, and neither keeps its own idea of whether it is on: both read what
   `dictate autostart status` reads, so the three answers cannot differ.
+* **Turning it on starts it now, and turning it off does not stop it.** The same
+  discoverability defect came back wearing a different hat: he turned it on, saw
+  nothing happen, and had no reason to believe it had worked - the feature did
+  not begin until his next logon. So `autostart.enable` also starts the copy the
+  task would have started (`autostart.start_now`: the same `pythonw.exe`, the
+  same `run --autostart`, detached so it outlives the window it was asked from),
+  and reports that as a SECOND outcome, because a registration that worked and a
+  start that did not is not a success. It starts nothing when a copy is already
+  running - which is always the case from the tray, since the tray is drawn by
+  one - and it claims only what it watched: a copy that came straight back is a
+  failure with its exit code, and running out of patience says so and names the
+  log rather than picking an answer.
+  **`disable` is deliberately not symmetric.** It removes the task and leaves
+  the running copy alone, because he can be mid-sentence when he unticks the
+  menu item, and dropping his audio and his words is a high price for answering
+  a question about future logons. Nothing is lost by leaving it - `dictate stop`
+  is one command away, and is the one command every failure message here already
+  names - whereas a sentence ended by a menu tick is gone. What that costs is a
+  copy still running that he might not expect, so it is named, with the command
+  that stops it.
 * **No installer, no Windows CI.** Separate follow-up task.
 * **Nothing on top of the dictation history but opening it.** No re-pasting from
   it, no search, no window of its own. It is a text file he reads; each of those

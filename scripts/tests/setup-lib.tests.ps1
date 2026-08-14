@@ -1025,6 +1025,24 @@ Test-Case 'setup reads the state back out of dictate rather than keeping its own
     Assert-False (Test-AutostartStatusOn -Output "start at logon:  OFF`r`n") 'OFF is off'
 }
 
+Test-Case 'setup reads back whether a copy is running, so it can say which' {
+    # `autostart enable` starts the windowless copy as well as registering the
+    # task, so the last line of the report - "how do you start this" - depends on
+    # whether that worked. Same rule: read it back, never remember it.
+    $on = @('start at logon:  ON', '', 'running now:     YES - process 1234, started at 09:14') -join "`r`n"
+    $off = @('start at logon:  ON', '', 'running now:     NO',
+             '                 start it with `dictate run`') -join "`r`n"
+    Assert-True (Test-DictateRunningOn -Output $on) 'YES is running'
+    Assert-False (Test-DictateRunningOn -Output $off) 'NO is not running'
+}
+
+Test-Case 'a running answer setup cannot read is not turned into "it is not"' {
+    foreach ($output in @('', 'start at logon:  OFF', 'running now:', 'something else')) {
+        $state = Test-DictateRunningOn -Output $output
+        if ($null -ne $state) { throw "[$output] should have been unreadable, was [$state]" }
+    }
+}
+
 Test-Case 'an answer setup cannot read is not turned into "it is off"' {
     foreach ($output in @('', 'start at logon:  REGISTERED BUT DISABLED',
                           'start at logon:  not available on linux - it is a Windows scheduled task',

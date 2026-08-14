@@ -95,6 +95,14 @@ You can also settle it at any time afterwards, in either of two places:
 dictate autostart enable
 ```
 
+**Turning it on starts it there and then.** You do not have to log out and back
+in to see whether it worked: whichever of the three ways you used, dictate
+starts the same windowless copy the logon task would, and says which of three
+things happened — it started (with its process number), a copy was already
+running so nothing new was started, or it could not start and here is what
+stopped it. That last one never appears under a sentence saying everything
+worked; the logon task's own outcome is reported separately from it.
+
 From then on it is just there: about half a minute after you reach the desktop,
 without a window appearing, ready for the hotkey. You never type anything to
 start dictating again.
@@ -133,6 +141,12 @@ Two other things worth knowing:
 Turning it off is one command — or the same tray item, unticked — and leaves
 nothing behind: it is a single Windows scheduled task, which you can also see
 and delete in Task Scheduler under the name `dictate`.
+
+**Turning it off does not stop the copy that is running.** That is deliberate:
+you could be in the middle of a sentence when you untick it, and the answer to
+"should this start at the next logon" is not a reason to throw away what you
+were saying. It says so, names the copy, and names the command — `dictate stop`
+— that ends it when you actually want it gone.
 
 All three places answer this question by asking Windows the same way, so setup,
 the tray tick and `dictate autostart status` cannot disagree. The tray reads it
@@ -829,6 +843,14 @@ python -m unittest discover -s tests -t .
 * **That a logon start that fails writes down why**, retries a bounded number of
   times first, does not retry a broken config file at all, and stands aside when
   a copy is already running.
+* **That turning it on starts it now as well** — the same windowless, detached
+  copy the logon task starts, never a second one on top of a copy that is
+  already running (against a real instance lock, held here), and that what is
+  reported is only what was watched happen: a copy that came straight back is a
+  failure carrying its exit code, running out of patience is "not confirmed"
+  rather than either answer, and a start that failed is never printed under the
+  sentence saying the task registered. And that turning it off leaves a running
+  copy alone, names it, and names `dictate stop`.
 * **That `dictate stop` gets out of every stuck state**, without being told
   which one it is looking at: a copy that is running, a copy that will not
   answer (ended with its whisper-server, never on its own), a whisper-server

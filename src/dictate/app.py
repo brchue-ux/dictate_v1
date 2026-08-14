@@ -618,8 +618,14 @@ class Application:
         be a moment old, and turning it off when he meant to turn it on is the
         one mistake here that would matter.
 
-        Nothing is asked. Turning it on registers a task and prints what it did;
-        turning it off deletes it and leaves nothing behind. A running dictate
+        Nothing is asked. Turning it on registers a task, starts the windowless
+        copy and prints what each of those did; turning it off deletes the task
+        and leaves the running copy alone (`autostart.disable` says why). From
+        HERE the start is always the "already running" case - this menu is drawn
+        by a copy that is running - and that is the point of it being decided in
+        `autostart.start_now` rather than at each of the three call sites: one
+        copy at a time survives being reached from a place that is one. A
+        running dictate
         may not show a dialog (it holds the instance lock, and the box would
         block the thread that owns the icon), so the item says what it does and
         the tick says what happened.

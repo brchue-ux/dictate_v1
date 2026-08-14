@@ -416,6 +416,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "dictate autostart enable failed: $out" }
           if ($out -notmatch '1.6 GB') { throw 'enable did not state what it costs to leave on' }
 
+          # Turning it on also starts the windowless copy, so the report carries
+          # a second outcome - and it has to be one of the three dictate can
+          # actually have established. This runner has no models, so which of
+          # them it is here is not the point and is not asserted: that it says
+          # one of them, rather than a cheerful fourth, is.
+          if ($out -notmatch 'running NOW' -and $out -notmatch 'already running' -and
+              $out -notmatch 'could NOT be started now' -and
+              $out -notmatch 'had not finished starting') {
+            throw "enable said nothing about whether it started dictate: $out"
+          }
+
           # Windows' own view of it, not dictate's. Note that this is NOT the
           # XML dictate sent: Task Scheduler normalises it, reordering the
           # document and dropping every element whose value is already the
@@ -487,6 +498,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           schtasks /Delete /TN dictate /F 2>&1 | Out-Null
+          # `enable` starts the windowless copy as well, and `disable` leaves it
+          # running on purpose. On this runner it is a copy that is failing to
+          # start over and over, so it goes here rather than being left to the
+          # end of the job.
+          dictate stop 2>&1 | Out-String | Write-Host
           exit 0
 
       - name: Summary
@@ -504,7 +520,10 @@ jobs:
           Windows agrees it is gone, and running it twice is safe. The
           installer's own reading of that same output (`Test-AutostartStatusOn`,
           which is how setup.ps1 knows whether to offer this) is checked against
-          the real answer both ways round, so the two cannot disagree.
+          the real answer both ways round, so the two cannot disagree. Turning
+          it on also starts the windowless copy, and the report says which of
+          the three things it established happened - started, already running,
+          or failed with the reason.
 
           **Not proved, and cannot be here:** that it starts at logon. A hosted
           runner never logs on, so nobody has seen the task fire, seen dictate

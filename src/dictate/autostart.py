@@ -433,9 +433,140 @@ def console_hint(registered: bool | None) -> list[str]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Starting it now, rather than at the next logon
+# ---------------------------------------------------------------------------
+
+#: How long to wait for the copy just started to take the instance lock. It
+#: takes it at the very top of `run_at_logon`, before any of the slow work, so
+#: this is generous rather than tight - and running out of it is reported as
+#: "not confirmed", never as a failure.
+START_CONFIRM_S = 8.0
+START_POLL_S = 0.25
+
+
+@dataclass
+class StartOutcome:
+    """What the immediate start did. Deliberately separate from whether the
+    logon task registered: half of this working is not this working."""
+
+    #: "started", "already-running", "failed" or "unconfirmed".
+    state: str
+    pid: int | None = None
+    #: How the copy that was already running describes itself.
+    holder: str = ""
+    #: The real reason, in the words of whatever refused. Never a guess.
+    detail: str = ""
+    #: How long "unconfirmed" actually waited, so the report can say the number
+    #: that was used rather than the one in the constant above.
+    waited_s: float = 0.0
+
+    @property
+    def ok(self) -> bool:
+        return self.state in ("started", "already-running")
+
+
+def start_now(config_path: str | None = None, executable: str | None = None, *,
+              wait_s: float = START_CONFIRM_S, poll_s: float = START_POLL_S,
+              spawn=None, running=None, sleep=time.sleep,
+              monotonic=time.monotonic) -> StartOutcome:
+    """Start the windowless copy now. Never starts a second one.
+
+    Enabling something and seeing nothing happen is the same defect as shipping
+    it as a command nobody finds, so `enable` does this too. Three things about
+    it are load-bearing:
+
+    * **one copy, still.** A running dictate owns the hotkey and the
+      transcription port, and `instance.running_instance()` is asked *first*: if
+      there is one, nothing is started and the caller says so. This is also what
+      the tray's own toggle hits, because the tray is inside a running copy.
+    * **the same copy the logon task starts**, through `pythonw.exe` and
+      `run --autostart`: no console to flash, and `LogonLog` in place of the
+      stdout that a windowless process does not have. `spawn_detached` is what
+      makes it outlive the shell, terminal or tray that asked for it.
+    * **it claims only what it watched happen.** "started" means the new copy
+      took the instance lock while we watched; a copy that stopped straight away
+      is a failure carrying its own exit code; and running out of patience is
+      `unconfirmed`, which names where the answer is rather than inventing one.
+    """
+    from . import recovery  # noqa: PLC0415 - circular at import time
+
+    running = instance.running_instance if running is None else running
+    holder = running()
+    if holder is not None:
+        return StartOutcome("already-running", holder=holder.describe())
+
+    argv = recovery.relaunch_argv(config_path, str(executable) if executable else None,
+                                  autostart=True)
+    kwargs = {"spawn": spawn} if spawn is not None else {}
+    try:
+        proc = recovery.spawn_detached(argv, **kwargs)
+    except OSError as exc:
+        return StartOutcome("failed", detail=str(exc))
+
+    pid = getattr(proc, "pid", None)
+    deadline = monotonic() + wait_s
+    while True:
+        if running() is not None:
+            return StartOutcome("started", pid=pid)
+        code = proc.poll() if hasattr(proc, "poll") else None
+        if code is not None:
+            # Its own account of why is in the logon log rather than here:
+            # there is no console for it to have told us through, which is the
+            # whole reason that log exists.
+            return StartOutcome(
+                "failed", pid=pid,
+                detail=f"it started and stopped again at once, with exit code "
+                       f"{code}. What it said about that is in {log_path()}")
+        if monotonic() >= deadline:
+            return StartOutcome("unconfirmed", pid=pid, waited_s=wait_s)
+        sleep(poll_s)
+
+
+def start_lines(outcome: StartOutcome) -> list[str]:
+    """What to tell him about the immediate start, and nothing more than that."""
+    if outcome.state == "already-running":
+        return [
+            f"It is already running ({outcome.holder}), so nothing new was "
+            "started -",
+            "one copy at a time is the rule, or two of them fight over the "
+            "hotkey.",
+        ]
+    if outcome.state == "started":
+        where = f" (process {outcome.pid})" if outcome.pid else ""
+        return [
+            f"It is also running NOW{where}, with no window of its own: the "
+            "icon by the",
+            "clock is where it lives, and the hotkey works from this moment.",
+        ]
+    if outcome.state == "unconfirmed":
+        where = f" (process {outcome.pid})" if outcome.pid else ""
+        return [
+            f"It was started now{where}, but it had not finished starting "
+            f"{outcome.waited_s:.0f} seconds later,",
+            "so dictate cannot tell you here whether it came up. What it says "
+            "about itself:",
+            "  dictate autostart status",
+            f"and anything that went wrong is written to {log_path()}.",
+        ]
+    return [
+        "It could NOT be started now, and this is what stopped it:",
+        f"  {outcome.detail or 'no reason was given'}",
+        "The logon task above is registered and unaffected - it will still "
+        "start at",
+        "your next logon. To start it now instead, and see the reason in full:",
+        "  dictate run",
+    ]
+
+
 def enable(cfg: Config, *, config_path: str | None = None,
-           executable: str | None = None) -> list[str]:
-    """Register the logon task. Returns the lines to show the user."""
+           executable: str | None = None, start: bool = True) -> list[str]:
+    """Register the logon task, start the windowless copy, and say what each of
+    those two did. Returns the lines to show the user.
+
+    `start=False` is for a caller that only wants the registration; nothing
+    ships passing it, and the three ways he reaches this all start it.
+    """
     _require_windows("`dictate autostart enable`")
     user = interactive_user()
     command = windowless_python(executable)
@@ -502,6 +633,16 @@ def enable(cfg: Config, *, config_path: str | None = None,
         f"  its log:   {log_path()}",
         "",
     ]
+
+    # The registration is finished and reported above; what follows is a second
+    # outcome and is written as one. Turning this on and watching nothing happen
+    # is why it is done at all - but a start that failed may never be printed
+    # under a sentence that says everything worked.
+    if start:
+        outcome = start_now(config_path, str(command))
+        lines += start_lines(outcome)
+        lines.append("")
+
     lines += _memory_cost_lines(cfg)
     lines += [
         "",
@@ -542,7 +683,20 @@ def _memory_cost_lines(cfg: Config) -> list[str]:
 
 
 def disable() -> list[str]:
-    """Remove the logon task and anything autostart left behind."""
+    """Remove the logon task, and LEAVE the copy that is running alone.
+
+    Enabling starts one, so the symmetric thing would be for disabling to stop
+    it. It deliberately does not. Turning this off is a statement about future
+    logons, and he can be dictating into it at the instant he clicks the tray
+    item: stopping it there would drop the audio and the words with it, to
+    answer a question he did not ask. Nothing is lost by leaving it - it is one
+    `dictate stop` away, which is the one command every failure message in this
+    product already names - whereas a sentence ended by a menu tick is gone.
+
+    What that costs is a running copy he might not expect, so the copy is named
+    below, along with the command that stops it. Saying nothing here would be
+    the actual defect.
+    """
     _require_windows("`dictate autostart disable`")
     if not is_registered():
         return ["dictate was not set to start when you log in. Nothing to undo."]
@@ -571,8 +725,11 @@ def disable() -> list[str]:
     if holder is not None:
         lines += [
             "",
-            f"The copy running now ({holder.describe()}) keeps running until you",
-            "stop it or log out:",
+            f"dictate is still RUNNING right now ({holder.describe()}), and has "
+            "been left",
+            "that way on purpose - you could be in the middle of a sentence. It "
+            "keeps",
+            "running until you log out, or until you say:",
             "  dictate stop",
         ]
     return lines

@@ -314,6 +314,21 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   back, so they cannot disagree. `None` means "could not read", and is never
   reported as OFF. The tray's answer is refreshed on the slow watch loop
   (`app.AUTOSTART_POLL_S`), never from `_tray_state` — the hotkey path calls that.
+- **Enabling it starts the copy NOW; disabling it does not stop one.** The same
+  defect came back: he turned it on, nothing visible happened, and the feature did
+  not begin until his next logon. `autostart.start_now` is the whole of it and is
+  called from `autostart.enable`, so the CLI, the tray and setup (which runs the
+  CLI) cannot behave differently. Three things are load-bearing: it asks
+  `instance.running_instance()` FIRST and starts nothing if there is one — which is
+  always the case from the tray, since the tray is drawn by a running copy;
+  it starts the same thing the task does, via `recovery.relaunch_argv(...,
+  autostart=True)` through `spawn_detached`, so no console appears and it outlives
+  the window that asked; and it reports only what it watched — `started`,
+  `already-running`, `failed` (with the exit code or the OS error) or
+  `unconfirmed`, never a fourth, cheerful one. The registration's outcome and the
+  start's outcome are separate paragraphs of `enable`'s report for that reason.
+  `disable` is deliberately NOT symmetric — its docstring carries why — and setup
+  reads `Test-DictateRunningOn` back rather than assuming the start worked.
 - **Only one copy may run**, or two hooks fight over the hotkey and two servers over
   the port. `src/dictate/instance.py` holds an exclusive byte-range lock for the life
   of the process, so the OS releases it on any kind of death and there is no such

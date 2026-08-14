@@ -2186,3 +2186,20 @@ function Test-AutostartStatusOn {
     # know: report nothing rather than a guess.
     return $null
 }
+
+function Test-DictateRunningOn {
+    <# The OTHER answer in `dictate autostart status`: is a copy running right
+       now. $true, $false, or $null when it did not say.
+
+       Turning the logon task on also starts the windowless copy, so the last
+       line of the report - "how do you start this" - is a different sentence
+       depending on whether that worked. Same rule as the line above it: setup
+       reads the answer back rather than remembering what it asked for. #>
+    param([string]$Output)
+    if (-not $Output) { return $null }
+    # "running now:     YES - process 1234, started at ..." carries a holder
+    # after it; "running now:     NO" does not.
+    if ($Output -match '(?im)^\s*running now:\s*YES\b') { return $true }
+    if ($Output -match '(?im)^\s*running now:\s*NO\s*$') { return $false }
+    return $null
+}

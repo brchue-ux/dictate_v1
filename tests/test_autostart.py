@@ -486,6 +486,285 @@ class WhereHeWillActuallyRead(TempState):
             self.assertIsNone(autostart.registered_or_unknown())
 
 
+class FakeProcess:
+    """What `spawn_detached` hands back: a process, not a pid."""
+
+    def __init__(self, pid: int = 4242, exits: int | None = None):
+        self.pid = pid
+        self._exits = exits
+
+    def poll(self):
+        return self._exits
+
+
+class SpawnRecorder:
+    """Stands in for `subprocess.Popen` inside `recovery.spawn_detached`."""
+
+    def __init__(self, process=None, raises: OSError | None = None):
+        self.calls: list[tuple[list[str], dict]] = []
+        self.process = process or FakeProcess()
+        self.raises = raises
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((list(argv), dict(kwargs)))
+        if self.raises is not None:
+            raise self.raises
+        return self.process
+
+
+class StartingItNow(TempState):
+    """Turning it on starts it, and says truthfully what that did.
+
+    This is the second time this feature failed him on discoverability alone:
+    it shipped as a command nobody found, was surfaced in setup and on the tray
+    for that reason, and then did nothing visible when he used either. Enabling
+    something and watching nothing happen is the same defect in a new hat.
+    """
+
+    def test_a_copy_that_is_already_running_means_nothing_is_started(self):
+        """The hazard the whole product is built around: one copy. Two would
+        fight over the hotkey and over the transcription port, and the second
+        whisper-server is the orphan class this project has already shipped
+        once. The lock is real here - it works on this machine too."""
+        from dictate import instance
+
+        spawn = SpawnRecorder()
+        with instance.InstanceLock(started_by="hand"):
+            outcome = autostart.start_now(spawn=spawn)
+
+        self.assertEqual(outcome.state, "already-running")
+        self.assertEqual(spawn.calls, [])
+        self.assertIn(str(os.getpid()), outcome.holder)
+        said = "\n".join(autostart.start_lines(outcome))
+        self.assertIn("already running", said)
+        self.assertIn(str(os.getpid()), said)
+
+    def test_the_tray_reaches_that_same_answer(self):
+        """The tray menu is drawn by a running copy, so its own enable is
+        always the case above. It is decided in `start_now` rather than at each
+        call site precisely so that being reached from inside a running copy
+        cannot start a second one."""
+        from dictate import instance
+
+        spawn = SpawnRecorder()
+        with instance.InstanceLock(started_by="logon"):
+            self.assertEqual(autostart.start_now(spawn=spawn).state,
+                             "already-running")
+        self.assertEqual(spawn.calls, [])
+
+    def test_it_starts_the_same_windowless_copy_the_logon_task_starts(self):
+        """Not a child of the shell or the tray that asked for it: `pythonw.exe`,
+        `run --autostart` (which is the entry point that has a log in place of
+        the stdout a windowless process does not have), and detached, so it
+        outlives the window it was typed in."""
+        spawn = SpawnRecorder()
+        running = [None, FakeProcess()]  # not running, then running
+        outcome = autostart.start_now(
+            executable=r"C:\Python312\pythonw.exe",
+            spawn=spawn, running=lambda: running.pop(0), sleep=lambda _s: None)
+
+        self.assertEqual(outcome.state, "started")
+        self.assertEqual(outcome.pid, 4242)
+        (argv, kwargs), = spawn.calls
+        self.assertEqual(argv[0], r"C:\Python312\pythonw.exe")
+        self.assertEqual(argv[1:], ["-m", "dictate", "run", "--autostart"])
+        # However it is spelled on this platform, it is spelled: a plain Popen
+        # with no flags at all would be a child that dies with its parent.
+        self.assertTrue(kwargs.get("start_new_session")
+                        or kwargs.get("creationflags"))
+
+    def test_the_config_it_was_given_is_carried_over(self):
+        spawn = SpawnRecorder()
+        running = [None, FakeProcess()]
+        autostart.start_now(r"C:\Users\owner\dictate.toml", "pythonw.exe",
+                            spawn=spawn, running=lambda: running.pop(0))
+        (argv, _kwargs), = spawn.calls
+        self.assertIn("--config", argv)
+        self.assertIn(r"C:\Users\owner\dictate.toml", argv)
+
+    def test_a_copy_that_stops_again_at_once_is_a_failure_with_its_own_reason(self):
+        """`start_now` may not report a start it did not watch happen. A copy
+        that came straight back is the case that would otherwise be printed as
+        a cheerful success."""
+        spawn = SpawnRecorder(process=FakeProcess(pid=99, exits=2))
+        outcome = autostart.start_now(spawn=spawn, running=lambda: None,
+                                      sleep=lambda _s: None)
+        self.assertEqual(outcome.state, "failed")
+        self.assertFalse(outcome.ok)
+        # 2 is dictate's own "could not start and said why". There was no
+        # console for it to say it in, so the log that has it is named.
+        self.assertIn("exit code 2", outcome.detail)
+        self.assertIn(str(autostart.log_path()), outcome.detail)
+        said = "\n".join(autostart.start_lines(outcome))
+        self.assertIn("could NOT be started now", said)
+        self.assertIn("dictate run", said)
+
+    def test_windows_refusing_to_start_it_is_reported_in_its_own_words(self):
+        """Never "something went wrong": the thing that refused said why."""
+        spawn = SpawnRecorder(raises=OSError("[WinError 5] Access is denied"))
+        outcome = autostart.start_now(spawn=spawn, running=lambda: None)
+        self.assertEqual(outcome.state, "failed")
+        self.assertIn("Access is denied", outcome.detail)
+        self.assertIn("Access is denied", "\n".join(autostart.start_lines(outcome)))
+
+    def test_running_out_of_patience_is_not_reported_as_a_failure(self):
+        """It has not been established that anything is wrong - only that
+        dictate stopped watching. That is said, and where the answer lives is
+        named, rather than either half being claimed."""
+        waited: list[float] = []
+        clock = iter([0.0, 1.0, 2.0, 99.0])
+        outcome = autostart.start_now(
+            spawn=SpawnRecorder(), running=lambda: None,
+            sleep=waited.append, monotonic=lambda: next(clock), wait_s=5.0)
+
+        self.assertEqual(outcome.state, "unconfirmed")
+        self.assertFalse(outcome.ok)
+        said = "\n".join(autostart.start_lines(outcome))
+        self.assertNotIn("could NOT", said)
+        self.assertIn("dictate autostart status", said)
+        self.assertIn(str(autostart.log_path()), said)
+        self.assertTrue(waited)
+
+    def test_it_waits_rather_than_spinning(self):
+        clock = iter([0.0, 0.1, 0.2, 0.3, 99.0])
+        waited: list[float] = []
+        autostart.start_now(spawn=SpawnRecorder(), running=lambda: None,
+                            sleep=waited.append, monotonic=lambda: next(clock),
+                            poll_s=0.25, wait_s=5.0)
+        self.assertEqual(set(waited), {0.25})
+
+
+class WhatEnableSaysItDid(TempState):
+    """`enable` does two things now, so it reports two outcomes.
+
+    A registration that worked and a start that did not is not a success, and
+    this project has twice sent the product owner down a wrong path by printing
+    an outcome nobody established. So the two are separate paragraphs, and the
+    start's own paragraph is written from what `start_now` watched.
+    """
+
+    def _windows(self, outcome: autostart.StartOutcome):
+        """Let `enable` run here: everything it does to Windows, stubbed with
+        what Windows says when it works."""
+        from unittest import mock
+
+        patches = [
+            mock.patch.object(autostart, "_require_windows", lambda _a: None),
+            mock.patch.object(autostart, "interactive_user",
+                              lambda *a, **k: "DESKTOP-DICTATE\\owner"),
+            mock.patch.object(autostart, "windowless_python",
+                              lambda *a, **k: Path(r"C:\Python312\pythonw.exe")),
+            mock.patch.object(autostart, "run_schtasks",
+                              lambda args: autostart.ToolResult(0, "SUCCESS")),
+            mock.patch.object(autostart, "is_registered", lambda: True),
+            mock.patch.object(autostart, "registered_command",
+                              lambda: r"C:\Python312\pythonw.exe -m dictate run --autostart"),
+            mock.patch.object(autostart, "start_now",
+                              lambda *a, **k: (self.started.append((a, k)), outcome)[1]),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def setUp(self):
+        super().setUp()
+        self.started: list = []
+
+    def test_it_registers_and_then_starts_it(self):
+        self._windows(autostart.StartOutcome("started", pid=4242))
+        lines = autostart.enable(config_mod.load(None),
+                                 config_path=r"C:\Users\owner\dictate.toml")
+        text = "\n".join(lines)
+
+        self.assertIn("will now start when you log in", text)
+        self.assertIn("running NOW", text)
+        self.assertIn("4242", text)
+        # And the copy it starts is the one the task would: same interpreter,
+        # same config.
+        (args, _kwargs), = self.started
+        self.assertEqual(args[0], r"C:\Users\owner\dictate.toml")
+        self.assertEqual(args[1], r"C:\Python312\pythonw.exe")
+
+    def test_a_start_that_failed_is_never_printed_as_a_success(self):
+        self._windows(autostart.StartOutcome("failed", detail="Access is denied"))
+        text = "\n".join(autostart.enable(config_mod.load(None)))
+
+        self.assertIn("will now start when you log in", text)   # this DID happen
+        self.assertIn("could NOT be started now", text)         # and this did not
+        self.assertIn("Access is denied", text)
+        # The half that worked is still described as having worked, because it
+        # did: the task is registered and the next logon will use it.
+        self.assertIn("registered and unaffected", text)
+
+    def test_it_says_when_there_was_already_one_running(self):
+        self._windows(autostart.StartOutcome("already-running",
+                                             holder="process 1234"))
+        text = "\n".join(autostart.enable(config_mod.load(None)))
+        self.assertIn("already running", text)
+        self.assertIn("process 1234", text)
+        self.assertNotIn("running NOW", text)
+
+    def test_the_typed_command_is_the_same_two_paragraphs(self):
+        """`dictate autostart enable` is what he types, what the tray runs and
+        what setup runs, so it is the one that has to carry both outcomes."""
+        self._windows(autostart.StartOutcome("started", pid=4242))
+        code, out = run_cli(["autostart", "enable"])
+        self.assertEqual(code, 0)
+        self.assertIn("will now start when you log in", out)
+        self.assertIn("running NOW", out)
+        self.assertEqual(len(self.started), 1)
+
+    def test_the_start_can_be_left_out_but_never_is_by_default(self):
+        self._windows(autostart.StartOutcome("started", pid=1))
+        autostart.enable(config_mod.load(None), start=False)
+        self.assertEqual(self.started, [])
+        autostart.enable(config_mod.load(None))
+        self.assertEqual(len(self.started), 1)
+
+
+class WhatDisableLeavesRunning(TempState):
+    """Enabling starts a copy; disabling does NOT stop one.
+
+    The decision, and the reason: he can be dictating into it at the moment he
+    clicks the tray item, and stopping it there would drop the audio and the
+    words to answer a question he did not ask. Nothing is lost by leaving it -
+    `dictate stop` is one command away and is the one command every failure
+    message in this product already names.
+    """
+
+    def _task_removed(self):
+        """Windows had the task and let it go - the ordinary disable."""
+        from unittest import mock
+
+        answers = iter([True, False])
+        for patch in (mock.patch.object(autostart, "_require_windows", lambda _a: None),
+                      mock.patch.object(autostart, "run_schtasks",
+                                        lambda args: autostart.ToolResult(0, "SUCCESS")),
+                      mock.patch.object(autostart, "is_registered",
+                                        lambda: next(answers))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_a_running_copy_is_named_and_left_alone(self):
+        from dictate import instance
+
+        self._task_removed()
+        with instance.InstanceLock(started_by="logon"):
+            text = "\n".join(autostart.disable())
+            # It is still holding the lock when disable has finished.
+            self.assertIsNotNone(instance.running_instance())
+
+        self.assertIn("still RUNNING", text)
+        self.assertIn(str(os.getpid()), text)
+        self.assertIn("dictate stop", text)
+
+    def test_nothing_is_said_about_a_copy_that_is_not_there(self):
+        self._task_removed()
+        text = "\n".join(autostart.disable())
+        self.assertNotIn("still RUNNING", text)
+        self.assertIn("no longer start when you log in", text)
+
+
 class TheCommands(TempState):
     """The command surface, through `cli.main`, the way he would type it."""
 
