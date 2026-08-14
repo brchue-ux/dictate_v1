@@ -86,6 +86,13 @@ class Utterance:
     target: TargetWindow | None
     duration_s: float
     overflowed: bool = False
+    #: Audio callbacks in which the OS said it had thrown input audio away
+    #: before dictate saw it. Non-zero means this recording has holes in it,
+    #: and the pasted text is made from it.
+    input_lost: int = 0
+    #: Blocks the bounded caption queue discarded because the caption thread
+    #: was behind. Affects the captions ONLY - the buffer above is untouched.
+    captions_dropped: int = 0
 
 
 Notify = Callable[[str, str], None]
@@ -123,6 +130,7 @@ class Pipeline:
         overlay: CaptionOverlay,
         punctuator: Callable[[str], PunctuationResult] | None = None,
         sample_rate: int = 16000,
+        block_ms: int = 32,
         min_utterance_ms: int = 350,
         max_utterance_s: float = 300.0,
         max_caption_chars: int = 220,
@@ -143,6 +151,9 @@ class Pipeline:
         self.punctuator = punctuator
         self.streaming = streaming
         self.sample_rate = sample_rate
+        #: Only ever used to turn "n blocks were thrown away" into a number of
+        #: milliseconds he can judge - a count of blocks means nothing to him.
+        self.block_ms = max(1, block_ms)
         self.min_utterance_ms = min_utterance_ms
         self.max_caption_chars = max_caption_chars
         self.submit: Submit = submit or (lambda fn: fn())
@@ -160,6 +171,16 @@ class Pipeline:
         self._started_at = 0.0
         self._captions: queue.Queue = queue.Queue(maxsize=CAPTION_QUEUE_BLOCKS)
         self._closed = False
+        #: Audio thrown away during the utterance in progress. Both are reset at
+        #: press and read at release, so every number he is shown belongs to one
+        #: dictation rather than to the session - "it has dropped 214 blocks
+        #: since Tuesday" is not something anyone can act on.
+        self._lost_now = 0
+        self._dropped_now = 0
+        #: The same two, for the life of the process, so `dictate doctor` and
+        #: the log can say whether this is a habit or a one-off.
+        self.input_lost = 0
+        self.captions_dropped = 0
 
         #: Set by tests and by `dictate run --once`; counts completed utterances.
         self.completed = 0
@@ -190,6 +211,8 @@ class Pipeline:
             self._target = self._capture_target()
             self.buffer.reset()
             self._drain_queue()
+            self._lost_now = 0
+            self._dropped_now = 0
             self._started_at = self.clock()
             if self.streaming is not None:
                 try:
@@ -241,18 +264,45 @@ class Pipeline:
             )
             self.finish_utterance()
 
+    def note_input_loss(self, blocks: int = 1) -> None:
+        """The OS discarded input audio before dictate saw it.
+
+        Called from the audio callback thread by whatever is capturing (see
+        `platform.base.AudioLossCallback`), so it counts and does nothing else.
+        Two counters, because they answer two different questions: the
+        per-utterance one is what he is told at the release - this recording has
+        a hole in it - and the process-wide one is what says whether it is
+        happening while he is not dictating at all, which is a different fault
+        with a different fix.
+        """
+        if blocks <= 0:
+            return
+        with self._lock:
+            self.input_lost += blocks
+            if self._recording:
+                self._lost_now += blocks
+
     def _enqueue(self, item) -> None:
         try:
             self._captions.put_nowait(item)
         except queue.Full:
             # Drop the oldest caption block. The utterance buffer is untouched,
-            # so the text that actually gets pasted is unaffected.
+            # so the text that actually gets pasted is unaffected - but the
+            # caption model now has a splice in what it hears, which is a
+            # perfectly good reason for the words on screen to be wrong. It was
+            # logged at DEBUG, which is to say never; it is counted now and said
+            # out loud at the release.
             try:
                 self._captions.get_nowait()
                 self._captions.put_nowait(item)
-                log.debug("caption queue full; dropped a block")
             except (queue.Empty, queue.Full):
-                pass
+                return
+            # Under the lock because the audio thread and the hotkey thread both
+            # get here, and a lost increment is a lost hole in the evidence.
+            with self._lock:
+                self.captions_dropped += 1
+                if self._recording:
+                    self._dropped_now += 1
 
     def _drain_queue(self) -> None:
         while True:
@@ -298,9 +348,57 @@ class Pipeline:
         with self._lock:
             if uid != self._uid or not self._recording:
                 return True
+        # Every block, even when the words have not changed - roughly thirty
+        # sends a second where the model emits a word every few hundred
+        # milliseconds. Skipping the repeats was tried and taken out again: it
+        # needs the last caption kept HERE to compare against, and this module
+        # holding caption text is precisely what constraint 4 forbids.
+        # `tests/test_pipeline.py::CaptionsCanNeverBePasted` failed on the
+        # attempt, which is the guarantee doing its job. The overlay already
+        # collapses everything that arrives inside one 30 ms tick into a single
+        # redraw, so what is left to save is a queue put.
         self.overlay.set_state(OverlayState.LISTENING,
                                caption_tail(text, self.max_caption_chars))
         return True
+
+    # -- what was thrown away --------------------------------------------
+
+    def _report_losses(self, lost: int, dropped: int) -> None:
+        """Say what this utterance lost, at the moment it was lost in.
+
+        Two different faults with two different consequences, so they are two
+        different sentences and never one:
+
+        * `lost` is audio the OS discarded before dictate saw it. It is missing
+          from the recording Whisper is about to transcribe, so the PASTED TEXT
+          may be missing words. That is worth interrupting him for.
+        * `dropped` is caption blocks this module threw away because the caption
+          thread was behind. The utterance buffer is untouched, so the pasted
+          text is exactly what it would have been; only the words on screen saw
+          a splice. Worth saying, because it is the answer to "why were the
+          captions wrong", and worth saying it does not affect the text.
+        """
+        if lost:
+            ms = lost * self.block_ms
+            log.warning("input overflow: %d blocks (~%d ms) discarded by the "
+                        "OS during that utterance", lost, ms)
+            self.notify(
+                "warning",
+                f"Windows threw away about {ms} ms of that recording before "
+                f"dictate saw it, so the pasted text may be missing a word. If "
+                f"it keeps happening, close what else is using the microphone, "
+                f"or raise [audio] block_ms (32 to 64) in your config.",
+            )
+        if dropped:
+            ms = dropped * self.block_ms
+            log.warning("caption queue dropped %d blocks (~%d ms) during that "
+                        "utterance", dropped, ms)
+            self.notify(
+                "info",
+                f"Live captions fell behind and skipped about {ms} ms of audio, "
+                f"so the words on screen were worse than usual. What was pasted "
+                f"is unaffected - it is made from the whole recording.",
+            )
 
     def _close_session(self, session) -> None:
         if session is None:
@@ -323,6 +421,10 @@ class Pipeline:
             pcm = self.buffer.pcm()
             overflowed = self.buffer.overflowed
             target = self._target
+            lost = self._lost_now
+            dropped = self._dropped_now
+            self._lost_now = 0
+            self._dropped_now = 0
             self.buffer.reset()
             duration = len(pcm) / 2 / self.sample_rate
             self._pending += 1
@@ -347,8 +449,10 @@ class Pipeline:
             self.overlay.set_state(OverlayState.HIDDEN, "")
             return True
 
+        self._report_losses(lost, dropped)
         utt = Utterance(pcm=pcm, sample_rate=self.sample_rate, target=target,
-                        duration_s=duration, overflowed=overflowed)
+                        duration_s=duration, overflowed=overflowed,
+                        input_lost=lost, captions_dropped=dropped)
         try:
             self.submit(lambda: self._finalize(utt))
         except Exception:

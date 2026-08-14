@@ -920,7 +920,7 @@ function Test-FileIntegrity {
 
        Size first (it is free and catches the truncated-download case that looks
        like "the app is broken"), then SHA-256. A `.sha256` sidecar records a
-       hash we have already checked, so re-running setup does not re-hash 1.9 GB
+       hash we have already checked, so re-running setup does not re-hash 1.7 GB
        every time; the size is still re-checked, and any mismatch re-hashes. #>
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -1194,8 +1194,8 @@ function Set-TomlValue {
        edited around - exactly as it was.
 
        This is deliberately a line edit and not a parse-and-rewrite: setup owns
-       three paths in that file and nothing else, and a re-run must not quietly
-       revert a hotkey or a font size he changed. #>
+       the paths and model file names in that file and nothing else, and a
+       re-run must not quietly revert a hotkey or a font size he changed. #>
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$Section,

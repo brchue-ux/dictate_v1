@@ -182,9 +182,12 @@ def check_caption_model(cfg: Config) -> CheckResult:
             "Live-caption model", Status.WARN, f"{len(missing)} file(s) missing",
             "Live captions will be off; the pasted text is unaffected.\n"
             "Missing:\n  " + "\n  ".join(missing) + "\n"
-            "Download the streaming Zipformer:\n"
-            "  powershell -ExecutionPolicy Bypass -File scripts\\fetch-models.ps1\n"
-            "then set [captions] model_dir to the folder it created.",
+            "The caption model changed on 2026-08-13 and the file names inside "
+            "its folder changed with it, so a config from before then names "
+            "files that are not there. This fetches it and repoints all four "
+            "[captions] settings:\n"
+            "  powershell -ExecutionPolicy Bypass -File setup.ps1 "
+            "-Only models,install",
         )
     return CheckResult("Live-caption model", Status.OK, str(cfg.resolve(cfg.captions.model_dir)))
 

@@ -271,7 +271,7 @@ class CaptionsCanNeverBePasted(PipelineTestCase):
 
     def test_the_finalise_worker_is_handed_audio_and_no_text_at_all(self):
         """The value that crosses into the paste path carries PCM, a sample
-        rate, a window and two numbers. There is no field for a string to
+        rate, a window and four numbers. There is no field for a string to
         travel in, which is why no string can."""
         import dataclasses
 
@@ -615,6 +615,140 @@ class Concurrency(PipelineTestCase):
                 t.join(timeout=5)
         self.assertEqual(errors, [])
         self.assertEqual(p.state, PipelineState.IDLE)
+
+
+class AudioThatWasThrownAway(PipelineTestCase):
+    """Two ways audio goes missing, two consequences, two messages.
+
+    Both used to be silent. The OS one was counted process-wide and logged on
+    the 1st, 10th and 100th occurrence and then never again; the caption one was
+    a `log.debug` nobody has ever read. So "some of what I said is missing" and
+    "the captions were nonsense on that one" were both unanswerable after the
+    fact. They are answered per utterance now, which is the only unit he can
+    act on.
+    """
+
+    def test_input_the_os_discarded_is_reported_in_milliseconds(self):
+        p = self.build()
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.note_input_loss()
+        p.note_input_loss()
+        p.finish_utterance()
+
+        warnings = [msg for level, msg in self.notices if level == "warning"]
+        self.assertEqual(len(warnings), 1)
+        # Two 32 ms blocks. The number he is given is time, not a block count.
+        self.assertIn("64 ms", warnings[0])
+        self.assertIn("pasted text may be missing a word", warnings[0])
+
+    def test_the_loss_lands_on_the_utterance_the_worker_is_given(self):
+        """So that anything downstream of the release - the history, a future
+        confidence check - can see what this recording was made from, rather
+        than having to ask a counter that has already moved on."""
+        seen: list[Utterance] = []
+        p = self.build()
+        p._finalize = seen.append
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.note_input_loss(3)
+        p.finish_utterance()
+
+        self.assertEqual(seen[0].input_lost, 3)
+        self.assertEqual(seen[0].captions_dropped, 0)
+        self.assertEqual(p.input_lost, 3)
+
+    def test_dropped_caption_blocks_say_the_pasted_text_is_unaffected(self):
+        p = self.build()
+        p.start_utterance()
+        # More blocks than the queue holds, with nothing pumping them out.
+        for _ in range(pipeline_mod.CAPTION_QUEUE_BLOCKS + 5):
+            p.push_audio(audio(32))
+        p.finish_utterance()
+
+        infos = [msg for level, msg in self.notices if level == "info"]
+        self.assertEqual(len(infos), 1)
+        self.assertIn("Live captions fell behind", infos[0])
+        self.assertIn("What was pasted is unaffected", infos[0])
+        self.assertGreater(p.captions_dropped, 0)
+
+    def test_the_whole_recording_still_reaches_the_transcriber(self):
+        """The point of the message above. Caption blocks are droppable; the
+        buffer the GPU pass reads is not, and never was."""
+        p = self.build()
+        p.start_utterance()
+        for _ in range(pipeline_mod.CAPTION_QUEUE_BLOCKS + 5):
+            p.push_audio(audio(32))
+        p.finish_utterance()
+        sent_bytes, _ = self.batch.calls[0]
+        self.assertEqual(sent_bytes,
+                         len(audio(32)) * (pipeline_mod.CAPTION_QUEUE_BLOCKS + 5))
+
+    def test_a_healthy_utterance_says_nothing_at_all(self):
+        p = self.build()
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.drain(p)
+        p.finish_utterance()
+        self.assertEqual(self.notices, [])
+
+    def test_the_count_does_not_carry_into_the_next_utterance(self):
+        p = self.build()
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.note_input_loss(4)
+        p.finish_utterance()
+        self.notices.clear()
+
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(self.notices, [])
+
+    def test_loss_while_he_is_not_dictating_is_counted_but_not_blamed_on_him(self):
+        """The microphone stream is open whenever dictate is running, so an
+        overflow at three in the afternoon may belong to nothing he said. It is
+        still counted - that is the evidence that it happens while idle - but it
+        is not attached to the next thing he says."""
+        p = self.build()
+        p.note_input_loss(9)
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+
+        self.assertEqual(p.input_lost, 9)
+        self.assertEqual(self.notices, [])
+
+    def test_a_mispress_reports_nothing(self):
+        """Below the floor nothing is transcribed and nothing is pasted, so
+        there is nothing for a warning about missing words to be about."""
+        p = self.build()
+        p.start_utterance()
+        p.push_audio(audio(50))
+        p.note_input_loss(2)
+        p.finish_utterance()
+        self.assertEqual(self.notices, [])
+
+    def test_the_running_app_actually_wires_the_listener_up(self):
+        """Everything above passes whether or not anything ever calls
+        `note_input_loss` on the real machine, and the one thing that does is a
+        single argument in `app.py` on a line no test on this platform can
+        execute. So it is read instead. Without it the counting is dead code and
+        he is told nothing, exactly as before."""
+        source = (Path(pipeline_mod.__file__).parent / "app.py").read_text(
+            encoding="utf-8")
+        self.assertIn(
+            "self.audio.start(self.pipeline.push_audio, self.pipeline.note_input_loss)",
+            source)
+
+    def test_the_millisecond_figure_follows_the_configured_block_size(self):
+        p = self.build(block_ms=64)
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.note_input_loss(2)
+        p.finish_utterance()
+        warnings = [msg for level, msg in self.notices if level == "warning"]
+        self.assertIn("128 ms", warnings[0])
 
 
 class CaptionTail(unittest.TestCase):

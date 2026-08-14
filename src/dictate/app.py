@@ -127,6 +127,7 @@ class Application:
             punctuator=self.punctuator,
             streaming=self.streaming,
             sample_rate=cfg.audio.sample_rate,
+            block_ms=cfg.audio.block_ms,
             min_utterance_ms=cfg.audio.min_utterance_ms,
             max_utterance_s=cfg.audio.max_utterance_s,
             max_caption_chars=cfg.overlay.max_chars,
@@ -202,7 +203,10 @@ class Application:
                 self.streaming = None
                 self.pipeline.streaming = None
 
-        self.audio.start(self.pipeline.push_audio)
+        # The second argument is what makes "some of that recording was thrown
+        # away" a thing he is told at the release rather than a warning in a log
+        # file that stops after the hundredth one.
+        self.audio.start(self.pipeline.push_audio, self.pipeline.note_input_loss)
         self.console(f"dictate: microphone     {self.audio.describe}")
         self.console(f"dictate: paste method   {self.injector.describe}")
         # Said out loud, once, because a record of everything he says is not

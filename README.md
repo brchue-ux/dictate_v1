@@ -28,10 +28,14 @@ per-use charges.
 ```
 
 The captions and the pasted text come from two different models, on purpose. The
-caption model is fast enough to keep up with your voice but writes in ALL CAPS
+caption model is fast enough to keep up with your voice but writes in lower case
 with no punctuation and gets the odd word wrong. That is fine, because **caption
 text never reaches your document** — the text that gets pasted comes from Whisper
 reading the whole recording after you stop.
+
+*(The caption model changed on 2026-08-13. If your config predates that, see
+"The caption model changed" below — all four `[captions]` file settings have to
+move together.)*
 
 ---
 
@@ -58,7 +62,7 @@ powershell -ExecutionPolicy Bypass -File setup.ps1
 | 1 | **Checks this PC** — Windows version, your graphics driver, free disk space | seconds |
 | 2 | **Installs the build tools** — Python, Git, CMake, the Vulkan SDK, the C++ compiler. Anything already installed is left alone | 5–15 min |
 | 3 | **Builds whisper.cpp** with the Vulkan backend, from source | 5–15 min |
-| 4 | **Downloads the two models** (1.9 GB) | 5–20 min |
+| 4 | **Downloads the two models** (1.7 GB) | 5–20 min |
 | 5 | **Installs dictate** and writes a config file with every path already filled in | 1 min |
 | 6 | **Checks it actually works** — can Vulkan see your card, does the transcriber start, does a test clip come back as the right words | 1–2 min |
 
@@ -360,6 +364,39 @@ Try it without dictating:
 dictate punctuate --explain "hello comma world"
 ```
 
+### The caption model changed
+
+**On 2026-08-13.** The old one was trained on read audiobooks and got whole
+phrases wrong on ordinary speech: on the bundled test clip it printed *"AND SAW
+MY FELLOW AMERICANS ASK NOT WHAT'S YOUR COUNTRY CAN DO FOR YOU AS BUT YOU CAN DO
+FOR YOUR COUNT"*. What is there now got the same clip right, and stayed right
+with noise added down to 5 dB. It also has the first word on screen about 0.2 s
+sooner and is not a word behind when you let go, which the old one always was.
+
+If your config was written before that date, this fetches the new model and
+re-points all four `[captions]` settings at it — the file names inside the folder
+changed with the model, so the folder alone is not enough:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup.ps1 -Only models,install
+```
+
+The old folder is left where it is; delete it once you are happy. If you skip
+this, dictate starts with live captions off and says which files it could not
+find — the pasted text is unaffected either way.
+
+**To judge it on your own voice**, which is the only judgement that counts:
+
+```powershell
+dictate captions some.wav
+```
+
+It uses your config, so it measures the model you are actually running, and it
+prints when the first words appeared, how often they changed after that, what
+the model finally heard, and whether it kept up with the speech at all. Point
+`[captions]` at a different model and run it again on the same file to compare.
+`--timeline` prints every change with how far into the recording it happened.
+
 ### The caption window
 
 The words that appear while you are speaking come up in a panel at the bottom of
@@ -387,7 +424,7 @@ see the result in about two seconds instead of a record-speak-release round trip
 The words staying up through the middle row is the point: that is the second or
 so where the graphics card is working and there used to be an empty panel. They
 go grey the moment you let go — that is how you can tell it registered — and
-they are still the caption model's ALL CAPS, so they can never be mistaken for
+they are still the caption model's lower case, so they can never be mistaken for
 the text that is about to be pasted. What ends them is the text actually
 arriving in your document.
 
@@ -500,7 +537,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 672 tests, run and passing
+### Verified anywhere — 691 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -623,8 +660,8 @@ Windows machines. These are things that used to be on the "never run" list:
   client, all against the actual compiled binary.
 * **`pip install -e ".[windows]"` resolves and installs on Windows**, and
   sounddevice, numpy, sherpa-onnx and global-hotkeys all import.
-* **The streaming Zipformer loads and produces caption text** from the bundled
-  clip, and closing a caption session really does destroy that text.
+* **The streaming caption model loads and produces caption text** from the
+  bundled clip, and closing a caption session really does destroy that text.
 * **The installer's own logic**, on Windows PowerShell 5.1 — the version that
   ships with Windows — including a download that is genuinely interrupted
   half-way and resumed, and the edit it makes to your config file.
@@ -641,7 +678,7 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
-* **The 672 tests above, on Windows** as well as on Linux — which is where the
+* **The 691 tests above, on Windows** as well as on Linux — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.
 * **That a supervised child process cannot outlive its parent.** CI starts a
@@ -761,7 +798,15 @@ misbehaves.
   is the case to watch. `dpi_awareness = "off"` and `follow_focus = false` are
   both one-line retreats if either misbehaves.
 * **The global hotkey**, including whether press/release feels right in practice.
-* **Microphone capture** through PortAudio.
+* **Microphone capture** through PortAudio — and with it, whether the new
+  caption model is better *on his voice*. Everything measured about it was
+  measured on read speech on a Linux box; his microphone, his room and his
+  spontaneous phrasing are the case nobody here can run.
+  `dictate captions some.wav` is the measurement, and it takes one recording.
+* **Whether Windows is discarding input audio while he dictates.** It reports
+  every occurrence per utterance now instead of counting silently, so the next
+  time it happens he will be told at the release, with how many milliseconds
+  went — but nobody here has produced an overflow to watch it fire.
 * **Text injection** into real applications — terminals in particular vary.
 * **The logon itself.** CI machines never log on, so nobody has watched the task
   fire, watched dictate come up in an interactive session, or confirmed that no

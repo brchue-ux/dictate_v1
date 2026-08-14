@@ -1,15 +1,20 @@
-"""Live captions: the streaming Zipformer, on the CPU, via sherpa-onnx.
+"""Live captions: a streaming transducer, on the CPU, via sherpa-onnx.
 
 Everything this produces is DISPLAY ONLY. It is drawn on the caption overlay and
 nowhere else - it never reaches the clipboard, the keyboard, or the document.
 The decoder is closed the moment the hotkey is released, so nothing more can be
 produced; the words already on screen stay up, greyed, until the real text lands.
-That is what makes a fast, ALL-CAPS, unpunctuated model acceptable here
+That is what makes a fast, lower-case, unpunctuated model acceptable here
 (docs/DESIGN.md, decision 4).
 
-Threads: 2. The prior measurements found this model gets *worse* with more - six
-threads was three times slower than two, because the per-chunk work is tiny and
-thread synchronisation dominates. `config.validate()` refuses to raise it.
+This adapter is deliberately model-agnostic: it names no architecture and no
+file. Which model runs is four values in `[captions]`, which is what made
+replacing the LibriSpeech-trained Zipformer with a conversational-speech model
+a config change - see `config.CaptionConfig` for what was measured and why.
+
+Threads: 2. The prior measurements found more threads make captions *worse* -
+six threads was three times slower than two, because the per-chunk work is tiny
+and thread synchronisation dominates. `config.validate()` refuses to raise it.
 """
 
 from __future__ import annotations
@@ -92,10 +97,14 @@ class SherpaStreamingTranscriber:
             raise MissingDependencyError(
                 "The live-caption model files were not found:\n  "
                 + "\n  ".join(missing),
-                "Run scripts/fetch-models.ps1 to download the streaming Zipformer, "
-                "then set [captions] model_dir in your config to the folder it "
-                "created. Or set [captions] enabled = false to run without live "
-                "captions - the pasted text is unaffected either way.",
+                "The caption model CHANGED on 2026-08-13 and the file names "
+                "inside its folder changed with it, so a config written before "
+                "then names files that do not exist. This downloads the new "
+                "model and repoints all four [captions] settings at it:\n"
+                "  powershell -ExecutionPolicy Bypass -File setup.ps1 "
+                "-Only models,install\n"
+                "Or set [captions] enabled = false to run without live captions "
+                "- the pasted text is unaffected either way.",
             )
 
     def _build(self):
@@ -112,7 +121,7 @@ class SherpaStreamingTranscriber:
                 "Or set [captions] enabled = false in your config to run "
                 "without live captions.",
             ) from exc
-        log.info("loading streaming Zipformer from %s", self.cfg.model_dir)
+        log.info("loading the live-caption model from %s", self.cfg.model_dir)
         self._recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
             tokens=str(self.paths["tokens"]),
             encoder=str(self.paths["encoder"]),
@@ -134,7 +143,7 @@ class SherpaStreamingTranscriber:
 
     @property
     def describe(self) -> str:
-        return (f"sherpa-onnx streaming Zipformer ({Path(self.cfg.model_dir).name}), "
+        return (f"sherpa-onnx streaming ({Path(self.cfg.model_dir).name}), "
                 f"{self.cfg.num_threads} CPU threads")
 
     def close(self) -> None:
