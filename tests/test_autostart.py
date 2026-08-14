@@ -197,11 +197,22 @@ class ReadingWindowsAnswer(unittest.TestCase):
         self.assertIn("dictate", status.raw)
 
     def test_the_result_codes_that_matter_are_translated(self):
-        self.assertIn("running right now", autostart.describe_last_result(267009))
         self.assertIn("not run yet", autostart.describe_last_result(267011))
         self.assertIn("already running", autostart.describe_last_result(3))
         self.assertIn("normally", autostart.describe_last_result(0))
         self.assertEqual(autostart.describe_last_result(None), "not recorded")
+
+    def test_still_running_is_about_the_task_and_never_about_dictate(self):
+        """267009 is SCHED_S_TASK_RUNNING, and it used to be translated as "it
+        is running right now". Printed above a line saying the copy in front of
+        him had been started by hand, that read as dictate having started
+        itself when it had not. It is a statement about Task Scheduler's run,
+        and it may only be written as one."""
+        text = autostart.describe_last_result(autostart.STILL_RUNNING)
+        self.assertIn("Task Scheduler", text)
+        self.assertNotIn("running right now", text)
+        # And "dictate" is what it must not be about.
+        self.assertNotIn("dictate", text.lower())
 
     def test_an_unknown_code_is_shown_rather_than_invented(self):
         self.assertEqual(autostart.describe_last_result(4294901760), "4294901760")
@@ -414,6 +425,38 @@ class TheLogonStart(TempState):
         autostart.run_at_logon(str(path))
 
         self.assertEqual(held, [False], "the lock was still held while notifying")
+
+    def test_the_wait_behind_the_message_box_is_written_down(self):
+        """The state nothing recorded: it gave up, gave the lock back, and sat
+        in a modal box - alive, not running, and counted by Task Scheduler as a
+        running task the whole time. `dictate autostart status` had no way to
+        tell that apart from a healthy start, so the log now says it, before
+        the box goes up and again once it has gone."""
+        from unittest import mock
+
+        path = self.write_config("[autostart]\nstartup_attempts = 1\n")
+        with mock.patch.object(autostart, "_will_notify", return_value=True):
+            code = autostart.run_at_logon(str(path))
+        self.assertEqual(code, 2)
+        text = autostart.log_path().read_text(encoding="utf-8")
+        self.assertIn(autostart.DIALOG_MARK, text)
+        self.assertIn("NOT running", text)
+        self.assertIn("the message box was closed", text)
+        # And the report reads it back as the state it is.
+        self.assertTrue(autostart.parse_logon_start(text).showing_dialog)
+
+    def test_nothing_is_written_about_a_box_that_is_not_shown(self):
+        """`notify_on_failure = false`, or any machine that is not Windows.
+        The process ends here, so a log saying it is waiting on a dialog would
+        be a claim about a state that never happened."""
+        from unittest import mock
+
+        path = self.write_config(
+            "[autostart]\nstartup_attempts = 1\nnotify_on_failure = false\n")
+        with mock.patch.object(autostart, "_will_notify", return_value=False):
+            autostart.run_at_logon(str(path))
+        text = autostart.log_path().read_text(encoding="utf-8")
+        self.assertNotIn(autostart.DIALOG_MARK, text)
 
     def test_it_releases_the_lock_when_it_gives_up(self):
         from dictate import instance
@@ -765,8 +808,449 @@ class WhatDisableLeavesRunning(TempState):
         self.assertIn("no longer start when you log in", text)
 
 
+# ---------------------------------------------------------------------------
+# The two readings, and the morning they disagreed
+# ---------------------------------------------------------------------------
+
+#: What Windows said on 2026-08-14, verbatim in shape: the task's run had not
+#: finished. Beside it the lock said the copy serving him had been started by
+#: hand, forty minutes later. Both readings were right and the report printed
+#: them one after the other as though they were one story.
+SCHTASKS_RUNNING = """
+Folder: \\
+TaskName:                             \\dictate
+Status:                               Running
+Last Run Time:                        2026-08-14 9:17:40 AM
+Last Result:                          267009
+Task To Run:                          C:\\Python311\\pythonw.exe -m dictate run --autostart
+Scheduled Task State:                 Enabled
+"""
+
+SCHTASKS_FINISHED = SCHTASKS_RUNNING.replace(
+    "Status:                               Running",
+    "Status:                               Ready",
+).replace("Last Result:                          267009",
+          "Last Result:                          2")
+
+#: A logon start that gave up, as the log records it.
+GAVE_UP_BLOCK = f"""09:17:41  {autostart.BLOCK_MARK} 2026-08-14 09:17:41 ===
+09:17:41  {autostart.PID_MARK}8804)
+09:17:41  attempt 1 of 5
+09:19:02  outcome: gave up after 5 attempt(s). dictate is NOT running. Start it \
+by hand with `dictate run` once the problem above is fixed."""
+
+HAND = "started by hand"
+
+
+def a_holder(pid=22188, started_by="hand"):
+    from dictate import instance
+
+    return instance.Holder(pid=pid, started_at="2026-08-14 09:54:11",
+                           started_epoch=1_000.0, started_by=started_by)
+
+
+def a_reading(*, schtasks=SCHTASKS_RUNNING, block=GAVE_UP_BLOCK,
+              alive=None, image="", holder=None, registered=True,
+              evidence=None) -> autostart.Reading:
+    logon = autostart.parse_logon_start(block)
+    logon.alive = alive
+    logon.image = image
+    return autostart.Reading(
+        platform="win32",
+        status=autostart.parse_status(schtasks, registered=registered),
+        logon=logon, holder=holder, block=block,
+        log_file=r"C:\Users\owner\AppData\Local\dictate\autostart.log",
+        evidence=evidence,
+    )
+
+
+class TheTwoReadingsAreCompared(unittest.TestCase):
+    """`dictate autostart status` reads two independent things - what Windows
+    says about the TASK, and what the instance lock says about the COPY THAT IS
+    RUNNING - and it used to print them one after the other with nothing
+    between. On 2026-08-14 that produced, in the same report:
+
+        last result:   267009 (it is running right now)
+        running now:   YES - process 22188, ..., started by hand
+
+    Both readings were correct and neither sentence was wrong on its own.
+    Together they told him dictate had started itself and that it had not, and
+    the report did not notice. That is the same defect as the installer
+    announcing a Vulkan SDK it had not installed - a claim nothing established -
+    and it costs the same thing: the next message this product prints is
+    believed a little less.
+    """
+
+    def test_his_morning_is_reported_as_the_disagreement_it_is(self):
+        text = "\n".join(autostart.render(
+            a_reading(alive=True, image="pythonw.exe", holder=a_holder())))
+        self.assertIn(autostart.DISAGREE_MARK, text)
+        # Both facts survive - the point is not to hide either one.
+        self.assertIn("267009", text)
+        self.assertIn(HAND, text)
+        # And it says which process is which, rather than leaving him to work
+        # it out from two numbers.
+        self.assertIn("8804", text)
+        self.assertIn("22188", text)
+        self.assertIn("it is not what is serving you", text)
+        self.assertIn(autostart.WHY_COMMAND, text)
+
+    def test_no_report_may_claim_the_run_is_alive_and_say_nothing_of_the_hand(self):
+        """The acceptance criterion, held over every combination rather than
+        over the one that happened.
+
+        Whenever the report says Windows has not seen the run finish AND says
+        the copy in front of him was started by hand - or that there is no copy
+        at all - it has printed two claims that cannot both be the whole truth.
+        The disagreement paragraph is what makes that a report rather than a
+        contradiction, so it has to be there. Delete `reconcile`, or put "it is
+        running right now" back, and this fails.
+        """
+        holders = [None, a_holder(), a_holder(started_by="logon"),
+                   a_holder(pid=8804), a_holder(pid=8804, started_by="logon"),
+                   a_holder(started_by="")]
+        for schtasks in (SCHTASKS_RUNNING, SCHTASKS_FINISHED):
+            for alive in (True, False, None):
+                for holder in holders:
+                    for block in (GAVE_UP_BLOCK, "", "nothing readable here"):
+                        with self.subTest(alive=alive, block=bool(block),
+                                          holder=holder, running="Running" in schtasks):
+                            text = "\n".join(autostart.render(a_reading(
+                                schtasks=schtasks, block=block, alive=alive,
+                                holder=holder)))
+                            says_run_alive = (
+                                "has not seen that run finish" in text
+                                or "state:         Running" in text)
+                            says_not_the_logon_copy = (
+                                HAND in text or "running now:     NO" in text)
+                            if says_run_alive and says_not_the_logon_copy:
+                                self.assertIn(autostart.DISAGREE_MARK, text)
+
+    def test_a_run_still_counted_with_nothing_running_is_not_reported_as_healthy(self):
+        text = "\n".join(autostart.render(a_reading(alive=True, holder=None)))
+        self.assertIn(autostart.DISAGREE_MARK, text)
+        self.assertIn("DICTATE IS NOT RUNNING", text)
+        self.assertIn(autostart.WHY_COMMAND, text)
+
+    def test_a_run_counted_after_its_process_is_gone_names_the_leftover(self):
+        """The other shape: Windows still counting a run whose process has
+        ended means something ELSE that run started is alive. A whisper-server
+        with no dictate above it is the one that has happened here before, and
+        one command clears it."""
+        verdict = autostart.reconcile(
+            autostart.parse_status(SCHTASKS_RUNNING, registered=True),
+            _logon(alive=False), None)
+        self.assertEqual(verdict.verdict, "process-gone-run-alive")
+        text = "\n".join(verdict.lines)
+        self.assertIn(autostart.DISAGREE_MARK, text)
+        self.assertIn("whisper-server", text)
+        self.assertIn("dictate stop", text)
+
+    def test_a_process_the_task_left_alive_is_named_even_once_the_run_is_counted_done(self):
+        """Windows can stop counting the run while the process it started is
+        still there - it is what a copy that broke out of the task's job looks
+        like, and what the modal box looks like once Task Scheduler has given
+        up on it. The process reading leads either way; only the first sentence
+        changes."""
+        verdict = autostart.reconcile(
+            autostart.parse_status(SCHTASKS_FINISHED, registered=True),
+            _logon(alive=True), a_holder())
+        self.assertEqual(verdict.verdict, "not-the-copy")
+        self.assertTrue(verdict.disagrees)
+        alone = autostart.reconcile(
+            autostart.parse_status(SCHTASKS_FINISHED, registered=True),
+            _logon(alive=True), None)
+        self.assertEqual(alone.verdict, "alive-but-serving-nobody")
+        self.assertIn("no longer counts that run as running",
+                      "\n".join(alone.lines))
+
+    def test_the_copy_the_task_started_is_reported_as_agreement(self):
+        verdict = autostart.reconcile(
+            autostart.parse_status(SCHTASKS_RUNNING, registered=True),
+            _logon(alive=True), a_holder(pid=8804, started_by="logon"))
+        self.assertEqual(verdict.verdict, "same-copy")
+        self.assertFalse(verdict.disagrees)
+        self.assertIn("agree", "\n".join(verdict.lines))
+
+    def test_an_ordinary_restart_from_the_tray_is_not_called_a_fault(self):
+        """The tray's Restart leaves the pid in the log pointing at a process
+        that has ended on purpose. `_restart` writes the new one down, so the
+        report follows it rather than announcing a disagreement over a feature
+        working exactly as designed."""
+        block = GAVE_UP_BLOCK + f"\n09:30:00  {autostart.RESTART_MARK}9101)."
+        logon = autostart.parse_logon_start(block)
+        self.assertEqual(logon.pid, 9101)
+        logon.alive = True
+        verdict = autostart.reconcile(
+            autostart.parse_status(SCHTASKS_RUNNING, registered=True),
+            logon, a_holder(pid=9101, started_by="logon"))
+        self.assertFalse(verdict.disagrees)
+
+    def test_an_unknown_is_never_turned_into_either_verdict(self):
+        """Nobody could ask Windows whether that pid is still there. That is
+        not "it is fine" and it is not "it is gone" - it is an unknown, and it
+        is printed as one with the command that settles it."""
+        verdict = autostart.reconcile(
+            autostart.parse_status(SCHTASKS_RUNNING, registered=True),
+            _logon(alive=None), a_holder())
+        self.assertEqual(verdict.verdict, "cannot-tell")
+        text = "\n".join(verdict.lines)
+        self.assertIn("dictate could not", text)
+        self.assertIn("establish what that run still has alive", text)
+        self.assertIn("not settled here", text)
+        self.assertIn(autostart.WHY_COMMAND, text)
+
+    def test_a_reused_process_number_is_not_taken_for_the_same_copy(self):
+        """A pid is not an identity. Windows reuses them, and the number in the
+        log belongs to a run that may have ended hours ago - so a lock record
+        saying "started by hand" against the logon task's pid is a collision,
+        and dictate says so rather than reporting a match it has not got."""
+        verdict = autostart.reconcile(
+            autostart.parse_status(SCHTASKS_RUNNING, registered=True),
+            _logon(alive=True), a_holder(pid=8804, started_by="hand"))
+        self.assertEqual(verdict.verdict, "pid-reused")
+        self.assertTrue(verdict.disagrees)
+        self.assertIn("reuses process numbers", "\n".join(verdict.lines))
+
+    def test_windows_saying_nothing_readable_is_not_a_verdict_either(self):
+        status = autostart.parse_status("Aufgabenname: \\dictate\n", registered=True)
+        self.assertIsNone(autostart.run_is_alive(status))
+        verdict = autostart.reconcile(status, _logon(alive=None), None)
+        self.assertEqual(verdict.verdict, "run-unknown")
+        self.assertFalse(verdict.disagrees)
+
+    def test_a_task_that_is_not_registered_is_nothing_to_reconcile(self):
+        verdict = autostart.reconcile(
+            autostart.AutostartStatus(registered=False), _logon(), a_holder())
+        self.assertEqual(verdict.lines, [])
+
+    def test_the_state_word_decides_and_the_result_code_is_the_fallback(self):
+        """schtasks TRANSLATES `Status:`, so a Windows that is not in English
+        falls through to `Last Result`, which is a number everywhere. A machine
+        where neither can be read answers `None`."""
+        running = autostart.parse_status(SCHTASKS_RUNNING, registered=True)
+        self.assertTrue(autostart.run_is_alive(running))
+        self.assertFalse(autostart.run_is_alive(
+            autostart.parse_status(SCHTASKS_FINISHED, registered=True)))
+        # Status in German, Last Result in digits.
+        german = autostart.parse_status(
+            "Status:  Wird ausgeführt\nLast Result:  267009\n", registered=True)
+        self.assertTrue(autostart.run_is_alive(german))
+
+
+def _logon(*, pid=8804, alive=None, block=GAVE_UP_BLOCK):
+    found = autostart.parse_logon_start(block)
+    found.pid = pid
+    found.alive = alive
+    return found
+
+
+class WhatTheLogonStartWroteDownAboutItself(TempState):
+    """Windows says whether the RUN has finished. It will not say what that run
+    still has alive - so the logon start writes its own pid into its log, and
+    the report asks Windows about that pid by name. Without it, "the task is
+    running" was standing in for "dictate is running"."""
+
+    def test_the_pid_and_the_outcome_come_back_out_of_the_log(self):
+        found = autostart.parse_logon_start(GAVE_UP_BLOCK)
+        self.assertEqual(found.pid, 8804)
+        self.assertEqual(found.at, "2026-08-14 09:17:41")
+        self.assertIn("gave up after 5", found.outcome)
+        self.assertFalse(found.showing_dialog)
+
+    def test_a_log_with_nothing_in_it_yields_nothing_rather_than_a_guess(self):
+        found = autostart.parse_logon_start("")
+        self.assertIsNone(found.pid)
+        self.assertIsNone(found.alive)
+
+    def test_the_pid_survives_a_block_long_enough_to_be_trimmed(self):
+        """The trim used to keep the first line only, which is the header - so
+        a chatty start (whisper.cpp is chatty) lost the pid and made itself
+        unanswerable. It keeps the first two now."""
+        path = self.dir / "autostart.log"
+        path.write_text(GAVE_UP_BLOCK + "\n"
+                        + "\n".join(f"09:18:{i:02d}  noise {i}" for i in range(60)),
+                        encoding="utf-8")
+        shown = autostart.read_last_block(path=path, max_lines=10)
+        self.assertIn("not shown", shown)
+        self.assertEqual(autostart.parse_logon_start(shown).pid, 8804)
+
+    def test_the_pid_is_asked_about_rather_than_assumed_alive(self):
+        found = autostart.read_logon_start(block=GAVE_UP_BLOCK,
+                                           ask=lambda _pid: "pythonw.exe")
+        self.assertTrue(found.alive)
+        self.assertEqual(found.image, "pythonw.exe")
+        gone = autostart.read_logon_start(block=GAVE_UP_BLOCK, ask=lambda _pid: "")
+        self.assertFalse(gone.alive)
+
+    def test_nobody_able_to_ask_leaves_it_unknown(self):
+        """Off Windows there is no tasklist. `None` is the answer, and the
+        report says so instead of choosing one."""
+        unknown = autostart.read_logon_start(block=GAVE_UP_BLOCK,
+                                             ask=lambda _pid: None)
+        self.assertIsNone(unknown.alive)
+        broke = autostart.read_logon_start(
+            block=GAVE_UP_BLOCK,
+            ask=lambda _pid: (_ for _ in ()).throw(OSError("no tasklist")))
+        self.assertIsNone(broke.alive)
+
+    def test_the_message_box_it_waits_behind_is_written_down(self):
+        """The one state where dictate is alive, holds no lock, and is not
+        running: it gave up, gave the lock back (which is deliberate - see
+        `test_the_lock_is_already_back_before_he_is_told`) and is sitting in a
+        modal box. Windows counts the logon task as Running for exactly that
+        long. Nothing said so, and the silence read as health."""
+        said = "\n".join(autostart.dialog_lines(8804))
+        self.assertIn(autostart.DIALOG_MARK, said)
+        self.assertIn("8804", said)
+        self.assertIn("NOT running", said)
+        self.assertIn("Running", said)
+        self.assertTrue(autostart.parse_logon_start(said).showing_dialog)
+
+
+class WhatIsActuallyRunning(TempState):
+    """`dictate autostart status --why`.
+
+    One line, no paths to edit and no sequence to get right, because the person
+    who runs it is not a developer and reads it off a phone. It exists to end a
+    specific argument: when the logon task's run is still counted and the copy
+    serving him is a different one, three different things can be true and they
+    need three different fixes. From inside one process they look identical.
+    """
+
+    def evidence(self, **over) -> autostart.Evidence:
+        from dictate import instance
+
+        found = autostart.Evidence(
+            lock_file=str(instance.lock_path()),
+            port=8178, schtasks_raw=SCHTASKS_RUNNING)
+        for key, value in over.items():
+            setattr(found, key, value)
+        return found
+
+    def test_two_whisper_servers_mean_two_copies_and_it_says_so(self):
+        """The lock is what makes one copy the rule, and one copy runs at most
+        one whisper-server. Two of those is the lock having failed, which is a
+        different fault from anything else here and is worth naming."""
+        text = "\n".join(autostart.render(a_reading(
+            alive=True, holder=a_holder(),
+            evidence=self.evidence(processes=[
+                ("pythonw.exe", 8804), ("pythonw.exe", 22188),
+                ("whisper-server.exe", 31002), ("whisper-server.exe", 31003)]))))
+        self.assertIn("two copies of dictate are", text)
+        self.assertIn("31002", text)
+        self.assertIn("31003", text)
+
+    def test_a_whisper_server_with_nothing_above_it_is_named_as_the_orphan(self):
+        text = "\n".join(autostart.render(a_reading(
+            alive=False, holder=None,
+            evidence=self.evidence(
+                processes=[("whisper-server.exe", 31002)],
+                port_holders=[(31002, "whisper-server.exe")]))))
+        self.assertIn("orphan", text)
+        self.assertIn("dictate stop", text)
+        self.assertIn("transcription port 8178: held by pid 31002", text)
+
+    def test_the_logon_process_alive_beside_a_different_lock_holder(self):
+        """His case. The list says which pid is which, and the reading under it
+        says what that amounts to without naming a cause it has not got."""
+        text = "\n".join(autostart.render(a_reading(
+            alive=True, image="pythonw.exe", holder=a_holder(),
+            evidence=self.evidence(processes=[("pythonw.exe", 8804),
+                                              ("pythonw.exe", 22188)]))))
+        self.assertIn("the logon task started this one", text)
+        self.assertIn("holds dictate's lock", text)
+        self.assertIn("did not become a", text)
+
+    def test_it_says_that_an_image_name_is_not_proof_of_anything(self):
+        """tasklist does not print command lines, so two pythonw.exe is not two
+        dictates and the report may not imply that it is."""
+        text = "\n".join(autostart.render(a_reading(
+            alive=True, holder=a_holder(),
+            evidence=self.evidence(processes=[("pythonw.exe", 8804),
+                                              ("pythonw.exe", 22188)]))))
+        self.assertIn("image", text)
+        self.assertIn("tasklist does not print command lines", text)
+
+    def test_numbers_that_settle_nothing_are_reported_as_settling_nothing(self):
+        text = "\n".join(autostart.render(a_reading(
+            alive=None, holder=a_holder(),
+            evidence=self.evidence(processes=[("pythonw.exe", 22188)]))))
+        self.assertIn("nothing in the list settles it", text)
+
+    def test_off_windows_it_says_it_did_not_ask_rather_than_reporting_nothing(self):
+        """An empty list and a list nobody could take are not the same answer,
+        and reading the first as the second is how "nothing is running" gets
+        said about a machine nobody looked at."""
+        text = "\n".join(autostart.render(a_reading(
+            alive=None, holder=a_holder(),
+            evidence=self.evidence(unavailable="this is linux"))))
+        self.assertIn("not asked: this is linux", text)
+        self.assertNotIn("nothing named python.exe", text)
+
+    def test_it_asks_windows_for_each_image_and_for_the_port(self):
+        from unittest import mock
+
+        from dictate import recovery
+        from tests import fakes
+
+        tools = fakes.FakeProcessTools(
+            listeners={8178: [recovery.Listener(31002, "127.0.0.1:8178", "0.0.0.0:0")]},
+            names={8804: "pythonw.exe", 22188: "pythonw.exe",
+                   31002: "whisper-server.exe"})
+        cfg = config_mod.from_mapping({"whisper": {"port": 8178}})
+        with mock.patch.object(recovery, "platform_tools", return_value=tools):
+            found = autostart.gather_evidence(cfg, a_reading())
+        self.assertEqual(found.unavailable, "")
+        self.assertIn(("pythonw.exe", 8804), found.processes)
+        self.assertIn(("whisper-server.exe", 31002), found.processes)
+        self.assertEqual(found.port_holders, [(31002, "whisper-server.exe")])
+
+    def test_windows_refusing_to_answer_is_recorded_and_not_raised(self):
+        """A report may never be the thing that fails."""
+        from unittest import mock
+
+        from dictate import recovery
+
+        class Refuses:
+            def pids_named(self, _image):
+                raise DictateError("tasklist would not run", "…")
+
+        with mock.patch.object(recovery, "platform_tools", return_value=Refuses()):
+            found = autostart.gather_evidence(None, a_reading())
+        self.assertIn("tasklist", found.unavailable)
+
+    @unittest.skipIf(sys.platform == "win32", "this is the non-Windows answer")
+    def test_off_windows_nothing_is_asked_and_nothing_is_claimed(self):
+        found = autostart.gather_evidence(None, a_reading())
+        self.assertIn("only the Windows PC can answer", found.unavailable)
+        self.assertEqual(found.processes, [])
+
+
 class TheCommands(TempState):
     """The command surface, through `cli.main`, the way he would type it."""
+
+    def test_why_is_one_line_and_needs_no_paths(self):
+        """He will not remember a sequence and will not edit a path. Both
+        spellings work, because the report tells him one of them and he may
+        type the other."""
+        for argv in (["autostart", "status", "--why"], ["autostart", "--why"]):
+            with self.subTest(argv=argv):
+                code, out = run_cli(argv)
+                self.assertEqual(code, 0)
+                self.assertIn("What is actually running", out)
+                self.assertIn("What that says:", out)
+                self.assertNotIn("Traceback", out)
+
+    def test_why_still_reports_when_the_config_will_not_load(self):
+        """A config that will not parse is one of the things a logon start
+        fails on, so it is the last moment to refuse to report."""
+        path = self.write_config("[captions]\nnum_threads = 99\n")
+        code, out = run_cli(["--config", str(path), "autostart", "status", "--why"])
+        self.assertEqual(code, 0)
+        self.assertIn("What is actually running", out)
+        self.assertIn("not checked", out)
+        self.assertNotIn("Traceback", out)
 
     def test_autostart_on_its_own_reports_rather_than_changing_anything(self):
         code, out = run_cli(["autostart"])

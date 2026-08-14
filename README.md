@@ -108,9 +108,10 @@ without a window appearing, ready for the hotkey. You never type anything to
 start dictating again.
 
 ```powershell
-dictate autostart status     # is it on, is it running, and did it start?
-dictate stop                 # stop the copy that is running, now
-dictate autostart disable    # never mind, go back to how it was
+dictate autostart status        # is it on, is it running, and did it start?
+dictate autostart status --why  # ...and what is actually running, if those disagree
+dictate stop                    # stop the copy that is running, now
+dictate autostart disable       # never mind, go back to how it was
 ```
 
 **What it costs.** Almost nothing while you are not dictating. The 1.6 GB of
@@ -137,6 +138,13 @@ Two other things worth knowing:
   still cannot, it puts a message on screen and writes the reason to
   `%LOCALAPPDATA%\dictate\autostart.log`. `dictate autostart status` prints that
   reason back to you. Nothing disappears into a window that closed.
+
+  That message box is modal, so the process it belongs to stays alive until you
+  close it — and Windows goes on counting the logon task as *running* for
+  exactly that long, while dictate is not running at all. `dictate autostart
+  status` says so in as many words when it finds that state, rather than
+  reading "the task is running" as "dictate is running". Closing the box is
+  what lets that process end.
 
 Turning it off is one command — or the same tray item, unticked — and leaves
 nothing behind: it is a single Windows scheduled task, which you can also see
@@ -293,8 +301,14 @@ download was truncated), the port, the caption model, the Python packages and
 your microphones — and puts what to do about each failure at the bottom.
 
 If it is set to start when you log in and did not, run `dictate autostart status`
-as well: it says whether Windows ran it, what it returned, and what went wrong
-the last time it tried.
+as well: it says whether Windows ran it, what it returned, whether the process
+it started is still there, and what went wrong the last time it tried. When
+those readings do not add up — the task counted as running while the copy in
+front of you was started by hand — it says so instead of picking one, and
+`dictate autostart status --why` is the one line that lists what is actually
+running: the process the logon task started, whether it is still alive, any
+whisper-server, and who holds the transcription port. It reports and changes
+nothing, so it is safe to run at any time, including mid-sentence.
 
 The full log, including whisper.cpp's own output, goes to the file named under
 `[logging] file` in your config. The separate, much shorter record of what
@@ -756,7 +770,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 935 tests, run and passing
+### Verified anywhere — 984 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -932,7 +946,7 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
-* **The 892 tests above, on Windows** as well as on Linux — which is where the
+* **The 984 tests above, on Windows** as well as on Linux — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.
 * **That a supervised child process cannot outlive its parent.** CI starts a
@@ -1125,8 +1139,13 @@ misbehaves.
   console window appears on the way. The three things to check the first morning
   after `dictate autostart enable`: that the hotkey works without you having
   started anything, that nothing flashed on screen, and that
-  `dictate autostart status` says `last result: 267009 (it is running right
-  now)`.
+  `dictate autostart status` says the copy answering the hotkey **is** the one
+  the logon task started. It used to say to check for `last result: 267009 (it
+  is running right now)`, and that was wrong advice: 267009 is Task Scheduler
+  saying it has not seen *the run* finish, which is not the same as dictate
+  working — a logon start that gave up and is waiting on its message box reads
+  exactly the same way. The report compares the two readings itself now, and
+  `dictate autostart status --why` lists what is actually running.
 * **The message box** that a failed logon start puts on screen. It is one
   `MessageBoxW` call and it is wrapped so that failing to show it cannot change
   anything, but it has never been displayed. The log entry behind it is written

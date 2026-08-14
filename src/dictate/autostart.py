@@ -29,18 +29,21 @@ checked by CI as far as a machine that never logs on can check it.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from xml.sax.saxutils import escape
 
 from . import instance
 from .config import AutostartConfig, Config
 from .errors import ConfigError, DictateError, PlatformUnsupportedError
+
+log = logging.getLogger(__name__)
 
 #: The name it appears under in Task Scheduler. Deleting this one task is the
 #: whole of "turn it off"; nothing else is registered anywhere.
@@ -230,6 +233,12 @@ def task_description() -> str:
 # Reading Windows' own answer back
 # ---------------------------------------------------------------------------
 
+#: 0x00041301, SCHED_S_TASK_RUNNING. Windows reports this for a run it has not
+#: seen finish - which is a statement about the PROCESS THE TASK STARTED, and
+#: not about dictate. The two are the same thing on a good day and are not on a
+#: bad one, which is the whole subject of `reconcile` below.
+STILL_RUNNING = 267009
+
 #: Task Scheduler reports these in the "Last Result" field. They are the ones
 #: worth translating; anything else is shown as the raw number.
 _LAST_RESULT = {
@@ -240,7 +249,11 @@ _LAST_RESULT = {
     3: "another copy was already running, so this one did nothing",
     # Task Scheduler's own SCHED_S_* results, 0x00041300 upwards.
     267008: "the task is ready to run",
-    267009: "it is running right now",
+    # NOT "it is running right now". That sentence was read as "dictate is
+    # running", printed above a line saying the copy in front of him had been
+    # started by hand, and the two cannot both be the whole truth. What Windows
+    # is actually saying is narrower, and this says only that.
+    STILL_RUNNING: "Task Scheduler has not seen that run finish",
     267010: "the task is disabled",
     267011: "it has not run yet - this is normal until your next logon",
     267014: "the last run was stopped before it finished",
@@ -324,6 +337,141 @@ def parse_status(text: str, *, registered: bool) -> AutostartStatus:
     if not status.state and not status.last_run and status.enabled is None:
         status.unreadable = True
     return status
+
+
+#: The `Status:` words schtasks prints, and what each means for "has the run
+#: Windows started finished?". schtasks TRANSLATES this field, so a Windows that
+#: is not in English falls through to `Last Result` below, and a machine where
+#: neither can be read is reported as an unknown rather than as a no.
+_RUNNING_STATES = ("running",)
+_FINISHED_STATES = ("ready", "disabled", "could not start", "unknown")
+
+
+def run_is_alive(status: AutostartStatus) -> bool | None:
+    """Does Windows still count the run the task started as running?
+
+    `None` is a real answer and the important one: it means nobody here read
+    anything that says either way, and a report built on this must then say so
+    instead of picking the cheerful option.
+
+    This is deliberately NOT "is dictate running" - that question is the
+    instance lock's, and answering it from here is the mistake that produced a
+    status report contradicting itself.
+    """
+    state = status.state.strip().lower()
+    if state in _RUNNING_STATES:
+        return True
+    if state in _FINISHED_STATES:
+        return False
+    if status.last_result == STILL_RUNNING:
+        return True
+    if status.last_result is not None:
+        return False
+    return None
+
+
+# ---------------------------------------------------------------------------
+# What the process the task started is doing
+#
+# Windows will say whether the RUN has finished. It will not say what it still
+# has alive, and "the task is running" was being printed as though it did. The
+# logon start writes its own pid into its log at the top of every block, so the
+# question can be put to Windows directly: is that process still there?
+# ---------------------------------------------------------------------------
+
+#: Written by `run_at_logon` at the top of every block. Parsed back out of the
+#: log rather than kept in a second file: this is the same fact, and two records
+#: of one fact are two chances to disagree.
+PID_MARK = "dictate starting at logon (pid "
+
+#: What `_restart` writes when the tray's Restart item has been used. The copy
+#: the task started is gone by then and a different pid is serving, so this
+#: SUPERSEDES the pid above - without it the report would find a dead pid and
+#: announce a disagreement over an ordinary restart.
+RESTART_MARK = "a fresh copy of dictate was started (pid "
+
+#: Written just before the modal "dictate did not start" box goes up. That box
+#: keeps the process alive until somebody clicks it, with the instance lock
+#: already given back - so Windows counts the run as running for exactly that
+#: long while dictate is not running at all. Saying so is the only way anyone
+#: reading the log afterwards can tell that state from a healthy one.
+DIALOG_MARK = "waiting on a message box"
+
+
+@dataclass
+class LogonStart:
+    """The last logon start, as it described itself, and whether it is still
+    there. Every field may be empty: this is read from a log that may not exist
+    yet, on a machine that may not answer."""
+
+    pid: int | None = None
+    #: When that block was written, in dictate's own format - not Windows'
+    #: locale-dependent "Last Run Time", which is why the two are printed rather
+    #: than compared.
+    at: str = ""
+    #: The `outcome:` line it wrote, if it got as far as writing one.
+    outcome: str = ""
+    #: It gave up and put a dialog on screen, and is alive behind it.
+    showing_dialog: bool = False
+    #: Is that pid still running? `None` when nobody asked or nobody could.
+    alive: bool | None = None
+    #: What Windows calls it, when it is still there.
+    image: str = ""
+
+
+def parse_logon_start(block: str) -> LogonStart:
+    """Read a block of `autostart.log` back. Pure."""
+    found = LogonStart()
+    for line in block.splitlines():
+        if BLOCK_MARK in line:
+            _, _, rest = line.partition(BLOCK_MARK)
+            found.at = rest.strip().strip("=").strip()
+        for mark_text in (PID_MARK, RESTART_MARK):
+            _, mark, tail = line.partition(mark_text)
+            if not mark:
+                continue
+            digits = tail.split(")")[0].strip()
+            if digits.isdigit():
+                found.pid = int(digits)
+        if DIALOG_MARK in line:
+            found.showing_dialog = True
+        _, sep, value = line.partition("outcome:")
+        if sep:
+            found.outcome = value.strip()
+    return found
+
+
+def read_logon_start(*, block: str | None = None, ask=None) -> LogonStart:
+    """`parse_logon_start` over the log, plus Windows' answer to "is that pid
+    still there?".
+
+    `ask` is the one impure part and is injected in tests. Off Windows it is
+    `None` and `alive` stays `None`: nobody here can ask, and a report that
+    turned that into "it is gone" would be claiming something nobody read.
+    """
+    found = parse_logon_start(read_last_block() if block is None else block)
+    if found.pid is None:
+        return found
+    if ask is None:
+        ask = _ask_windows_for_name
+    try:
+        image = ask(found.pid)
+    except Exception:  # noqa: BLE001 - a report may never be the thing that fails
+        log.debug("could not ask Windows about pid %s", found.pid, exc_info=True)
+        return found
+    if image is None:
+        return found
+    found.alive = bool(image)
+    found.image = image
+    return found
+
+
+def _ask_windows_for_name(pid: int) -> str | None:
+    """The image name of `pid`, "" if it is gone, `None` if nobody could ask."""
+    from . import recovery  # noqa: PLC0415 - circular at import time
+
+    tools = recovery.platform_tools()
+    return None if tools is None else tools.name_of(pid)
 
 
 # ---------------------------------------------------------------------------
@@ -735,21 +883,543 @@ def disable() -> list[str]:
     return lines
 
 
-def status_lines() -> list[str]:
-    """The answer to all three of "is it on?", "is it running?" and "why did it
-    not start?", in one command, because those are the questions an always-on
-    thing owning a global hotkey has to be able to answer.
+# ---------------------------------------------------------------------------
+# `dictate autostart status --why`: what is actually alive
+#
+# One line, no paths to edit and no sequence to get right, because the person
+# who has to run it is not a developer and is sometimes reading this off a
+# phone. It ends a specific argument: when the logon task is still counted as
+# running and the copy serving him is a different one, there are three things
+# that can be true, and they need three different fixes.
+#
+#   two copies of dictate are alive at once     -> the instance lock failed
+#   the logon copy died and left something      -> an orphan holds the port
+#   the logon copy is alive without serving     -> it never became usable
+#
+# From inside one process those look identical. From a list of what Windows has
+# running, they do not: a second whisper-server means two copies are really
+# transcribing, no dictate process with a whisper-server still on the port is
+# the orphan, and the logon pid alive while another pid holds the lock is the
+# third.
+#
+# It reports and changes nothing. Nothing here ends a process, writes a file or
+# touches the task - it may be run at any time, including in the middle of a
+# sentence.
+# ---------------------------------------------------------------------------
 
-    It claims nothing it did not read: a `schtasks` whose output it cannot parse
-    is reported as unparsed output, not as an absence.
+#: What to list. Image names only - `tasklist` does not print command lines, so
+#: this cannot tell a copy of dictate from any other Python program on the PC
+#: and the report says so rather than implying otherwise. whisper-server is the
+#: one that is unambiguous, and it is the one that settles the question.
+IMAGES_WORTH_LISTING = ("pythonw.exe", "python.exe", "dictate.exe",
+                        "whisper-server.exe")
+
+
+@dataclass
+class Evidence:
+    """What Windows has running, for a question that cannot be answered from
+    inside one process."""
+
+    #: Empty when Windows could be asked; otherwise, in plain words, why not.
+    unavailable: str = ""
+    #: (image name, pid), in the order of `IMAGES_WORTH_LISTING`.
+    processes: list[tuple[str, int]] = field(default_factory=list)
+    port: int = 0
+    #: (pid, image name) for whoever holds the transcription port.
+    port_holders: list[tuple[int, str]] = field(default_factory=list)
+    lock_file: str = ""
+    #: The record at the front of the lock file, whoever wrote it.
+    record: instance.Holder | None = None
+    #: schtasks' whole answer, unparsed, because a report that could not read it
+    #: still has to carry it.
+    schtasks_raw: str = ""
+
+
+def gather_evidence(cfg: Config | None, reading: Reading) -> Evidence:
+    """Ask Windows what is running. Impure and deliberately dull."""
+    from . import recovery  # noqa: PLC0415 - circular at import time
+
+    found = Evidence(lock_file=str(instance.lock_path()),
+                     record=instance.read_record(),
+                     schtasks_raw=reading.status.raw)
+    if cfg is not None:
+        found.port = cfg.whisper.port
+
+    tools = recovery.platform_tools()
+    if tools is None:
+        found.unavailable = (
+            f"this is {sys.platform}, and what is running is a question only the "
+            "Windows PC can answer")
+        return found
+
+    for image in IMAGES_WORTH_LISTING:
+        try:
+            pids = tools.pids_named(image)
+        except DictateError as exc:
+            found.unavailable = exc.message
+            return found
+        except Exception as exc:  # noqa: BLE001 - a report may never be the fault
+            log.debug("listing %s raised", image, exc_info=True)
+            found.unavailable = str(exc)
+            return found
+        found.processes += [(image, pid) for pid in sorted(pids)]
+
+    if found.port:
+        try:
+            for row in tools.listeners(found.port):
+                found.port_holders.append((row.pid, tools.name_of(row.pid)))
+        except Exception:  # noqa: BLE001
+            log.debug("asking who holds port %s raised", found.port, exc_info=True)
+    return found
+
+
+def evidence_lines(reading: Reading) -> list[str]:
+    """Render the evidence, then say what it establishes. Pure.
+
+    The two halves are separate on purpose. The list is what he pastes back and
+    is true whatever anybody concludes from it; the reading underneath it is
+    dictate's opinion, and is allowed to be "these numbers do not settle it".
     """
-    lines: list[str] = []
+    found = reading.evidence
+    if found is None:
+        return []
+    lines = ["-" * 70,
+             "What is actually running (this is the part to copy and send on):",
+             ""]
+    if found.unavailable:
+        lines.append(f"  not asked: {found.unavailable}")
+        return lines + ["", *_evidence_reading(reading)]
 
-    if sys.platform != "win32":
-        lines.append(f"start at logon:  not available on {sys.platform} - it is a "
-                     "Windows scheduled task")
+    if not found.processes:
+        lines.append("  nothing named python.exe, pythonw.exe, dictate.exe or "
+                     "whisper-server.exe")
+    width = max((len(str(pid)) for _, pid in found.processes), default=1)
+    for image, pid in found.processes:
+        marks = []
+        if reading.logon.pid == pid:
+            marks.append("the logon task started this one")
+        if reading.holder is not None and reading.holder.pid == pid:
+            marks.append("holds dictate's lock")
+        note = f"  <- {', and '.join(marks)}" if marks else ""
+        lines.append(f"  {image:<20} pid {pid:<{width}}{note}")
+
+    lines.append("")
+    if not found.port:
+        lines.append("  transcription port: not checked - no config was loaded")
+    elif not found.port_holders:
+        lines.append(f"  transcription port {found.port}: free")
     else:
-        status = query_status()
+        for pid, name in found.port_holders:
+            lines.append(f"  transcription port {found.port}: held by pid {pid} "
+                         f"({name or 'no name'})")
+
+    lines.append(f"  lock file: {found.lock_file}")
+    holding = reading.holder.describe() if reading.holder is not None else "nobody"
+    lines.append(f"  holding it now: {holding}")
+    # Who LAST held it, which is a different question and only worth printing
+    # when it has a different answer - a lock nobody holds still names the copy
+    # that wrote the record, and that is often the whole story.
+    if found.record is not None and found.record.describe() != holding:
+        lines.append(f"  its record says: {found.record.describe()}")
+
+    if found.schtasks_raw.strip():
+        lines.append("")
+        lines.append("  what schtasks said, in full:")
+        for raw in found.schtasks_raw.strip().splitlines():
+            lines.append(f"  | {raw}")
+    return lines + ["", *_evidence_reading(reading)]
+
+
+def _evidence_reading(reading: Reading) -> list[str]:
+    """What the list above establishes - and only that.
+
+    Three findings are possible and a fourth is "these numbers do not settle
+    it", which is printed as often as it is true. Naming a cause this has not
+    established is the one thing it must never do: he acts on what this says,
+    and he has already spent a morning checking a proxy because a message
+    picked the likeliest explanation instead of the one it had evidence for.
+    """
+    found = reading.evidence
+    logon, holder = reading.logon, reading.holder
+    lines = ["What that says:"]
+    if found is None or found.unavailable:
+        return lines + [
+            "  nothing yet - the list above is empty, so there is nothing to "
+            "read.",
+        ]
+
+    servers = [pid for image, pid in found.processes
+               if image.lower() == "whisper-server.exe"]
+    maybe_dictate = [pid for image, pid in found.processes
+                     if image.lower() != "whisper-server.exe"]
+    said = False
+
+    if len(servers) > 1:
+        said = True
+        lines += [
+            f"  * there are {len(servers)} whisper-server processes "
+            f"({', '.join(str(p) for p in servers)}).",
+            "    One copy of dictate runs at most one of those, so two copies of "
+            "dictate are",
+            "    really running and the lock that is supposed to make that "
+            "impossible did not.",
+            "    `dictate stop` clears them; send this whole report on.",
+        ]
+    if logon.pid is not None and logon.alive is True and holder is not None \
+            and holder.pid != logon.pid:
+        said = True
+        lines += [
+            f"  * the process the logon task started (pid {logon.pid}) is alive "
+            "and is NOT the",
+            f"    copy holding the lock (pid {holder.pid}). It started and did "
+            "not become a",
+            "    working dictate.",
+        ]
+        if logon.showing_dialog:
+            lines.append('    Its log says it is waiting on the "dictate did not '
+                         'start" message box -')
+            lines.append("    closing that box is what lets it end.")
+        elif "gave up" in logon.outcome:
+            lines.append("    Its log says it gave up, and a logon start that "
+                         "gives up shows a message")
+            lines.append('    box and waits. Look for a window called "dictate '
+                         'did not start".')
+        else:
+            lines.append("    Its log does not say why. The block above is the "
+                         "thing to send on.")
+    if logon.pid is not None and logon.alive is False and not servers \
+            and holder is None:
+        said = True
+        lines += [
+            f"  * the process the logon task started (pid {logon.pid}) is gone, "
+            "nothing holds",
+            "    the lock, and there is no whisper-server left. dictate is simply "
+            "not running;",
+            "    `dictate run` starts it, and the log block above says why the "
+            "logon start ended.",
+        ]
+    if logon.pid is not None and logon.alive is False and servers:
+        said = True
+        lines += [
+            f"  * the process the logon task started (pid {logon.pid}) is gone, "
+            "but a",
+            f"    whisper-server ({', '.join(str(p) for p in servers)}) is still "
+            "here. That is the",
+            "    orphan: it holds the transcription port and the graphics memory "
+            "with nothing",
+            "    above it. `dictate stop` clears it.",
+        ]
+
+    if not said:
+        lines.append("  nothing in the list settles it by itself. Send the whole "
+                     "of this on.")
+    lines += [
+        "",
+        f"  ({len(maybe_dictate)} process(es) above could be a copy of dictate. "
+        "That is an image",
+        "   name only - tasklist does not print command lines, so anything else "
+        "on this PC",
+        "   written in Python is in that list too. The whisper-server count and "
+        "the lock are",
+        "   what actually settle it.)",
+    ]
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Putting the two readings side by side
+#
+# `dictate autostart status` reads two independent things - what Windows says
+# about the TASK, and what the instance lock says about the COPY THAT IS
+# RUNNING - and used to print them one after the other with nothing between.
+# On the morning this was written, that produced:
+#
+#     last result:   267009 (it is running right now)
+#     running now:   YES - process 22188, ... , started by hand
+#
+# Both readings were correct. Neither sentence was wrong on its own. Together
+# they said dictate had started itself and dictate had not, and the report did
+# not notice - which is the same defect as an installer announcing an SDK it
+# had not installed, and it costs the same thing: the next message this product
+# prints is believed a little less.
+#
+# So the two readings are now compared, and the comparison is the report.
+# ---------------------------------------------------------------------------
+
+#: The phrase that introduces a disagreement. One constant because a test greps
+#: for it: any pair of readings that cannot both be true has to reach it.
+DISAGREE_MARK = "these do not agree:"
+
+#: The one line he pastes when this cannot be settled from here.
+WHY_COMMAND = "dictate autostart status --why"
+
+
+@dataclass
+class Reconciliation:
+    """What the two readings amount to when they are put side by side."""
+
+    #: A short name for the state, for tests and for nothing else.
+    verdict: str
+    lines: list[str] = field(default_factory=list)
+
+    @property
+    def disagrees(self) -> bool:
+        return any(DISAGREE_MARK in line for line in self.lines)
+
+
+def _which(pid: int | None) -> str:
+    return f"process {pid}" if pid else "the copy that is running"
+
+
+def _how_started(holder: instance.Holder | None) -> str:
+    """In his words, not the record's. `Holder.started_by` is "hand" or
+    "logon"; "process 22188, hand" is not a sentence."""
+    if holder is None:
+        return ""
+    if holder.started_by == "hand":
+        return "started by hand"
+    if holder.started_by == "logon":
+        return "started at logon"
+    return "and dictate does not know how it was started"
+
+
+def _first_sentence(text: str, limit: int = 60) -> str:
+    """The head of an `outcome:` line, for quoting inside a paragraph. The
+    whole of it is in the log block below and is printed there."""
+    head = text.split(".")[0].strip()
+    return head if len(head) <= limit else head[:limit].rstrip() + "…"
+
+
+def reconcile(status: AutostartStatus, logon: LogonStart,
+              holder: instance.Holder | None) -> Reconciliation:
+    """Compare Windows' answer about the task with the lock's answer about
+    dictate, and say what the pair of them establishes. Pure.
+
+    The rule it is built on: **it may only report what these readings settle.**
+    Where they settle nothing - because schtasks was not readable, or because
+    nobody could ask Windows whether a pid is still there - it says that, and
+    names the one command that would settle it. "I do not know" is a real
+    answer here; a cheerful guess is what sent him looking at his internet
+    connection for a file lock.
+    """
+    if not status.registered:
+        return Reconciliation("off")
+
+    alive = run_is_alive(status)
+    # A pid on its own is not an identity: Windows reuses them, and the pid in
+    # the log belongs to a run that may have ended hours ago. So the two are
+    # only the same copy when the lock's own record agrees about HOW it was
+    # started - a holder that says "hand" against the logon pid is a collision,
+    # and is reported as an unknown rather than as a match.
+    reused = (logon.pid is not None and holder is not None
+              and holder.pid == logon.pid and holder.started_by == "hand")
+    matched = (logon.pid is not None and holder is not None
+               and holder.pid == logon.pid and not reused)
+    started_at = f" started at {status.last_run}" if status.last_run else ""
+
+    if reused and alive is not False:
+        return Reconciliation("pid-reused", [
+            DISAGREE_MARK,
+            f"  the logon task's log names {_which(logon.pid)}, and a process "
+            "with that number",
+            "  is holding dictate's lock - but its record says it was started by "
+            "hand.",
+            "  Windows reuses process numbers, so those may be two different "
+            "programs and",
+            "  dictate will not treat them as one.",
+        ] + _ask_for_evidence())
+
+    if matched:
+        if alive is False:
+            return Reconciliation("same-copy-uncounted", [
+                f"the copy answering the hotkey now ({_which(logon.pid)}) IS the "
+                "one the logon",
+                "task started, though Windows no longer counts that run as "
+                "running. dictate is",
+                "working; only Task Scheduler's bookkeeping is behind.",
+            ])
+        return Reconciliation("same-copy", [
+            f"the copy answering the hotkey now ({_which(logon.pid)}) is the one "
+            "the logon task",
+            "started - these two readings agree.",
+        ])
+
+    # The process reading leads whenever it is known, and it leads whether or
+    # not Windows has finished counting the run: a process the task started,
+    # alive, that is not the copy answering the hotkey is the finding either
+    # way. Windows' bookkeeping only decides how the first sentence opens.
+    if logon.alive is True and not matched:
+        what = f" ({logon.image})" if logon.image else ""
+        if holder is None:
+            opening = (
+                [f"  Windows says the run it{started_at} has not finished, and "
+                 "the process it",
+                 f"  started ({_which(logon.pid)}{what}) IS still there."]
+                if alive is True else
+                [f"  the process the logon task started ({_which(logon.pid)}"
+                 f"{what}) is still there,",
+                 "  though Windows no longer counts that run as running."])
+            return Reconciliation("alive-but-serving-nobody", [
+                DISAGREE_MARK, *opening,
+                "  Nothing holds dictate's lock, so DICTATE IS NOT RUNNING. That",
+                "  process is alive without being a working dictate.",
+            ] + _dialog_note(logon) + _ask_for_evidence())
+        return Reconciliation("not-the-copy", [
+            DISAGREE_MARK,
+            f"  the process the logon task started ({_which(logon.pid)}{what}) "
+            "is still",
+            "  running, and it is NOT the copy answering the hotkey - that one is",
+            f"  {_which(holder.pid)}, {_how_started(holder)}. Whatever the logon "
+            "task still has",
+            "  alive, it is not what is serving you.",
+        ] + _dialog_note(logon) + _ask_for_evidence())
+
+    if alive is True and logon.alive is False:
+        return Reconciliation("process-gone-run-alive", [
+            DISAGREE_MARK,
+            f"  Windows says the run it{started_at} has not finished, but the "
+            "process it",
+            f"  started ({_which(logon.pid)}) is GONE. So something ELSE that run "
+            "started is",
+            "  still alive - that is what Task Scheduler is still counting. A "
+            "whisper-server",
+            "  with no dictate above it is the one that has happened before, and",
+            "  `dictate stop` clears it.",
+        ] + _ask_for_evidence())
+
+    if alive is True and holder is not None and holder.started_by == "logon":
+        # Not settled - the pids could not be compared - but not a disagreement
+        # either: the copy that is running says it was started at logon, and so
+        # does Windows. Crying wolf here would cost the paragraph above the
+        # attention it needs on the day it is right.
+        return Reconciliation("probably-same-copy", [
+            f"the copy answering the hotkey now ({_which(holder.pid)}) says it "
+            "was started at logon,",
+            "and Windows says that run has not finished. dictate could not check "
+            "that they are",
+            "the same process, but nothing here disagrees.",
+        ])
+
+    if alive is True:
+        # Either the log has no pid in it (a task that has not run since this
+        # version), or nobody could ask Windows about it. Both are unknowns and
+        # neither is licence to say the logon copy is fine.
+        head = [DISAGREE_MARK,
+                f"  Windows says the run it{started_at} has not finished, and "
+                "dictate could not"]
+        if holder is None:
+            tail = [
+                "  establish what that run still has alive. Nothing holds "
+                "dictate's lock, so",
+                "  DICTATE IS NOT RUNNING - and something from that run may be.",
+            ]
+        else:
+            tail = [
+                "  establish what that run still has alive. The copy answering "
+                "the hotkey now",
+                f"  ({_which(holder.pid)}) was {_how_started(holder)}; whether "
+                "that is the same",
+                "  process is not settled here.",
+            ]
+        return Reconciliation("cannot-tell", head + tail + _ask_for_evidence())
+
+    if alive is None:
+        return Reconciliation("run-unknown", [
+            "Windows did not say whether the run it started has finished, so "
+            "nothing here",
+            "claims either way. Its own words are above.",
+        ])
+
+    if holder is not None and holder.started_by == "logon":
+        return Reconciliation("logon-copy-uncounted", [
+            f"the copy answering the hotkey now ({_which(holder.pid)}) says it was "
+            "started at",
+            "logon, and Windows no longer counts that run as running. That is what "
+            "a restart",
+            "from the icon's menu leaves behind, and it is not a fault.",
+        ])
+
+    return Reconciliation("quiet")
+
+
+def _dialog_note(logon: LogonStart) -> list[str]:
+    """What the logon start's own log says about why it is still there.
+
+    Three answers, and the third is "it did not say". The middle one is for a
+    log written before this version, which recorded giving up but not that it
+    then waited on a dialog.
+    """
+    if logon.showing_dialog:
+        return [
+            '  Its own log says it is waiting on the "dictate did not start" '
+            "message box.",
+            "  That box is what is keeping it alive: it is modal, so the process "
+            "sits in it",
+            "  until somebody clicks it, and Windows counts the logon task as "
+            "running for",
+            "  exactly that long. Close the box and this clears.",
+        ]
+    if "gave up" in logon.outcome:
+        return [
+            f"  Its own log says it {_first_sentence(logon.outcome)}, and a logon "
+            "start that gives",
+            "  up then puts a message box on screen and waits for a click. Look "
+            'for a window',
+            '  called "dictate did not start" - closing it lets that process end.',
+        ]
+    return ["  Its own log does not say why it is still there; the log is below."]
+
+
+def _ask_for_evidence() -> list[str]:
+    return [
+        "",
+        "  what is actually alive, in one line you can paste:",
+        f"    {WHY_COMMAND}",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# The report
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Reading:
+    """Everything `dictate autostart status` looked at. Gathered in one place
+    so that rendering it is pure and can be driven through every combination
+    off Windows - including the ones nobody here can produce."""
+
+    platform: str = "win32"
+    status: AutostartStatus = field(default_factory=AutostartStatus)
+    logon: LogonStart = field(default_factory=LogonStart)
+    holder: instance.Holder | None = None
+    log_file: str = ""
+    block: str = ""
+    evidence: Evidence | None = None
+
+
+def take_reading(*, why: bool = False, cfg: Config | None = None) -> Reading:
+    """Ask everything, decide nothing."""
+    reading = Reading(platform=sys.platform, log_file=str(log_path()),
+                      block=read_last_block(max_lines=200 if why else 40))
+    if sys.platform == "win32":
+        reading.status = query_status()
+    reading.logon = read_logon_start(block=reading.block)
+    reading.holder = instance.running_instance()
+    if why:
+        reading.evidence = gather_evidence(cfg, reading)
+    return reading
+
+
+def render(reading: Reading) -> list[str]:
+    """The report, from a reading and nothing else. Pure."""
+    lines: list[str] = []
+    status = reading.status
+
+    if reading.platform != "win32":
+        lines.append(f"start at logon:  not available on {reading.platform} - it "
+                     "is a Windows scheduled task")
+    else:
         if not status.registered:
             lines.append("start at logon:  OFF")
             lines.append("                 turn it on with `dictate autostart enable`")
@@ -771,6 +1441,7 @@ def status_lines() -> list[str]:
                 lines.append(f"  last started:  {status.last_run}")
             if status.last_result is not None:
                 lines.append(f"  last result:   {describe_last_result(status.last_result)}")
+            lines += _its_process_lines(reading.logon)
             if status.unreadable:
                 lines.append("  (Windows answered in a form dictate could not read - "
                              "its own words follow)")
@@ -778,7 +1449,7 @@ def status_lines() -> list[str]:
                     lines.append(f"  | {raw}")
 
     lines.append("")
-    holder = instance.running_instance()
+    holder = reading.holder
     if holder is None:
         lines.append("running now:     NO")
         lines.append("                 start it with `dictate run`")
@@ -786,18 +1457,60 @@ def status_lines() -> list[str]:
         lines.append(f"running now:     YES - {holder.describe()}")
         lines.append("  stop it with:  dictate stop")
 
+    if reading.platform == "win32":
+        verdict = reconcile(status, reading.logon, holder)
+        if verdict.lines:
+            lines.append("")
+            lines += verdict.lines
+
     lines.append("")
-    lines.append(f"the logon log:   {log_path()}")
-    block = read_last_block()
-    if block:
+    lines.append(f"the logon log:   {reading.log_file}")
+    if reading.block:
         lines.append("")
         lines.append("What happened the last time it started at logon:")
-        for line in block.splitlines():
+        for line in reading.block.splitlines():
             lines.append(f"  {line}")
-    elif sys.platform == "win32":
+    elif reading.platform == "win32":
         lines.append("                 (nothing in it yet - it is written the first "
                      "time dictate starts at logon)")
+
+    if reading.evidence is not None:
+        lines.append("")
+        lines += evidence_lines(reading)
     return lines
+
+
+def _its_process_lines(logon: LogonStart) -> list[str]:
+    """Whether the process the task started is still there.
+
+    This is the line the old report could not print, and its absence is what
+    let "the task is running" stand in for "dictate is running". Windows says
+    whether the RUN has finished; the logon start writes its own pid down; so
+    the process itself can be asked about by name.
+    """
+    if logon.pid is None:
+        return []
+    where = f"pid {logon.pid}"
+    when = f", started at logon {logon.at}" if logon.at else ""
+    if logon.alive is True:
+        what = f" ({logon.image})" if logon.image else ""
+        return [f"  its process:   {where}{what}{when} - STILL RUNNING"]
+    if logon.alive is False:
+        return [f"  its process:   {where}{when} - gone"]
+    return [f"  its process:   {where}{when} - dictate could not ask Windows "
+            "whether it is still there"]
+
+
+def status_lines(*, why: bool = False, cfg: Config | None = None) -> list[str]:
+    """The answer to all three of "is it on?", "is it running?" and "why did it
+    not start?", in one command, because those are the questions an always-on
+    thing owning a global hotkey has to be able to answer.
+
+    It claims nothing it did not read: a `schtasks` whose output it cannot parse
+    is reported as unparsed output, not as an absence, and two readings that
+    cannot both be true are printed as a disagreement rather than as a fact.
+    """
+    return render(take_reading(why=why, cfg=cfg))
 
 
 # ---------------------------------------------------------------------------
@@ -819,14 +1532,17 @@ def read_last_block(*, path: Path | None = None, max_lines: int = 40) -> str:
         return ""
     lines = last_block(text).splitlines()
     if len(lines) > max_lines:
-        # Keep the header - it says when this happened - and the end, which is
-        # where the reason and the remedy are. The middle is whisper.cpp being
-        # chatty.
-        head, rest = lines[0], lines[1:]
-        keep = rest[-(max_lines - 2):]
-        lines = [head,
-                 f"... {len(rest) - len(keep)} line(s) not shown; the whole file "
-                 f"is at {path} ..."] + keep
+        # Keep the first TWO lines - when this happened, and the pid it wrote
+        # down, which is what `parse_logon_start` reads and what lets the report
+        # ask Windows whether that process is still there. Dropping the second
+        # one was silently turning a long block into an unanswerable one. The
+        # end is kept because that is where the reason and the remedy are; the
+        # middle is whisper.cpp being chatty.
+        head, rest = lines[:2], lines[2:]
+        keep = rest[-(max_lines - 3):]
+        lines = head + [
+            f"... {len(rest) - len(keep)} line(s) not shown; the whole file "
+            f"is at {path} ..."] + keep
     return "\n".join(lines)
 
 
@@ -904,13 +1620,42 @@ class LogonLog:
 # ---------------------------------------------------------------------------
 
 
+def _will_notify(cfg_autostart: AutostartConfig) -> bool:
+    """Is a message box going to go up? Asked separately from showing one,
+    because what the log has to say about this process is decided by the
+    answer: with a box on screen it stays alive until somebody clicks, and
+    without one it ends here."""
+    return bool(cfg_autostart.notify_on_failure) and sys.platform == "win32"
+
+
+def dialog_lines(pid: int) -> list[str]:
+    """What the log says while the modal box is up.
+
+    Written because nothing said it, and the silence was readable as health.
+    The box is modal: this process sits in it until it is clicked, with the
+    instance lock already given back - so for exactly that long Windows counts
+    the logon task as Running while dictate is not running at all, and
+    `dictate autostart status` had no way to tell that apart from a copy that
+    started fine. `DIALOG_MARK` is what the report greps for.
+    """
+    return [
+        f"{DIALOG_MARK}: dictate could not start, and this process (pid {pid}) "
+        "stays",
+        "  alive until that box is closed. dictate is NOT running in the "
+        "meantime, and",
+        "  Task Scheduler goes on counting the logon task as Running for as "
+        "long as",
+        "  the box is on screen.",
+    ]
+
+
 def _notify_failure(cfg_autostart: AutostartConfig, summary: str) -> None:
     """Put a failure where he will see it without having been told to look.
 
     The log always has the detail; this is so he learns at all. It can never be
     the reason a start fails, so everything about it is wrapped.
     """
-    if not cfg_autostart.notify_on_failure or sys.platform != "win32":
+    if not _will_notify(cfg_autostart):
         return
     if len(summary) > 1200:
         summary = summary[:1200].rstrip() + "\n..."
@@ -922,7 +1667,12 @@ def _notify_failure(cfg_autostart: AutostartConfig, summary: str) -> None:
             f"{summary}\n\nThe full detail is in:\n{log_path()}\n\n"
             "Once that is fixed dictate starts by itself at your next logon, or "
             "type `dictate run` now.\nTo stop it starting at logon: "
-            "`dictate autostart disable`.",
+            "`dictate autostart disable`.\n\n"
+            # True every time this box is shown, and nothing else on screen says
+            # it: the box is modal, so this process waits here, and Windows goes
+            # on counting the logon task as running for as long as it is up.
+            "While this box is open dictate is NOT running, and Windows still "
+            "counts the logon task as running. Closing it lets this process end.",
         )
     except Exception:  # a failed message box must never change the outcome
         pass
@@ -968,7 +1718,10 @@ def run_at_logon(config_path: str | None = None) -> int:
     settings = _settings_or_default(config_path, AutostartConfig())
     with LogonLog() as log:
         log.start_block()
-        log.write(f"dictate starting at logon (pid {os.getpid()})")
+        # PID_MARK, not a string of its own: `parse_logon_start` reads this line
+        # back and that is what lets the report ask Windows whether the process
+        # the task started is still there.
+        log.write(f"{PID_MARK}{os.getpid()})")
 
         lock = instance.InstanceLock(started_by="logon")
         try:
@@ -1045,8 +1798,33 @@ def run_at_logon(config_path: str | None = None) -> int:
     # guard exists to prevent.
     if restart:
         return _restart(config_path)
+
+    # The box is what keeps this process alive from here, so the log says so
+    # before it goes up and again once it has gone. Without those two lines the
+    # only outward sign of this state is Task Scheduler reporting the task as
+    # Running - which is exactly what got read as "dictate started fine".
+    showing = _will_notify(settings)
+    if showing:
+        _write_to_log(dialog_lines(os.getpid()))
     _notify_failure(settings, failure)
+    if showing:
+        _write_to_log(["the message box was closed; this process is ending now "
+                       "(exit code 2), and the logon task's run ends with it."])
     return 2
+
+
+def _write_to_log(lines: list[str]) -> None:
+    """Append to the logon log after the run's own block has been closed.
+
+    Wrapped in every direction: this is a note about a failure and may never
+    become a second one.
+    """
+    try:
+        with LogonLog() as log:
+            for line in lines:
+                log.write(line)
+    except Exception:  # noqa: BLE001 - a log that will not open changes nothing
+        pass
 
 
 def _restart(config_path: str | None) -> int:
@@ -1066,7 +1844,9 @@ def _restart(config_path: str | None) -> int:
         except DictateError as exc:
             log.write(exc.report())
             return 2
-        log.write(f"a fresh copy of dictate was started (pid {pid}).")
+        # RESTART_MARK, so the report follows the pid across a restart instead
+        # of finding the dead one and calling an ordinary restart a fault.
+        log.write(f"{RESTART_MARK}{pid}).")
     return 0
 
 

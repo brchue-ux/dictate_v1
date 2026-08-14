@@ -227,7 +227,8 @@ class ChildGuard(Protocol):
 
 @runtime_checkable
 class ProcessTools(Protocol):
-    """The three things a rescue needs to ask the operating system.
+    """The few things a rescue - and the report that explains one - need to ask
+    the operating system.
 
     Kept this small on purpose: `recovery.py` decides everything, and this is
     only the part of it that cannot be answered in plain Python.
@@ -238,6 +239,15 @@ class ProcessTools(Protocol):
 
     def name_of(self, pid: int) -> str:
         """The image name of `pid` ("whisper-server.exe"), or "" if it is gone."""
+
+    def pids_named(self, image: str) -> list[int]:
+        """Every process running `image` right now, by pid. May be empty.
+
+        Nothing is ever *ended* on the strength of this - it is read by
+        `dictate autostart status --why`, which reports and changes nothing.
+        Two copies of dictate and a whisper-server with no parent look
+        identical from inside one process; from here they do not.
+        """
 
     def end(self, pid: int) -> None:
         """End `pid` AND its children. Never the parent on its own - that is

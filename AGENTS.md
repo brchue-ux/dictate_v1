@@ -352,6 +352,36 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   not RUN (`$script:VerifyDeferred`) separately from a check that failed. Saying "not
   working yet" to someone whose install is perfect costs the trust of every other
   message the tool prints.
+- **"Task Scheduler says the task is running" is not "dictate is running", and
+  `autostart.status_lines` may never print the two as one story.** Windows'
+  267009 (`STILL_RUNNING`) is about the process the task started; the instance
+  lock is about the copy answering the hotkey; they came apart on 2026-08-14 and
+  the report printed both without noticing. `reconcile` is the comparison and
+  `DISAGREE_MARK` is what a test greps for, over the whole matrix of readings
+  (`tests/test_autostart.py::TheTwoReadingsAreCompared`). Three things are
+  load-bearing. **A pid is not an identity** - Windows reuses them, so the log's
+  pid and the lock's pid count as one copy only when the lock record also agrees
+  about HOW it was started. **An unknown is never a verdict**: `run_is_alive` and
+  `LogonStart.alive` are three-valued, off-Windows and unreadable-schtasks both
+  answer `None`, and the report says so and names `dictate autostart status
+  --why`. And **the logon start's own pid is the only way to ask about that
+  process at all** - it is written into `autostart.log` behind `PID_MARK`,
+  superseded by `RESTART_MARK` across a tray restart, and `read_last_block` keeps
+  the first TWO lines of a trimmed block for exactly that reason.
+- **A failed logon start is alive, lockless and not running until the box is
+  clicked.** `run_at_logon` gives the lock back before `_notify_failure` (commit
+  f668453, deliberately), and `MessageBoxW` is modal - so the process sits there,
+  Task Scheduler counts the task as Running the whole time, and the only outward
+  sign was a status line that read as health. It writes `DIALOG_MARK` before the
+  box and a closing line after it; the report reads those back. Do not "simplify"
+  either write away, and do not make the dialog non-blocking without deciding
+  what then tells him at all.
+- **`dictate autostart status --why` reports and changes nothing.** It is the one
+  line he pastes: what Windows has running (`ProcessTools.pids_named`, tasklist),
+  who holds the transcription port, the lock, and schtasks' raw answer. It may
+  never end a process or write a file. It is also honest about its own limits -
+  tasklist prints no command lines, so two `pythonw.exe` is not two dictates and
+  the report says so; the whisper-server count and the lock are what settle it.
 - **Nothing under test may reach a blocking Win32 call.** `MessageBoxW` in
   `platform/windows/notify.py` waits for a click, and on a CI runner nobody ever
   clicks: the suite hung for hours instead of failing. `tests/test_autostart.py`

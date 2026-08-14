@@ -77,6 +77,21 @@ class WindowsProcessTools:
             log.debug("tasklist exited %s: %s", code, output.strip()[:400])
         return recovery.parse_task_name(output)
 
+    def pids_named(self, image: str) -> list[int]:
+        """Everything running under that image name, for the evidence report.
+
+        The same `tasklist` and the same CSV as `name_of` above, filtered the
+        other way round. A filter that matches nothing is an ordinary answer
+        here, not a failure: "there is no whisper-server" is exactly what the
+        report may need to say.
+        """
+        code, output = self._run(
+            ["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"])
+        if code != 0:
+            log.debug("tasklist exited %s: %s", code, output.strip()[:400])
+        return [pid for name, pid in recovery.parse_task_rows(output)
+                if name.strip().lower() == image.strip().lower()]
+
     def end(self, pid: int) -> None:
         # /T so its children go too, /F because this is only ever reached after
         # the polite request has already been given its full timeout.
