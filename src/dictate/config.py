@@ -22,6 +22,7 @@ from typing import Any
 
 from . import overlay_size
 from .errors import ConfigError
+from .platform import hotkey_spec
 from .platform.fade import MIN_FADE_MS
 from .platform.line_breaks import MODES as LINE_BREAK_MODES
 
@@ -43,10 +44,29 @@ MAX_HISTORY_KEEP = 10_000
 
 @dataclass
 class HotkeyConfig:
-    #: Held down to record. Modifier names: ctrl, alt, shift, win.
+    #: Held down to record. Either a keyboard chord - modifier names ctrl, alt,
+    #: shift, win, plus one key - or ONE mouse button on its own: "mouse 4",
+    #: "mouse 5" or "middle mouse button". `platform/hotkey_spec.py` parses it
+    #: and is the only thing that decides what is acceptable.
     combination: str = "ctrl + alt + space"
     #: "hold" is push-to-talk. "toggle" presses once to start, again to stop.
     mode: str = "hold"
+    #: The chord that keeps working when `combination` names a mouse button.
+    #: A mouse button is seen through a low-level mouse hook, which Windows may
+    #: refuse to install and security software may remove; this is what makes
+    #: that a degraded dictate rather than a dead one, and it is why the
+    #: keyboard is never given up. Ignored when `combination` is itself a chord.
+    #: See `platform/trigger_pair.py`.
+    keyboard_fallback: str = "ctrl + alt + space"
+    #: What happens to a click too short to have been a dictation, when the
+    #: trigger is a mouse button. True: dictate sends the click on to the
+    #: window you clicked in, so Back, open-in-new-tab and the rest still work
+    #: - a millisecond or two after you let go rather than as you press. False:
+    #: the button is dictate's alone for as long as dictate is running.
+    #: "Too short" is `[audio] min_utterance_ms`, the same number that already
+    #: decides a press was a mis-press. `platform/mouse_trigger.py` carries the
+    #: whole reasoning.
+    mouse_click_through: bool = True
 
 
 @dataclass
@@ -460,8 +480,36 @@ def validate(cfg: Config) -> Config:
     if not cfg.hotkey.combination.strip():
         raise ConfigError(
             "[hotkey] combination is empty.",
-            'Set something like combination = "ctrl + alt + space".',
+            'Set something like combination = "ctrl + alt + space", or '
+            '"mouse 4" for a mouse button.',
         )
+    # Read here rather than at the moment the listener is built, so a value
+    # nobody can use is a startup error naming what IS accepted - not a Windows
+    # error code in the middle of his first sentence.
+    trigger = hotkey_spec.normalise(cfg.hotkey.combination)
+    if trigger in hotkey_spec.MOUSE_BUTTONS:
+        if cfg.hotkey.mode != "hold":
+            raise ConfigError(
+                f"[hotkey] combination is {cfg.hotkey.combination!r} and mode "
+                f"is {cfg.hotkey.mode!r}.",
+                'A mouse button is push-to-talk only. Everything dictate does '
+                'with the button - swallowing it while you hold it, and passing '
+                'a quick click on to the window you clicked in - is decided by '
+                'HOW LONG you hold it, which a toggle has no notion of. Set '
+                'mode = "hold", or use a keyboard combination for toggle.',
+            )
+        if hotkey_spec.is_mouse(cfg.hotkey.keyboard_fallback):
+            raise ConfigError(
+                f"[hotkey] keyboard_fallback is "
+                f"{cfg.hotkey.keyboard_fallback!r}, which is a mouse button.",
+                "It exists to be the way in when the mouse hook is not there, "
+                'so it has to be a keyboard combination, e.g. "ctrl + alt + '
+                'space".',
+            )
+        # Checked even though it is only used behind a mouse trigger: a
+        # fallback that turns out not to parse is discovered at the worst
+        # possible moment otherwise.
+        hotkey_spec.normalise(cfg.hotkey.keyboard_fallback)
     if cfg.audio.sample_rate != 16000:
         raise ConfigError(
             f"[audio] sample_rate is {cfg.audio.sample_rate}, but both models require 16000.",

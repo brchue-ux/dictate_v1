@@ -285,17 +285,31 @@ def cmd_hotkey(args: argparse.Namespace) -> int:
     from .platform.hotkey_spec import describe, normalise
 
     cfg = _load_config(args)
+
+    def _note(combination: str) -> None:
+        """What a mouse button costs, said wherever one is named. Nothing at
+        all for a keyboard chord."""
+        lines = switch_mod.trigger_note(
+            combination, keyboard_fallback=cfg.hotkey.keyboard_fallback,
+            click_through=cfg.hotkey.mouse_click_through)
+        for line in lines:
+            _out(line)
+        if lines:
+            _out("")
+
     if not args.combination:
         _out(f"the hotkey is  {describe(cfg.hotkey.combination)}"
              f"   ({cfg.hotkey.combination})")
         _out("")
+        _note(cfg.hotkey.combination)
         _out("What the tray icon offers, each of which is one click there:")
         for combination, why, current in switch_mod.choices_for(cfg.hotkey.combination):
             mark = "*" if current else " "
             _out(f" {mark} {describe(combination):<22} {why}")
         _out("")
         _out("Any combination of ctrl, alt, shift and win with one other key "
-             "works, not just those:")
+             "works, not just those,")
+        _out("and so does any one of the three mouse buttons on its own:")
         _out(f"  {switch_mod.EXAMPLE_COMMAND}")
         return 0
 
@@ -314,6 +328,10 @@ def cmd_hotkey(args: argparse.Namespace) -> int:
     _out(f"the hotkey is now  {describe(combination)}")
     _out(f"written to         {cfg.source_path}")
     _out("")
+    # Said at the moment he chooses it, not only when he asks: a mouse button
+    # takes something over that already had a job, and finding that out by
+    # losing it is exactly what this is here to prevent.
+    _note(combination)
     if instance_mod.running_instance() is not None:
         _out("dictate is running, and that copy is still using the old one. "
              "Either right-click")

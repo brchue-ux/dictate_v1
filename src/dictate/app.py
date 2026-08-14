@@ -5,6 +5,9 @@ Thread layout:
 
     main thread      Tk overlay message loop. Owns every Tk call.
     hotkey thread    owned by the keyboard hook; calls start/finish.
+    mouse hook       only with a mouse trigger: two threads of its own, one
+                     owning the WH_MOUSE_LL hook and one doing the work it
+                     decided on (platform/windows/mouse.py).
     audio thread     owned by PortAudio; calls push_audio and nothing else.
     caption thread   the only thread that touches a streaming session.
     finalize worker  ONE worker, so that if two utterances finish close
@@ -43,7 +46,7 @@ from .config import Config
 from .engines.residency import ResidentModel, Residency
 from .engines.sherpa_stream import SherpaStreamingTranscriber
 from .engines.whisper_backend import WhisperVulkanBackend
-from .errors import DictateError
+from .errors import DictateError, MouseHookError
 from .pipeline import Pipeline
 from .platform import factory
 from .platform.base import OverlayState
@@ -93,7 +96,10 @@ class Application:
         self.tracker = factory.make_window_tracker()
         self.injector = factory.make_injector(cfg, self.tracker)
         self.audio = factory.make_audio_capture(cfg)
-        self.hotkey = factory.make_hotkey_listener(cfg)
+        # `notify` is how a mouse trigger says that its hook was refused, or
+        # has been lost while dictate was running - the one failure that leaves
+        # dictate working (on the keyboard chord) rather than stopping it.
+        self.hotkey = factory.make_hotkey_listener(cfg, notify=self.notify)
 
         # The backend is wrapped, not replaced: it still owns the process, the
         # health wait, the restart budget and the clean shutdown. The wrapper
@@ -246,9 +252,7 @@ class Application:
 
         self._spawn(self._caption_loop, "dictate-captions")
         self._spawn(self._stop_request_loop, "dictate-stop-watch")
-        self.hotkey.register(self._on_hotkey_press, self._on_hotkey_release)
-        self.hotkey.start()
-        self.console(f"dictate: hotkey         {self.hotkey.describe}")
+        self._start_hotkey()
         # Once, before the tray is built, so that the icon's tick and the line
         # below are the same answer rather than two readings a moment apart.
         self._read_autostart(force=True)
@@ -256,6 +260,28 @@ class Application:
         self.console("dictate: ready. Hold the hotkey and speak. Ctrl+C here to quit,")
         self.console("dictate: or `dictate stop` from any other window.")
         self._offer_autostart()
+
+    def _start_hotkey(self) -> None:
+        """Register the trigger, then say which one he actually has.
+
+        A mouse trigger is the only one that can half-work. Its low-level hook
+        can be refused - security software is the usual reason - and
+        `TriggerPair` raises for that with the keyboard chord already
+        registered and running behind it. So this degrades and says so, the way
+        live captions and the tray icon do, rather than refusing to start:
+        dictate on the chord he has been using for weeks is worth having, and a
+        product that will not run because a mouse button was unavailable would
+        be absurd. The line below it is the truth either way, because
+        `describe` reports what is in force and not what was asked for.
+        """
+        try:
+            self.hotkey.register(self._on_hotkey_press, self._on_hotkey_release)
+            self.hotkey.start()
+        except MouseHookError as exc:
+            # `notify`, not `console`: this is the state the tray icon has to
+            # go red for. A logon-started copy has no console to read.
+            self.notify("error", exc.report())
+        self.console(f"dictate: hotkey         {self.hotkey.describe}")
 
     def _offer_autostart(self) -> None:
         """Tell a console start, once, that it did not have to be a console.
@@ -647,14 +673,26 @@ class Application:
             return False
 
         previous, wanted = self.hotkey, decision.combination
+        listener = None
         try:
-            listener = factory.make_hotkey_listener(self.cfg, wanted)
+            listener = factory.make_hotkey_listener(self.cfg, wanted,
+                                                    notify=self.notify)
             previous.stop()
             listener.register(self._on_hotkey_press, self._on_hotkey_release)
             listener.start()
         except Exception as exc:  # noqa: BLE001 - reported, and the old one is back
             log.warning("the hotkey could not be changed to %s: %s", wanted, exc)
             reason = exc.message if isinstance(exc, DictateError) else str(exc)
+            # A trigger can fail with half of itself installed: a mouse button
+            # that Windows would not hook comes back with its keyboard chord
+            # already registered and running (`platform/trigger_pair.py`), and
+            # leaving that alive would be two listeners on one combination.
+            # Nothing is changed here means nothing, including that.
+            if listener is not None:
+                try:
+                    listener.stop()
+                except Exception:
+                    log.debug("stopping the refused trigger raised", exc_info=True)
             self._restore_hotkey(previous)
             self.notify("error", hotkey_switch.refused(
                 wanted, self.cfg.hotkey.combination, reason))
@@ -692,6 +730,13 @@ class Application:
             listener.register(self._on_hotkey_press, self._on_hotkey_release)
             listener.start()
             self.hotkey = listener
+        except MouseHookError as exc:
+            # Half of it came back: `TriggerPair` never raises this until the
+            # keyboard chord behind the mouse button is registered and running.
+            # So he can still dictate, and is told with which - the opposite of
+            # the message below, which is for having nothing at all.
+            self.hotkey = listener
+            self.notify("error", exc.report())
         except Exception:
             log.exception("the previous hotkey could not be registered again")
             self.notify("error", "dictate has no hotkey now: the one it was "
