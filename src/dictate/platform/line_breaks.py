@@ -47,10 +47,12 @@ _KEYPRESS = ("\t\n\v\f\r"          # tab, line feed, vertical tab, form feed, CR
 #: than gaining the gaps the line break used to justify.
 _RUN_RE = re.compile(f"[ \t]*[{_KEYPRESS}][ \t{_KEYPRESS}]*")
 
-#: What actually presses Return. Tab is not counted: it is flattened for the
-#: same reason, but it never submitted anything.
-_RETURN_RE = re.compile("\r\n|[\n\r\v\f\x1c\x1d\x1e\x85"
-                        "\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
+#: What actually presses Return, which is exactly what `plan_text` translates
+#: into VK_RETURN and no more: CR, LF, and CRLF as one. Tab is flattened for the
+#: same reason as the rest but it never submitted anything, and the exotic
+#: separators above go as ordinary characters rather than as a keypress - so
+#: counting either of them here would be reporting a Return nobody pressed.
+_RETURN_RE = re.compile("\r\n|[\n\r]")
 
 
 def flatten(text: str) -> str:

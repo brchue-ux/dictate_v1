@@ -170,6 +170,16 @@ class TheLineBreakPolicy(unittest.TestCase):
         self.assertEqual(line_breaks.returns_in("a\tb"), 0)     # tab is not one
         self.assertEqual(line_breaks.returns_in("nothing here"), 0)
 
+    def test_the_count_is_what_the_plan_really_presses(self):
+        """It goes into his history, so it has to be the number of times Return
+        was pressed and not the number of characters that look like a break -
+        a vertical tab is flattened like the rest but goes as a character."""
+        for text in ("a\nb", "a\r\nb", "a\rb", "a\vb", "a\tb", "a b", "ab"):
+            with self.subTest(text=text):
+                pressed = keys_pressed(plan_text(text, allow_return=True))
+                self.assertEqual(line_breaks.returns_in(text),
+                                 pressed.count(VK_RETURN))
+
     def test_the_two_modes_are_the_two_the_config_offers(self):
         from dictate import config as config_mod
 
