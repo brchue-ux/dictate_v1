@@ -86,13 +86,20 @@ class HappyPath(PipelineTestCase):
         self.assertEqual(self.batch.calls, [(32000, SR)])
 
     def test_target_window_is_captured_at_press_not_at_paste(self):
+        """Focus slipping and coming back is not a focus change.
+
+        The window is read at press, so a notification that steals focus for a
+        moment cannot move the paste - and by the time the words are ready he is
+        back in the window he started in, which is the only thing the delivery
+        decision looks at. What moves the paste is being somewhere ELSE at that
+        moment, which is `FocusMovedWhileHeWasSpeaking` below.
+        """
         p = self.build()
-        p.start_utterance()
         pressed_window = self.windows.window
-        # Focus moves while the user is still speaking - a notification, or the
-        # overlay itself if it were ever to misbehave.
-        self.windows.window = TargetWindow(handle=999, title="Something Else")
+        p.start_utterance()
+        self.windows.window = TargetWindow(handle=999, title="A Notification")
         p.push_audio(audio(600))
+        self.windows.window = pressed_window          # it went away again
         p.finish_utterance()
 
         text, target = self.injector.sent[0]
@@ -108,6 +115,7 @@ class HappyPath(PipelineTestCase):
         p.start_utterance()
         self.windows.window = TargetWindow(handle=999, title="Something Else")
         p.push_audio(audio(600))
+        self.windows.window = pressed_window
         p.finish_utterance()
 
         listening = [t for (state, _), t in zip(self.overlay.history,
@@ -387,12 +395,14 @@ class WhatGoesIntoTheHistory(PipelineTestCase):
         p.finish_utterance()
         self.assertEqual(self.recorded[0]["returns"], 0)
 
-    def test_nothing_is_recorded_when_nothing_was_pasted(self):
+    def test_nothing_is_recorded_when_there_were_no_words(self):
+        """A dictation with no text is not a dictation. Note what is NOT in this
+        list any more: a paste that failed. There ARE words in that case, and
+        losing them silently is the defect this file is now half the answer
+        to - see `test_text_that_could_not_be_pasted_is_kept_and_marked`."""
         for case, kwargs in (
             ("transcription failed",
              dict(batch=FakeBatch(error=TranscriptionError("gone", "restart")))),
-            ("the paste failed",
-             dict(injector=FakeInjector(error=InjectionError("no", "try again")))),
             ("nothing was heard", dict(batch=FakeBatch(""))),
         ):
             with self.subTest(case=case):
@@ -401,6 +411,29 @@ class WhatGoesIntoTheHistory(PipelineTestCase):
                 p.push_audio(audio(600))
                 p.finish_utterance()
                 self.assertEqual(self.recorded, [])
+
+    def test_text_that_could_not_be_pasted_is_kept_and_marked(self):
+        """The history is the durable half of "never silently lost".
+
+        The clipboard is the immediate half and it lasts until he copies
+        anything else; this is what is still there an hour later. It has to be
+        marked, or a line he never saw arrive reads as one that did.
+        """
+        p = self.build(injector=FakeInjector(
+            error=InjectionError("Windows said no", "try again")))
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(len(self.recorded), 1)
+        self.assertEqual(self.recorded[0]["text"], "Hello world.")
+        self.assertIs(self.recorded[0]["delivered"], False)
+
+    def test_a_delivered_dictation_says_it_was_delivered(self):
+        p = self.build()
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertIs(self.recorded[0]["delivered"], True)
 
     def test_a_mis_press_is_not_a_dictation(self):
         p = self.build(min_utterance_ms=350)
@@ -432,6 +465,230 @@ class WhatGoesIntoTheHistory(PipelineTestCase):
         self.assertEqual(p.completed, 1)
         self.assertEqual([lvl for lvl, _ in self.notices], [])
         self.assertIs(self.overlay.states[-1], OverlayState.DONE)
+
+
+class FocusMovedWhileHeWasSpeaking(PipelineTestCase):
+    """The reported bug, end to end.
+
+    "If I'm currently dictating and I click away from the original focus screen
+    that it breaks where it ends up pasting. Even if I type or if I click back
+    into the terminal pane it won't paste it there any longer."
+
+    What used to happen: the paste went back to the window he had left - raising
+    it over whatever he had moved to - and if Windows would not raise it, the
+    text was discarded. It was not on the clipboard, it was not in the history,
+    and the audio had already been thrown away at the release, so there was
+    nothing left anywhere and the only remedy was to say it all again.
+    """
+
+    def build(self, **kwargs) -> Pipeline:
+        self.recorded: list[dict] = []
+        kwargs.setdefault("record", lambda text, **kw: (
+            self.recorded.append(dict(text=text, **kw)), True)[1])
+        return super().build(**kwargs)
+
+    def speak_then_move(self, p: Pipeline, to=None):
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.windows.window = to or TargetWindow(handle=999, title="Firefox",
+                                                 process="firefox.exe")
+        p.finish_utterance()
+
+    def test_nothing_is_pasted_anywhere(self):
+        p = self.build()
+        self.speak_then_move(p)
+        self.assertEqual(self.injector.sent, [])
+
+    def test_the_words_are_on_the_clipboard(self):
+        p = self.build()
+        self.speak_then_move(p)
+        self.assertEqual(self.injector.kept, ["Hello world."])
+
+    def test_the_words_are_in_the_history_marked_as_not_pasted(self):
+        p = self.build()
+        self.speak_then_move(p)
+        self.assertEqual(self.recorded[0]["text"], "Hello world.")
+        self.assertIs(self.recorded[0]["delivered"], False)
+
+    def test_he_is_told_and_the_message_names_both_windows(self):
+        p = self.build()
+        self.speak_then_move(p)
+        said = "\n".join(m for _, m in self.notices)
+        self.assertIn("Not pasted", said)
+        self.assertIn("Notepad", said)        # where he pressed the hotkey
+        self.assertIn("Firefox", said)        # where he is now
+        self.assertIn("Ctrl+V", said)
+
+    def test_the_panel_says_it_rather_than_saying_pasted(self):
+        p = self.build()
+        self.speak_then_move(p)
+        state, shown = self.overlay.screen[-1]
+        self.assertIs(state, OverlayState.ERROR)
+        self.assertIn("Not pasted", shown)
+
+    def test_the_next_dictation_is_untouched(self):
+        """The half of the report that says it does not recover. It does: the
+        window is captured afresh at every press, and there is no state here
+        that a held dictation leaves behind."""
+        p = self.build()
+        self.speak_then_move(p)
+        p.start_utterance()                    # he is in Firefox now, and stays
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(len(self.injector.sent), 1)
+        self.assertEqual(self.injector.sent[0][1].title, "Firefox")
+
+    def test_clicking_back_before_the_words_arrive_pastes_as_usual(self):
+        """The commonest accidental case, and it must not be a refusal: he
+        clicked something, came back, and the text is ready while he is home."""
+        p = self.build(submit=DeferredSubmit())
+        started_in = self.windows.window
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.windows.window = TargetWindow(handle=999, title="Firefox")
+        p.finish_utterance()
+        self.windows.window = started_in       # back before the GPU came back
+        self.submit.run_all()
+        self.assertEqual(self.injector.sent, [("Hello world.", started_in)])
+        self.assertEqual(self.injector.kept, [])
+
+    def test_the_window_he_was_dictating_into_closed(self):
+        p = self.build()
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.windows.closed.add(self.windows.window.handle)
+        self.windows.window = TargetWindow(handle=999, title="Firefox")
+        p.finish_utterance()
+        self.assertEqual(self.injector.sent, [])
+        said = "\n".join(m for _, m in self.notices)
+        self.assertIn("closed", said)
+        self.assertEqual(self.injector.kept, ["Hello world."])
+
+    def test_restore_mode_pastes_into_the_window_he_started_in(self):
+        p = self.build(on_focus_change="restore")
+        started_in = self.windows.window
+        self.speak_then_move(p)
+        self.assertEqual(self.injector.sent, [("Hello world.", started_in)])
+        self.assertEqual(self.injector.kept, [])
+        self.assertIs(self.recorded[0]["delivered"], True)
+
+    def test_restore_mode_says_out_loud_that_it_moved_a_window(self):
+        """A window jumping in front of him is not a thing to do silently, even
+        when it is the thing he asked for."""
+        p = self.build(on_focus_change="restore")
+        self.speak_then_move(p)
+        self.assertTrue(any("brought" in m and "front" in m
+                            for _, m in self.notices))
+
+    def test_a_clipboard_that_refuses_leaves_the_history_and_says_so(self):
+        injector = FakeInjector()
+        injector.clipboard_fails = True
+        p = self.build(injector=injector)
+        self.speak_then_move(p)
+        said = "\n".join(m for _, m in self.notices)
+        self.assertNotIn("Ctrl+V", said)
+        self.assertIn("dictation history", said)
+        self.assertIs(self.recorded[0]["delivered"], False)
+
+    def test_with_hold_to_clipboard_off_the_clipboard_is_not_touched(self):
+        p = self.build(hold_to_clipboard=False)
+        self.speak_then_move(p)
+        self.assertEqual(self.injector.kept, [])
+        self.assertIn("dictation history", "\n".join(m for _, m in self.notices))
+
+    def test_a_clipboard_that_explodes_does_not_cost_him_the_history(self):
+        class Exploding(FakeInjector):
+            def to_clipboard(self, text):
+                raise OSError("the clipboard is on fire")
+
+        p = self.build(injector=Exploding())
+        self.speak_then_move(p)
+        self.assertIs(self.recorded[0]["delivered"], False)
+        self.assertIn("dictation history", "\n".join(m for _, m in self.notices))
+
+
+class APasteThatFailedUsedToLoseTheText(PipelineTestCase):
+    """The other way the words used to disappear: the paste itself was refused.
+
+    `restore_focus` could not raise the window, or SendInput was blocked by an
+    elevated application. Either way `injector.send` raised, `_finalize` reported
+    it, and the text went with the exception.
+    """
+
+    def build(self, **kwargs) -> Pipeline:
+        self.recorded: list[dict] = []
+        kwargs.setdefault("record", lambda text, **kw: (
+            self.recorded.append(dict(text=text, **kw)), True)[1])
+        return super().build(**kwargs)
+
+    def run_one(self, error):
+        p = self.build(injector=FakeInjector(error=error))
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        return p
+
+    def test_the_text_is_kept_and_he_is_told_where(self):
+        self.run_one(InjectionError("Windows accepted only 0 of 400 keystrokes",
+                                    "run dictate as administrator"))
+        self.assertEqual(self.injector.kept, ["Hello world."])
+        self.assertIs(self.recorded[0]["delivered"], False)
+        self.assertIn("Ctrl+V", "\n".join(m for _, m in self.notices))
+
+    def test_what_windows_said_is_still_reported(self):
+        """Holding the text must not swallow the reason. He needs the remedy -
+        this one is fixable, and the message that fixes it is the injector's."""
+        self.run_one(InjectionError("Windows accepted only 0 of 400 keystrokes",
+                                    "run dictate as administrator"))
+        said = "\n".join(m for _, m in self.notices)
+        self.assertIn("Windows accepted only 0 of 400", said)
+        self.assertIn("administrator", said)
+
+    def test_a_half_finished_paste_warns_before_he_pastes_it_again(self):
+        error = InjectionError("Windows accepted only 12 of 400 keystrokes", "")
+        error.partial = True
+        self.run_one(error)
+        self.assertIn("already have been typed",
+                      "\n".join(m for _, m in self.notices))
+
+    def test_the_pipeline_keeps_working(self):
+        p = self.run_one(InjectionError("no", "try again"))
+        self.assertEqual(p.state, PipelineState.IDLE)
+        self.injector.error = None
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(len(self.injector.sent), 1)
+
+
+class TheHeldTextIsNotKeptHere(PipelineTestCase):
+    """Constraint 4's shape, applied to the new path.
+
+    A "last dictation" field on the pipeline would be the obvious way to offer
+    "paste it now", and it is the first exception to "this module holds no
+    text between utterances" - which is the property `CaptionsCanNeverBePasted`
+    is enforced by. The held text goes straight out to the clipboard and the
+    history and is not kept.
+    """
+
+    def test_nothing_of_the_held_dictation_stays_on_the_pipeline(self):
+        p = self.build()
+        p.start_utterance()
+        p.push_audio(audio(600))
+        self.windows.window = TargetWindow(handle=999, title="Firefox")
+        p.finish_utterance()
+        self.assertEqual(self.injector.kept, ["Hello world."])   # it WAS held
+        held = [f"{name} = {value!r}" for name, value in vars(p).items()
+                if "Hello world." in repr(value)]
+        self.assertEqual(held, [])
+
+    def test_the_clipboard_is_offered_the_text_from_exactly_one_place(self):
+        """The same rule as `injector.send`: a second call site is how a
+        guarantee about where text goes rots."""
+        source = (Path(pipeline_mod.__file__)).read_text(encoding="utf-8")
+        self.assertEqual(source.count("injector.to_clipboard("), 1)
+        body = source.split("def _hold(", 1)[1]
+        self.assertIn("self.injector.to_clipboard(final)", body)
 
 
 class ShortAndEmpty(PipelineTestCase):

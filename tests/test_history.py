@@ -74,9 +74,14 @@ class WhatItKeeps(HistoryTestCase):
 
         `returns` earns its place on the other side of that line: it is not
         about the dictation, it is about what pasting it DID - the one thing in
-        a paste that can run something."""
+        a paste that can run something. `delivered` earns its place the same
+        way and is the reason the line is drawn at "where" rather than at
+        "whether": a dictation that was pasted NOWHERE is only in this file, so
+        the file has to say that, and a bare yes/no names no window and no
+        application."""
         fields = {f for f in Entry.__dataclass_fields__}
-        self.assertEqual(fields, {"when", "spoke_s", "text", "raw", "returns"})
+        self.assertEqual(fields, {"when", "spoke_s", "text", "raw", "returns",
+                                  "delivered"})
 
     def test_a_dictation_that_pressed_return_says_so(self):
         """The stray Enter he did not notice at the time. If one is ever sent

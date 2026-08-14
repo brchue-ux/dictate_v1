@@ -243,6 +243,15 @@ and restored, and if the clipboard holds something that cannot be faithfully put
 back (an image, a file list) it falls back to keystrokes for that paste rather
 than destroying it.
 
+There is exactly one exception, and it is not a paste: when the text could not be
+delivered at all (see "Where the finished text goes" below), it is put on the
+clipboard so one Ctrl+V places it, and the previous contents are **not** put
+back. The trade is stated out loud in the same message that explains why nothing
+was pasted, and `[paste] hold_to_clipboard = false` declines it. It is allowed
+because the alternative on that path is losing a sentence he has just spoken,
+which is worse than losing a clipboard. `injector.to_clipboard` is that path and
+has one call site (`Pipeline._hold`).
+
 ### 4. Caption text is display-only — it can never reach the document
 
 `Pipeline.finish_utterance` drops the session reference and bumps a generation
@@ -522,8 +531,13 @@ one that opens the file for him.
   anything it would be the same sentence twice, so it is not written.
 * **What it deliberately does not keep**: how long transcription took (a
   developer's question, already in the log), which window the text went to (that
-  would make it a record of his day rather than of his words), and anything
-  about a dictation that failed. Every line in the file is text that landed.
+  would make it a record of his day rather than of his words), and a dictation
+  that produced no words at all — a transcription that failed has nothing to
+  keep. What it *does* now keep is a dictation that was **not** pasted, marked
+  as such: the rule used to be "every line is text that landed" and it is now
+  "every line is text he said", because a sentence dictate refused to deliver
+  is precisely the one he needs to be able to find an hour later. It still names
+  no window, held or delivered.
 * **Where**: `history.txt` beside his `dictate.toml`, in the folder he already
   knows. Plain text, newest first, wrapped to 76 columns because Notepad opens
   with word wrap off and a dictation is one paragraph however long it is.
@@ -544,10 +558,78 @@ one that opens the file for him.
   is the wrong kind of surprise, and the config comment next to `enabled` says
   so and names the command.
 
-The pipeline's share of this is one call, after the text has been delivered,
+The pipeline's share of this is one call, once the dictation has an outcome,
 guarded so that a history that cannot be written can never turn a dictation that
 worked into a reported failure. The store says so once and then stops going on
 about it.
+
+---
+
+## Where the finished text goes when he has moved on
+
+Reported: *"if I'm currently dictating and I click away from the original focus
+screen ... it breaks where it ends up pasting. Even if I type or if I click back
+into the terminal pane it won't paste it there any longer."*
+
+The window is captured at hotkey **press** and that does not change — constraint
+2 depends on it, because the caption panel appearing must not be able to move the
+paste. What was missing is a decision for the case that handle was never enough
+for on its own: **he is somewhere else when the words are ready.**
+
+What used to happen, both halves of it:
+
+* `injector.send` asked `WindowTracker.focus` to bring the captured window back.
+  When Windows allowed it, the window he had left **jumped in front of whatever
+  he had moved to** and the text was typed into it.
+* When Windows would not allow it — the window minimised, closed, or
+  `SetForegroundWindow` refused — `send` raised, `_finalize` reported the failure
+  and **the text died with the exception.** It was not on the clipboard, it was
+  not in the history (which was written only after a delivery), and the audio had
+  already been dropped at the release. That is why clicking back into the
+  terminal changed nothing: there was nothing left anywhere to paste. Nothing
+  stays broken between utterances — the next press captures afresh — but that one
+  dictation was gone, which is what "it won't paste it there any longer" is.
+
+Three behaviours were possible and none is obviously right; the reasoning is in
+`src/dictate/delivery.py` and the decision is:
+
+* **Paste into whatever is focused now** — not offered, in any mode. Text
+  arriving in an application that never asked for it is the same family of harm
+  as the stray Return that ran a command in his terminal (constraint 6).
+* **Hold: paste nowhere, keep the text, say so** — the default. Nothing is typed
+  anywhere he did not choose, and the words go to the clipboard (one Ctrl+V) and
+  into the dictation history, marked as not pasted. Refusing is only allowed to
+  be the default *because* of that second half; a refusal that loses the sentence
+  would be worse than the bug.
+* **Restore: raise the captured window and paste there** — what dictate did
+  before, now `[paste] on_focus_change = "restore"`, and a real preference for
+  someone dictating a long passage into a document while reading something else.
+  It says out loud that it moved a window.
+
+Three properties are load-bearing:
+
+* **An unknown is never treated as a change.** No captured window, or no reading
+  of what is in front now, means DELIVER — dictate behaves exactly as it did
+  before this existed. Refusing to paste because a query came back empty is
+  reporting a healthy system as broken, over the one thing the product is for.
+* **Clicking away and clicking back is not a focus change.** The comparison is
+  made once, on handles, at the moment the words are ready. The commonest
+  accidental case never reaches a hold.
+* **The decision is not in the injector.** It is two window handles and two
+  settings, so all of it is plain Python and tested off Windows
+  (`tests/test_delivery.py`, `tests/test_pipeline.py::FocusMovedWhileHeWasSpeaking`).
+  The platform's whole share is two read-only calls, `GetForegroundWindow` and
+  `IsWindow`.
+
+A paste that *fails* is now held the same way rather than discarded, including
+the elevated-application case, and `InjectionError.partial` says whether any of
+it went in first — a half-typed paste plus a full clipboard is how a dictation
+gets pasted twice, so he is told to look before he pastes.
+
+What this cannot close: `SendInput` types into whatever has keyboard focus at the
+instant it runs, so a focus change inside the few milliseconds between the check
+and the keystrokes still lands in the wrong window. That race is narrowed, not
+removed, and it cannot be removed without an API that names a target.
 
 ---
 

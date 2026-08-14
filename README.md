@@ -543,8 +543,9 @@ this moment.
 
 ### What you have dictated, kept so you can look back over it
 
-Every dictation that actually gets pasted is written to a plain text file,
-newest first. To read it — or to get rid of it:
+Every dictation that produced words is written to a plain text file, newest
+first — including one dictate refused to paste, which is marked as such and is
+how you get those words back. To read it — or to get rid of it:
 
 ```powershell
 dictate history            # opens it
@@ -564,8 +565,9 @@ It lives beside your config, as `%APPDATA%\dictate\history.txt`. Each entry is:
   to it" rather than repeating the same sentence twice.
 
 It does not record how long transcription took, which window the text went to,
-or a dictation that failed and was never pasted. Every line in it is text you
-said that landed somewhere.
+or a dictation that produced no words at all. Every line in it is text you said;
+a line that says it was not pasted is there precisely because that is the only
+copy of it that outlives your clipboard.
 
 **It is bounded.** The last **200** dictations, with the older ones dropping off
 the end. Change that, or turn the whole thing off, in your config:
@@ -581,12 +583,48 @@ nothing else reads it, and there is no code in dictate that could. Turning it
 off stops anything new being written — a file that is already there is left
 alone, deliberately, so delete it first if you want it gone.
 
+### If you click somewhere else while you are still speaking
+
+dictate reads which window to paste into when you **press** the hotkey, not when
+your words are ready — otherwise the caption panel appearing could move the
+paste. So if you click away mid-sentence and are still somewhere else when the
+transcription comes back, there is a decision to make, and dictate makes the
+careful one:
+
+**It pastes nowhere, and tells you where your words are.** They go on your
+clipboard — one Ctrl+V puts them wherever you want — and into your dictation
+history. Nothing is ever typed into a window you did not dictate into, and no
+window is dragged in front of what you are doing.
+
+Clicking away and clicking **back** before the words arrive is not a change at
+all: that pastes as usual. So does a notification stealing focus for a moment.
+
+If you would rather it brought the window you started in back to the front and
+pasted there — which is what dictate used to do, and is the right answer if you
+dictate long passages into a document and read something else while they
+transcribe:
+
+```toml
+[paste]
+on_focus_change = "restore"
+```
+
+The same thing happens if a paste fails for any other reason (an application
+running as administrator will refuse synthesised keystrokes): the words are kept
+and you are told, rather than lost. `hold_to_clipboard = false` keeps your
+clipboard out of it and leaves the words in the history only.
+
 ### Your clipboard is not touched
 
 The default paste method synthesises the characters as keystrokes and never uses
 the clipboard at all. (`[paste] method = "clipboard"` is available for the few
 apps that mishandle long keystroke runs; that mode saves and restores your
 clipboard, and refuses to clobber contents it cannot faithfully put back.)
+
+The one exception is above: when dictate could **not** paste, it puts the words
+on your clipboard so you can place them yourself, and does not put the previous
+contents back. It says so at the time, and it is the only case where losing a
+clipboard is better than the alternative — which is losing what you just said.
 
 ### What is pasted cannot press Enter
 
@@ -704,7 +742,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 892 tests, run and passing
+### Verified anywhere — 935 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -731,6 +769,18 @@ python -m unittest discover -s tests -t .
   all written when it is off, and a disk that will not take it costing one
   message rather than the dictation.
 * That the target window is captured at press and not at paste time.
+* **What happens when you click somewhere else while you are still speaking**:
+  that nothing is pasted anywhere, that the words are on the clipboard and in
+  the history marked as not pasted, that both windows are named in what you are
+  told, that clicking away and back again pastes as usual, that a window which
+  closes mid-sentence is a different message from one you moved away from, that
+  `on_focus_change = "restore"` puts the old behaviour back and says out loud
+  that it moved a window, that there is **no** setting which pastes into
+  whatever you happen to be looking at, and that a paste which fails for any
+  other reason keeps the text the same way instead of discarding it. Also that a
+  clipboard which refuses, or a history that is switched off, changes what you
+  are told rather than being claimed anyway — and that none of it leaves the
+  held text sitting on the pipeline.
 * The resident-backend lifecycle against a **real child process**: start, wait
   for health, slow start, crash → restart, repeated crashes → give up with a
   reason, clean shutdown, and the stop-during-restart deadlock. Including that
@@ -911,6 +961,16 @@ misbehaves.
   CI is the mechanism underneath that case, a parent dying with no chance to
   clean up; nobody has typed those two keys at a real `dictate run` with a real
   whisper-server holding a real 1.6 GB of VRAM.
+* **Clicking away mid-dictation, on your PC.** Everything dictate *decides* in
+  that case is tested here and the reported bug is a test now — but the two
+  Windows calls the decision is made from (`GetForegroundWindow` at the moment
+  the words are ready, and `IsWindow` on the window you started in) have never
+  been run, and neither has putting the text on the clipboard when a paste is
+  refused. The check is one dictation: press the hotkey in your terminal, click
+  into a browser while you talk, stay there, and see that the panel says **Not
+  pasted**, that nothing is typed into the browser, and that Ctrl+V in the
+  terminal gives you the sentence. Then do it again clicking straight back, and
+  see that it pastes as it always did.
 * **Spoken punctuation in your own voice.** The transcripts it is designed
   against are real Whisper large-v3-turbo output, but the speaker was a
   synthetic voice, not you, on a processor rather than your card. That matters

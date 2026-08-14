@@ -65,6 +65,25 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `docs/DESIGN.md` constraint 6 carries the reasoning. Related, same class:
   `platform/modifier_guard.py` waits for Ctrl/Alt/Win to come up before typing,
   because the chord's other keys can still be down when the paste happens.
+- **Where the text is allowed to go is decided in `src/dictate/delivery.py`, not
+  in the injector.** The window is still captured at hotkey press; what is new is
+  what happens when he is somewhere ELSE when the words are ready. It used to
+  raise that window over whatever he had moved to — or, if Windows refused, raise
+  `InjectionError` and **destroy the text**: not on the clipboard, not in the
+  history (which was written only after a delivery), and the audio already
+  dropped at the release. Three things are load-bearing now. Nothing is ever
+  pasted into a window he did not dictate into, at any setting — there is no
+  third mode, on purpose. An unknown is never a change: no captured window, or
+  no reading of what is in front now, means paste exactly as before, because
+  refusing over an empty query is reporting a healthy system as broken. And a
+  refusal must never lose the text — `Pipeline._hold` puts it on the clipboard
+  (the one exception to constraint 3, announced in the same message) and in the
+  history marked `delivered=False`, and it does **not** keep it on `self`, which
+  is the shape `CaptionsCanNeverBePasted` enforces. `docs/DESIGN.md` → "Where the
+  finished text goes when he has moved on" carries the reasoning;
+  `tests/test_delivery.py` and `test_pipeline.py::FocusMovedWhileHeWasSpeaking`
+  hold it. What no one here can run: the two Win32 reads it is made from, and
+  `injector.to_clipboard`.
 - **The trigger can be one mouse button, and the button keeps its own job on a
   click.** Windows shows the middle and thumb buttons to nobody except a
   `WH_MOUSE_LL` hook, so `platform/windows/mouse.py` sits in the path of every

@@ -165,6 +165,35 @@ class WindowsTextInjector:
             self._send_via_keystrokes(payload)
         return line_breaks.returns_in(payload)
 
+    # -- the text that was not pasted -------------------------------------
+
+    def to_clipboard(self, text: str) -> bool:
+        """Put `text` where he can place it himself. Never raises.
+
+        The one path that touches the clipboard outside `method = "clipboard"`,
+        and it is not a paste: nothing was delivered, and this is what makes
+        "dictate did not paste that" something he can recover from with one
+        keystroke instead of by saying it all again. See `platform/base.py`.
+
+        Nothing is saved and put back, deliberately: the previous contents are
+        what he is being asked to give up in exchange for his words, the message
+        that goes with this says so, and a restore would be the race constraint
+        3 exists to avoid.
+        """
+        if not text:
+            return False
+        try:
+            _set_clipboard_text(text)
+        except InjectionError as exc:
+            log.warning("the text that was not pasted could not be put on the "
+                        "clipboard either: %s", exc.message)
+            return False
+        except Exception:
+            log.exception("the text that was not pasted could not be put on the "
+                          "clipboard either")
+            return False
+        return True
+
     # -- his own modifiers ------------------------------------------------
 
     def _settle_modifiers(self) -> None:
@@ -193,14 +222,21 @@ class WindowsTextInjector:
     def _send_via_keystrokes(self, text: str) -> None:
         events = plan_text(text,
                            allow_return=self.line_break_mode == line_breaks.RETURN)
-        if self.per_char_delay_ms > 0:
-            gap = self.per_char_delay_ms / 1000.0
-            for batch in chunk(events, 2):  # one character at a time
+        size = 2 if self.per_char_delay_ms > 0 else 200  # 2 events = one character
+        gap = self.per_char_delay_ms / 1000.0
+        sent = 0
+        for batch in chunk(events, size):
+            try:
                 _send(batch)
+            except InjectionError as exc:
+                # Whatever went in before this batch is in his document already.
+                # Saying so is what stops the held copy being pasted on top of
+                # it - see `InjectionError.partial`.
+                exc.partial = sent > 0
+                raise
+            sent += len(batch)
+            if gap:
                 time.sleep(gap)
-        else:
-            for batch in chunk(events, 200):
-                _send(batch)
         log.debug("sent %d characters as keystrokes", len(text))
 
     # -- clipboard path --------------------------------------------------

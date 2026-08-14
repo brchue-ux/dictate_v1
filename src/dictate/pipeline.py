@@ -13,10 +13,16 @@
                     still see what he said while the GPU works
                     utterance handed to the GPU pass
                        ▼
-                    clean  ──►  punctuate  ──►  paste into the captured window
-                       ▼
-                    the screen is cleared and says "pasted" - which is the
-                    moment the words he was reading go
+                    clean  ──►  punctuate  ──►  is the captured window still
+                       │                        the one in front? (delivery.py)
+                       ├── yes ──►  paste into it
+                       │            the screen is cleared and says "pasted" -
+                       │            which is the moment the words he was
+                       │            reading go
+                       └── no  ──►  paste NOWHERE. The words go on the
+                                    clipboard and into the history, and the
+                                    panel says so. Nothing is ever typed into
+                                    a window he did not dictate into.
 
 `clean` may only delete words; `punctuate` turns a spoken "comma" into ",". They
 are separate stages in that order on purpose - see `_punctuate`.
@@ -57,9 +63,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
+from . import delivery
 from .audio.buffer import UtteranceBuffer
 from .cleanup.engine import CleanResult
-from .errors import DictateError
+from .errors import DictateError, InjectionError
 from .platform.base import KEEP, CaptionOverlay, OverlayState, TargetWindow
 from .punctuation.engine import PunctuationResult
 
@@ -97,12 +104,14 @@ class Utterance:
 
 Notify = Callable[[str, str], None]
 Submit = Callable[[Callable[[], None]], None]
-#: Called once per dictation that was actually delivered, with the text that
-#: landed, the text Whisper produced before the cleanup rules ran, how long he
-#: spoke for, and how many Return keypresses delivering it involved. What is
-#: kept out of that, in what shape, and for how long is
+#: Called once per dictation that produced words, with the text, the text
+#: Whisper produced before the cleanup rules ran, how long he spoke for, how
+#: many Return keypresses delivering it involved, and whether it was delivered
+#: at all - a dictation held because he had moved to another window is recorded
+#: too, marked, because that record is how he gets it back. Returns whether it
+#: was written. What is kept out of it, in what shape, and for how long is
 #: `history.HistoryStore`'s business, not this module's.
-Record = Callable[..., None]
+Record = Callable[..., bool]
 
 
 def caption_tail(text: str, max_chars: int) -> str:
@@ -135,6 +144,9 @@ class Pipeline:
         min_utterance_ms: int = 350,
         max_utterance_s: float = 300.0,
         max_caption_chars: int = 220,
+        on_focus_change: str = delivery.HOLD_MODE,
+        restore_focus: bool = True,
+        hold_to_clipboard: bool = True,
         streaming=None,
         submit: Submit | None = None,
         notify: Notify | None = None,
@@ -157,6 +169,12 @@ class Pipeline:
         self.block_ms = max(1, block_ms)
         self.min_utterance_ms = min_utterance_ms
         self.max_caption_chars = max_caption_chars
+        #: What to do when the window he pressed the hotkey in is not the one in
+        #: front when the words are ready. The decision itself is `delivery.py`;
+        #: these three are the settings it is made from.
+        self.on_focus_change = on_focus_change
+        self.restore_focus = restore_focus
+        self.hold_to_clipboard = hold_to_clipboard
         self.submit: Submit = submit or (lambda fn: fn())
         self.notify: Notify = notify or (lambda level, msg: None)
         self.record: Record = record or (lambda text, **kwargs: None)
@@ -506,10 +524,35 @@ class Pipeline:
                 self.notify("info", "dictate did not hear any words in that, so "
                                     "nothing was pasted.")
                 return
-            returns = self.injector.send(final, utt.target) or 0
+            # Where the text is allowed to go. Decided here, from two window
+            # handles, and never inside the injector: it is a product decision
+            # about his text and it has to be testable without Windows.
+            focused = self._focused_now()
+            decision = self._decide(utt.target, focused)
+            log.info("delivery: %s (%s)", decision.action, decision.why)
+            if not decision.pastes:
+                self._hold(final, raw=text, utt=utt, decision=decision,
+                           focused=focused)
+                return
+            try:
+                returns = self.injector.send(final, utt.target) or 0
+            except InjectionError as exc:
+                # Nothing was pasted (or only part of it was, which the error
+                # says). Before this, the text died here and the only remedy on
+                # offer was to say the whole sentence again.
+                self._hold(final, raw=text, utt=utt,
+                           decision=delivery.Decision(
+                               delivery.HOLD, exc.message, delivery.REFUSED),
+                           focused=focused, detail=exc.report(),
+                           partial=getattr(exc, "partial", False))
+                return
             self.completed += 1
             log.info("delivered %d chars to %s in %.2fs",
                      len(final), utt.target or "the focused window", self.clock() - t0)
+            if decision.action == delivery.RESTORE:
+                self.notify("info", f"You had moved to another window, so dictate "
+                                    f"brought {utt.target} back to the front and "
+                                    f"pasted there.")
             # An empty string, never KEEP: the caption goes at exactly the
             # moment the real text lands in his document. Leaving it up under
             # the word "pasted" is the one arrangement in which he could take
@@ -525,6 +568,70 @@ class Pipeline:
         finally:
             with self._lock:
                 self._pending = max(0, self._pending - 1)
+
+    # -- where the text is allowed to go ----------------------------------
+
+    def _focused_now(self) -> TargetWindow | None:
+        """The window in front at the moment the text is ready.
+
+        The counterpart to `_capture_target`, and the only other time dictate
+        asks. It is read once, here, so the decision below and the message he is
+        shown are about the same instant - asking twice would let them disagree.
+        """
+        try:
+            return self.windows.foreground()
+        except Exception:
+            log.exception("could not read which window is in front now")
+            return None
+
+    def _decide(self, target: TargetWindow | None,
+                focused: TargetWindow | None) -> delivery.Decision:
+        """Ask `delivery` what to do. Nothing is decided in here."""
+        exists: bool | None = None
+        if target is not None and focused is not None \
+                and focused.handle != target.handle:
+            # Only asked when it can change what he is told - "it has closed" is
+            # a different sentence from "you moved". Never asked on the ordinary
+            # path, which is one Win32 call that used not to happen at all.
+            try:
+                exists = bool(self.windows.exists(target))
+            except Exception:
+                log.debug("could not ask whether the captured window still exists",
+                          exc_info=True)
+        return delivery.decide(target, focused, target_exists=exists,
+                               mode=self.on_focus_change,
+                               restore_focus=self.restore_focus)
+
+    def _hold(self, final: str, *, raw: str, utt: Utterance,
+              decision: delivery.Decision, focused: TargetWindow | None,
+              detail: str = "", partial: bool = False) -> None:
+        """Nothing was pasted. Keep his words and tell him where they are.
+
+        The whole of the difference between refusing and losing. Two places, and
+        they answer two different questions: the clipboard is "put it where I
+        meant it to go, now", one keystroke away and gone the next time he
+        copies anything; the dictation history is "what did I say", durable and
+        readable an hour later. Neither may raise - a copy that could not be
+        kept must still be reported, and reported as not kept.
+
+        Note what is NOT done here: the text is not held on `self`. Nothing in
+        this module keeps text between utterances, which is the shape constraint
+        4 is enforced by (`CaptionsCanNeverBePasted`), and a "last dictation"
+        field would be the first exception to it.
+        """
+        on_clipboard = False
+        if self.hold_to_clipboard:
+            try:
+                on_clipboard = bool(self.injector.to_clipboard(final))
+            except Exception:
+                log.exception("could not put the held text on the clipboard")
+        in_history = self._remember(final, raw=raw, utt=utt, delivered=False)
+        message = delivery.held_message(
+            decision.reason or delivery.REFUSED,
+            target=utt.target, focused=focused, on_clipboard=on_clipboard,
+            in_history=in_history, partial=partial, detail=detail)
+        log.warning("not pasted: %s", decision.why)
+        self._fail(message)
 
     def _punctuate(self, text: str) -> str:
         """Spoken punctuation, run AFTER the cleanup pass and never inside it.
@@ -554,23 +661,33 @@ class Pipeline:
         return result.text
 
     def _remember(self, final: str, *, raw: str, utt: Utterance,
-                  returns: int = 0) -> None:
+                  returns: int = 0, delivered: bool = True) -> bool:
         """Hand the finished dictation to whoever is keeping the record.
 
-        Called only after the text has actually been delivered, so every line in
-        the history is text that landed somewhere. It is guarded here rather
-        than trusted to the callback: a history that cannot be written must
-        never turn a dictation that worked into a reported failure.
+        Called once a dictation has an outcome - it landed somewhere, or it was
+        held because there was nowhere it was allowed to land. `delivered` says
+        which, and the history writes it down: a line that says it was not
+        pasted is the durable half of "the text is never silently lost", and it
+        is why the file's own rule is now "every line is text he said" rather
+        than "text that landed somewhere". A transcription that failed is still
+        not recorded - there are no words to keep.
+
+        It is guarded here rather than trusted to the callback: a history that
+        cannot be written must never turn a dictation that worked into a
+        reported failure. Returns whether it was written, because on the held
+        path that decides whether he can be told the words are in there.
 
         `returns` is what the injector reports it pressed Return for. It is the
         answer to "did that just submit something?", which is a question he
         should be able to ask an hour later rather than only in the moment.
         """
         try:
-            self.record(final, raw=raw, spoke_s=utt.duration_s, returns=returns)
+            return bool(self.record(final, raw=raw, spoke_s=utt.duration_s,
+                                    returns=returns, delivered=delivered))
         except Exception:
             log.exception("the dictation history could not be written; the text "
                           "was pasted and nothing else is affected")
+            return False
 
     def _fail(self, message: str) -> None:
         self.overlay.set_state(OverlayState.ERROR, message.splitlines()[0])
