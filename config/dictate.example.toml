@@ -42,16 +42,31 @@ max_utterance_s = 300
 # screen after you let go - greyed, while the graphics card works - so you can
 # still see what you said; they go when the real text arrives. What gets pasted
 # always comes from Whisper, which sees the whole recording. That is why these
-# words are allowed to be ALL CAPS, unpunctuated, and occasionally wrong.
+# words are allowed to be lower case, unpunctuated, and occasionally wrong.
+#
+# THE CAPTION MODEL CHANGED ON 2026-08-13. It used to be a Zipformer trained on
+# LibriSpeech - read audiobooks - and on ordinary speech it got whole phrases
+# wrong: on the test clip it printed "AND SAW MY FELLOW AMERICANS ... AS BUT YOU
+# CAN DO FOR YOUR COUNT". What is here now is NVIDIA's streaming FastConformer,
+# whose training includes conversational speech, and it got the same clip right
+# down to 5 dB of noise. If you have a config from before that date, all FOUR
+# lines below have to change together, and you need the new model. This does
+# both - it downloads it and rewrites these four lines:
+#
+#   powershell -ExecutionPolicy Bypass -File setup.ps1 -Only models,install
+#
+# `dictate captions some.wav` measures whichever model these lines point at.
 enabled = true
-model_dir = 'C:\dictate-gpu\models\sherpa-onnx-streaming-zipformer-en-2023-06-26'  # <<< CHECK THIS
-encoder = "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
-decoder = "decoder-epoch-99-avg-1-chunk-16-left-128.onnx"
-joiner = "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
+model_dir = 'C:\dictate-gpu\models\sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-80ms-int8'  # <<< CHECK THIS
+encoder = "encoder.int8.onnx"
+decoder = "decoder.int8.onnx"
+joiner = "joiner.int8.onnx"
 tokens = "tokens.txt"
-# LEAVE THIS AT 2. This model was measured to get *worse* with more threads -
-# six threads ran three times slower than two, because the per-chunk work is
+# LEAVE THIS AT 2. Caption models were measured to get *worse* with more threads
+# - six threads ran three times slower than two, because the per-chunk work is
 # tiny and thread synchronisation dominates. dictate refuses values above 4.
+# Raising this is not the fix for late captions; `dictate captions` is how to
+# find out what actually is.
 num_threads = 2
 provider = "cpu"
 decoding_method = "greedy_search"

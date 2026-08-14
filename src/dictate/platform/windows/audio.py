@@ -15,9 +15,16 @@ from __future__ import annotations
 import logging
 
 from ...errors import DictateError, MissingDependencyError
-from ..base import AudioCallback
+from ..base import AudioCallback, AudioLossCallback
 
 log = logging.getLogger(__name__)
+
+#: How often to repeat the "audio is being discarded" warning in the log once it
+#: is clearly not a one-off. The old ladder was 1st, 10th, 100th and then silence
+#: for ever, which is exactly the shape that makes a log stop being evidence.
+#: Whoever is listening (`Pipeline.note_input_loss`) gets every single one; this
+#: is only about not writing a line per 32 ms block into the file.
+LOSS_LOG_EVERY = 100
 
 
 def _load_sounddevice():
@@ -60,8 +67,12 @@ class SoundDeviceCapture:
         self._sd = None
         self._stream = None
         self._callback: AudioCallback | None = None
+        self._on_loss: AudioLossCallback | None = None
         self._running = False
-        self._dropped = 0
+        #: Callbacks that arrived with a status flag set, since this process
+        #: started. Only the log uses it - what he is told comes from
+        #: `Pipeline`, per utterance, which is the unit he can act on.
+        self.dropped = 0
 
     @property
     def describe(self) -> str:
@@ -103,11 +114,29 @@ class SoundDeviceCapture:
 
         def on_block(indata, _frames, _time, status) -> None:
             if status:
-                # Overflows mean the callback is being starved; the caption pump
-                # is the only thing downstream and it drops blocks by design.
-                self._dropped += 1
-                if self._dropped in (1, 10, 100):
-                    log.warning("audio input status: %s", status)
+                # NOT benign, and not about the captions: PortAudio discarded
+                # input audio before this callback ran, so the recording this
+                # block belongs to has a hole in it and the pasted text is made
+                # from the same holed recording. Tell whoever is listening
+                # about every one, so it can be attributed to the utterance it
+                # happened in instead of being a process-wide number nobody can
+                # place.
+                self.dropped += 1
+                if self.dropped == 1 or self.dropped % LOSS_LOG_EVERY == 0:
+                    log.warning("audio input status: %s (%d since start)",
+                                status, self.dropped)
+                # Only an OVERFLOW means samples were discarded. Any other flag
+                # is worth the log line above and nothing more - telling him a
+                # word may be missing when nothing was thrown away is how a
+                # warning stops being believed. The default is True so an
+                # unfamiliar sounddevice build errs towards reporting.
+                if bool(getattr(status, "input_overflow", True)):
+                    loss = self._on_loss
+                    if loss is not None:
+                        try:
+                            loss(1)
+                        except Exception:
+                            log.exception("the audio-loss listener failed")
             cb = self._callback
             if cb is not None:
                 try:
@@ -132,8 +161,10 @@ class SoundDeviceCapture:
                 "to use it. `dictate devices` lists what dictate can see.",
             ) from exc
 
-    def start(self, callback: AudioCallback) -> None:
+    def start(self, callback: AudioCallback,
+              on_loss: AudioLossCallback | None = None) -> None:
         self._callback = callback
+        self._on_loss = on_loss
         if self._stream is None:
             self._open()
         if not self._running:
@@ -142,6 +173,7 @@ class SoundDeviceCapture:
 
     def stop(self) -> None:
         self._callback = None
+        self._on_loss = None
         if self._stream is not None and self._running:
             try:
                 self._stream.stop()

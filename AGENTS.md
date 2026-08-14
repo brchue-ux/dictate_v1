@@ -92,7 +92,23 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   strings, and why a substitution absorbs the punctuation touching it. Do not
   "simplify" either back into a plain string replace.
 - **Caption threads are capped at 4 in `config.validate()`** because more threads were
-  measured to be slower. This is a settled decision, not a limitation to lift.
+  measured to be slower. This is a settled decision, not a limitation to lift, and it
+  is not the answer to late captions — `dictate captions <clip.wav>` is how to find
+  out what is. That command (`cli.cmd_captions` over the pure `engines/measure.py`)
+  reports first-word latency in *recording* time, the update interval, and the RTF,
+  and it is the one measurement only his machine and his voice can settle.
+- **Which caption model runs is config, not architecture, and it was changed on
+  2026-08-13.** Decision 4 fixes "a small streaming transducer, display-only, never
+  Whisper"; the file behind it is four keys in `[captions]`. The LibriSpeech-trained
+  Zipformer that shipped first got whole phrases wrong on ordinary speech (MEASURED,
+  `docs/DESIGN.md` → "The caption model", with the numbers). It is NVIDIA's streaming
+  FastConformer now — English only, lower case, unpunctuated. **Lower case is
+  load-bearing**: constraint 4 lets the caption stay on screen until the paste lands
+  partly because it is visibly not the finished text, so a punctuated, sentence-cased
+  caption model is not a free upgrade however much better it reads.
+  `engines/sherpa_stream.py` names no architecture and no file on purpose — keep it
+  that way. The migration trap: the file *names* inside the folder changed with the
+  model, so `setup.ps1` writes all four keys together and never `model_dir` alone.
 - **Never remove or rename a key from a config dataclass.** An *unknown* key is a
   hard error by design, so a key that disappears from `[overlay]` makes the product
   owner's existing `dictate.toml` — written by `dictate init` from the example —
@@ -113,7 +129,17 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   string field; `injector.send` has one call site. Keep all four true —
   `tests/test_pipeline.py::CaptionsCanNeverBePasted` is where each is held. `KEEP`
   may only ever keep text that is on screen *now*, or a previous utterance's words
-  reappear under a new one.
+  reappear under a new one. The guarantee is enforced by *grep over `vars(pipeline)`*,
+  so it catches more than the obvious: skipping duplicate caption sends was tried and
+  rejected because comparing against the last caption means keeping it here.
+- **Audio thrown away is counted per utterance and said out loud, in two separate
+  sentences.** `Pipeline.note_input_loss` (the OS discarded it — the recording
+  Whisper transcribes has a hole, so the PASTED TEXT may be missing a word) and the
+  bounded caption queue's own drops (only the screen was affected). Both were
+  effectively silent before: the first was logged on the 1st, 10th and 100th
+  occurrence and then never again, the second at DEBUG. Never merge the two
+  messages — the consequences are not the same, and the second one exists partly to
+  say the first did not happen.
 - **Everything in `[overlay]` is a pixel value at 100% display scaling**, multiplied
   by the chosen monitor's DPI in `geometry.plan_slab`. Fonts are sized in pixels
   (Tk's negative-size form), not points, so scaling is decided here rather than
@@ -168,7 +194,9 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `Pipeline._remember` and the store both swallow, and the store complains once.
 - **`dictate overlay`** shows the caption panel with sample text and no dictation.
   It is the only way anyone without Windows can get the look in front of the product
-  owner, so keep it working when you change the overlay.
+  owner, so keep it working when you change the overlay. Its sample text is deliberately
+  in the shape the caption model really produces — lower case, unpunctuated — so it
+  has to move when the model does.
 - **Model residency is bounded by use, not by process lifetime.**
   `engines/residency.py` (`ResidentModel`) wraps the batch backend and unloads
   whisper-server after `[whisper] idle_release_minutes` so the GPU memory goes back.
