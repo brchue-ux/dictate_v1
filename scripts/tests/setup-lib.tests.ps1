@@ -1035,6 +1035,304 @@ Test-Case 'an answer setup cannot read is not turned into "it is off"' {
 }
 
 # ===========================================================================
+Write-Host ''
+Write-Host 'A file another program is holding open' -ForegroundColor Cyan
+# ===========================================================================
+#
+# This is the whole of the product owner's install failure, in the one form a
+# machine with no Windows can never produce: a real handle, held by a real
+# second process, on a real file. Everything below runs on a GitHub Windows
+# runner under the same Windows PowerShell 5.1 he has.
+
+# File locks are MANDATORY on Windows and advisory everywhere else, so a test
+# that opens a file and expects the next opener to be refused only means
+# something on Windows. Those are skipped elsewhere rather than failed: a red
+# line that only says "this is not Windows" trains people to ignore red lines.
+$script:IsRealWindows = ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
+
+function Test-WindowsCase {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][scriptblock]$Body
+    )
+    if (-not $script:IsRealWindows) {
+        Skip-Case $Name 'needs real Windows - file locks are only mandatory there'
+        return
+    }
+    Test-Case $Name $Body
+}
+
+Test-Case 'a file nothing is holding is replaceable' {
+    $path = New-TempPath 'free.exe'
+    [IO.File]::WriteAllText($path, 'x')
+    $state = Test-FileReplaceable -Path $path
+    Assert-True $state.Replaceable 'nothing holds it'
+    Assert-Equal 'ok' $state.Reason 'reason'
+}
+
+Test-Case 'a file that is not there is not reported as held' {
+    # The first install on a new PC has no Scripts\dictate.exe yet, and a wait
+    # that treated "absent" as "held" would refuse every clean install.
+    $state = Test-FileReplaceable -Path (New-TempPath 'never-existed.exe')
+    Assert-True $state.Replaceable 'absent is replaceable'
+    Assert-Equal 'absent' $state.Reason 'reason'
+}
+
+Test-WindowsCase 'a file this process is holding open is reported as held, with the number Windows gave' {
+    $path = New-TempPath 'held.exe'
+    [IO.File]::WriteAllText($path, 'x')
+    # FileShare.Read: readers welcome, writers refused - which is what a running
+    # program's own image, and an antivirus scanner reading a freshly written
+    # executable, both look like from the outside.
+    $handle = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $state = Test-FileReplaceable -Path $path
+        Assert-False $state.Replaceable 'it is held'
+        Assert-Equal 'held' $state.Reason 'reason'
+        # 32 is ERROR_SHARING_VIOLATION. The number is kept rather than
+        # flattened because 5 and 32 mean different things to the person reading
+        # the message.
+        Assert-Equal 32 $state.Code 'the Windows error number'
+    } finally {
+        $handle.Dispose()
+    }
+}
+
+Test-WindowsCase 'the wait gives up rather than hanging, and hands back what is still held' {
+    $path = New-TempPath 'stuck.exe'
+    [IO.File]::WriteAllText($path, 'x')
+    $handle = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        $wait = Wait-ForFilesReplaceable -Paths @($path) -TimeoutSeconds 2
+        $clock.Stop()
+        Assert-False $wait.Ok 'it never became replaceable'
+        Assert-Equal 1 $wait.Blocked.Count 'the one file that is still held'
+        Assert-Equal $path $wait.Blocked[0].Path 'and it is named'
+        if ($clock.Elapsed.TotalSeconds -gt 15) {
+            throw "it waited $($clock.Elapsed.TotalSeconds) seconds for a 2 second timeout"
+        }
+    } finally {
+        $handle.Dispose()
+    }
+}
+
+function Start-FileHolderProcess {
+    <# Another process, holding a real handle on $Path, letting go after
+       $HoldMilliseconds. This is the shape of the thing that broke his install
+       - a holder that is on its way out - and it has to be a separate process
+       to be that shape. Returns the process, or $null if it never took hold. #>
+    param([string]$Path, [int]$HoldMilliseconds)
+    $command = "`$h = [IO.File]::Open('$Path', 'Open', 'Read', 'Read'); " +
+    "Start-Sleep -Milliseconds $HoldMilliseconds; `$h.Dispose()"
+    $proc = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command)
+    # Do not start timing until it really has the file: a PowerShell that takes
+    # a second to start would otherwise make this test measure process startup.
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (-not (Test-FileReplaceable -Path $Path).Replaceable) { return $proc }
+        Start-Sleep -Milliseconds 100
+    }
+    return $null
+}
+
+Test-WindowsCase 'the wait is what makes a transient holder survivable' {
+    # "Our check passed, and the very next operation was refused" is the
+    # signature of a holder on its way out. Here one lets go after two and a
+    # half seconds, and the install carries on instead of stopping - which is
+    # the whole reason the wait exists.
+    $path = New-TempPath 'transient.exe'
+    [IO.File]::WriteAllText($path, 'x')
+    $proc = Start-FileHolderProcess -Path $path -HoldMilliseconds 2500
+    if (-not $proc) { throw 'could not get a second process to hold the file' }
+    try {
+        $wait = Wait-ForFilesReplaceable -Paths @($path) -TimeoutSeconds 30
+        Assert-True $wait.Ok 'it let go and the wait noticed'
+        if ($wait.WaitedSeconds -lt 0.5) {
+            throw "it should have waited for the holder, but returned after $($wait.WaitedSeconds)s"
+        }
+    } finally {
+        try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
+Test-WindowsCase 'Windows is asked who is holding it, and it names the process that is' {
+    # The Restart Manager is the only thing on a stock Windows that can answer
+    # "which program has this file open". If it ever stops working the report
+    # falls back rather than failing, so this test proves the primary route
+    # works - and names a SEPARATE process, which is the case that matters.
+    $path = New-TempPath 'named.dat'
+    [IO.File]::WriteAllText($path, 'x')
+    $proc = Start-FileHolderProcess -Path $path -HoldMilliseconds 30000
+    if (-not $proc) { throw 'could not get a second process to hold the file' }
+    try {
+        if (-not (Add-RestartManagerType)) {
+            throw 'the Restart Manager would not load on this Windows'
+        }
+        $holders = @(Get-FileHolder -Path $path)
+        $named = @($holders | Where-Object { $_.Pid -eq $proc.Id })
+        if ($named.Count -ne 1) {
+            throw ("Windows should have named process $($proc.Id) as holding $path; it named: " +
+                (($holders | ForEach-Object { "$($_.Name)/$($_.Pid)" }) -join ', '))
+        }
+        Assert-Equal 'windows' $named[0].Source 'it came from the Restart Manager, not the fallback'
+        if (-not $named[0].Name) { throw 'Windows named a process with no name at all' }
+    } finally {
+        try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
+Test-Case 'a folder that can be written to is told apart from one that cannot' {
+    Assert-True (Test-FolderWritable -Path $script:TempRoot).Writable 'the temp folder is writable'
+    $absent = Test-FolderWritable -Path (New-TempPath 'no-such-folder')
+    Assert-False $absent.Writable 'a folder that is not there'
+}
+
+Test-WindowsCase 'the file-lock message says what is holding it and never mentions the internet' {
+    $path = New-TempPath 'reported.exe'
+    [IO.File]::WriteAllText($path, 'x')
+    $handle = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $wait = Wait-ForFilesReplaceable -Paths @($path) -TimeoutSeconds 2
+        $report = Get-FileLockReport -Blocked $wait.Blocked -WaitedSeconds $wait.WaitedSeconds
+        Assert-Contains $report.Problem $path
+        Assert-Contains $report.Problem 'in use by another program'
+        Assert-Contains $report.NextAction 'dictate stop'
+        Assert-Contains $report.NextAction 'Task Manager'
+        Assert-Contains $report.NextAction 'antivirus'
+        # The whole point. The message this replaced sent him to look at his
+        # internet connection and his proxy settings for this exact failure.
+        if ($report.Problem -match '(?i)internet|proxy|online|pypi') {
+            throw "the file-lock problem blamed the network: $($report.Problem)"
+        }
+        if ($report.NextAction -notmatch '(?i)nothing to do with your internet') {
+            throw 'the file-lock message does not rule the network out by name'
+        }
+        # It knows the difference between one held file and an unwritable folder.
+        Assert-Contains $report.Problem 'this is one file being held open'
+    } finally {
+        $handle.Dispose()
+    }
+}
+
+# ===========================================================================
+Write-Host ''
+Write-Host 'Reading a failure rather than assuming one' -ForegroundColor Cyan
+# ===========================================================================
+
+Test-Case "the product owner's own pip output is read as a locked file, not a network problem" {
+    # Verbatim from the run that stopped him, with the path generalised.
+    $output = @'
+Obtaining file:///C:/dictate-gpu/dictate
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+Installing collected packages: dictate
+  Attempting uninstall: dictate
+    Found existing installation: dictate 0.1.0
+    Uninstalling dictate-0.1.0:
+ERROR: Could not install packages due to an OSError: [WinError 5] Access is denied: 'c:\python311\scripts\dictate.exe'
+Check the permissions.
+'@
+    Assert-Equal 'locked' (Get-PipFailureKind -Output $output) 'what pip showed'
+    Assert-Equal 'c:\python311\scripts\dictate.exe' (Get-PipFailurePath -Output $output) 'the file it named'
+}
+
+Test-Case 'a sharing violation is read the same way' {
+    $output = "ERROR: Could not install packages due to an OSError: [WinError 32] The process cannot access " +
+    "the file because it is being used by another process: 'C:\Py\Scripts\dictate.exe'"
+    Assert-Equal 'locked' (Get-PipFailureKind -Output $output) 'kind'
+    Assert-Equal 'C:\Py\Scripts\dictate.exe' (Get-PipFailurePath -Output $output) 'path'
+}
+
+Test-Case 'a real network failure is still called a network failure' {
+    foreach ($output in @(
+            "WARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError'",
+            'ERROR: Could not find a version that satisfies the requirement pywin32 (from versions: none)',
+            "ProxyError('Cannot connect to proxy.', NewConnectionError(...))",
+            'ERROR: Could not install packages due to an OSError: HTTPSConnectionPool(host=pypi.org, port=443): Read timed out.')) {
+        Assert-Equal 'network' (Get-PipFailureKind -Output $output) "[$output]"
+    }
+}
+
+Test-Case 'a failure that establishes nothing is called unknown rather than guessed at' {
+    foreach ($output in @(
+            'ERROR: Failed building wheel for something',
+            "error: subprocess-exited-with-error",
+            '')) {
+        Assert-Equal 'unknown' (Get-PipFailureKind -Output $output) "[$output]"
+    }
+}
+
+Test-WindowsCase 'the install report for a locked file names the file and rules the network out' {
+    $path = New-TempPath 'target.exe'
+    [IO.File]::WriteAllText($path, 'x')
+    $handle = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $output = "ERROR: Could not install packages due to an OSError: [WinError 5] Access is denied: '$path'"
+        $report = Get-InstallFailureReport -ExitCode 1 -Output $output -LogPath 'C:\log.txt'
+        Assert-Equal 'locked' $report.Kind 'kind'
+        Assert-Contains $report.Problem $path
+        Assert-Contains $report.Problem 'pip said:'
+        if ($report.Problem -match '(?i)internet|proxy|pypi') {
+            throw "it blamed the network for a locked file: $($report.Problem)"
+        }
+        Assert-Contains $report.NextAction 'nothing to do with your internet'
+    } finally {
+        $handle.Dispose()
+    }
+}
+
+Test-Case 'a file that has since been let go is reported as such rather than as still held' {
+    # Describing a lock that has already gone would send him hunting for
+    # something that is not there. Nothing has this file open by the time the
+    # report is written, and the report says so.
+    $path = New-TempPath 'let-go.exe'
+    [IO.File]::WriteAllText($path, 'x')
+    # -Targets is how setup.ps1 calls this: the files it was about to replace,
+    # so the report works even when pip's message names no path at all.
+    $output = 'ERROR: Could not install packages due to an OSError: [WinError 5] Access is denied'
+    $report = Get-InstallFailureReport -ExitCode 1 -Output $output -Targets @($path)
+    Assert-Equal 'locked' $report.Kind 'kind'
+    Assert-Contains $report.Problem 'has since let go'
+    Assert-Contains $report.Problem 'this was one file being held open'
+    Assert-Contains $report.NextAction 'running setup again is very likely to work'
+    Assert-Contains $report.NextAction 'nothing to do with your internet'
+}
+
+Test-Case 'the network branch is reached only by evidence, and says what it is for' {
+    $report = Get-InstallFailureReport -ExitCode 1 -LogPath 'C:\log.txt' `
+        -Output 'ERROR: Could not find a version that satisfies the requirement pywin32'
+    Assert-Equal 'network' $report.Kind 'kind'
+    Assert-Contains $report.NextAction 'pypi.org'
+    Assert-Contains $report.NextAction 'C:\log.txt'
+}
+
+Test-Case 'a cause setup cannot establish is reported as one it cannot establish' {
+    $report = Get-InstallFailureReport -ExitCode 2 -LogPath 'C:\log.txt' `
+        -Output "Building wheel for pywin32 ...`nerror: command 'cl.exe' failed: No such file or directory"
+    Assert-Equal 'unknown' $report.Kind 'kind'
+    Assert-Contains $report.Problem 'Setup does not know why'
+    Assert-Contains $report.Problem "cl.exe"
+    # No cause is asserted, so no cause may be implied either.
+    if ($report.Problem -match '(?i)internet|proxy' -or $report.NextAction -match '(?i)internet|proxy') {
+        throw 'the unknown branch still mentions the network'
+    }
+}
+
+Test-Case 'a tool that printed nothing telling still gets its last words shown' {
+    $lines = @(Get-ToolErrorLines -Output "step one`nstep two`nstep three" -Limit 2)
+    Assert-Equal 2 $lines.Count 'it falls back to the tail'
+    Assert-Equal 'step three' $lines[1] 'the last thing it said'
+}
+
+Test-Case 'no output at all is not turned into a diagnosis' {
+    $report = Get-InstallFailureReport -ExitCode 9 -Output ''
+    Assert-Equal 'unknown' $report.Kind 'kind'
+    Assert-Contains $report.Problem 'pip printed nothing that says'
+}
+
+# ===========================================================================
 
 Write-Host ''
 Write-Host "passed $script:Passed, failed $script:Failed, skipped $script:Skipped"

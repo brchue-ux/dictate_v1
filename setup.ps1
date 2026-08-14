@@ -772,11 +772,30 @@ else entirely:
         }
         Write-Detail "Downloading the whisper.cpp source into $src ..."
         $clone = Invoke-Tool -FilePath 'git' -Arguments @('clone', '--depth', '1', $WhisperRepo, $src) -Show echo
-        Assert-ExitCode -Code $clone.ExitCode -Problem 'The whisper.cpp source could not be downloaded.' `
-            -NextAction @"
-Check you are online, then run setup again. If your network blocks GitHub, that
-is the thing to fix - the source has to come from somewhere.
+        if ($clone.ExitCode -ne 0) {
+            # This used to go straight to "check you are online". That is the
+            # most common reason a clone fails and it is still not the only one
+            # - a folder git will not write into and a full disk both land here
+            # too - so what git said comes first and decides which it is.
+            $problem = 'The whisper.cpp source could not be downloaded ' +
+                "(git stopped with error code $($clone.ExitCode))."
+            $said = @(Get-ToolErrorLines -Output $clone.Output -Limit 6)
+            if ($said.Count -gt 0) {
+                $problem = $problem + [Environment]::NewLine + [Environment]::NewLine +
+                    'This is what git said:' + [Environment]::NewLine +
+                    (($said | ForEach-Object { '  ' + $_ }) -join [Environment]::NewLine)
+            }
+            Stop-Setup -Problem $problem `
+                -NextAction @"
+Read the lines above before anything else - git says which of these it is.
+If it mentions resolving a host, a proxy, or a connection: check you are online,
+and whether this network blocks github.com.
+If it mentions a path, permission or an existing directory: the folder is the
+problem, and deleting it lets setup start the download again:
+  Remove-Item -Recurse -Force '$src'
+Then run setup again; everything else already done is kept.
 "@
+        }
     } else {
         Write-Skip "whisper.cpp source is already at $src"
     }
@@ -845,15 +864,46 @@ The full output is in:
         $clock = [Diagnostics.Stopwatch]::StartNew()
         $compile = Invoke-Tool -FilePath 'cmake' -Arguments @('--build', 'build', '-j', '--config', 'Release') -Show echo
         $clock.Stop()
-        Assert-ExitCode -Code $compile.ExitCode -Problem 'The compile failed.' `
-            -NextAction @"
+        if ($compile.ExitCode -ne 0) {
+            # The old words here named one cause - build tools installed without
+            # the "Desktop development with C++" part - for every compile that
+            # ever failed. Setup can CHECK that one (Get-VisualStudioCppPath), so
+            # it says it only when the check agrees, and otherwise shows what the
+            # compiler said and admits it does not know.
+            $cpp = Get-VisualStudioCppPath
+            $said = @(Get-ToolErrorLines -Output $compile.Output -Limit 6)
+            $problem = 'The compile failed (it stopped with error code ' + $compile.ExitCode + ').'
+            if ($said.Count -gt 0) {
+                $problem = $problem + [Environment]::NewLine + [Environment]::NewLine +
+                    'This is what the compiler said:' + [Environment]::NewLine +
+                    (($said | ForEach-Object { '  ' + $_ }) -join [Environment]::NewLine)
+            }
+            $next = ''
+            if (-not $cpp) {
+                $next = @"
+Setup cannot find the C++ build tools on this PC, which is enough on its own to
+stop the compile. Run the whole setup again (without -Only), as administrator,
+so step 2 can install them:
+  powershell -ExecutionPolicy Bypass -File setup.ps1
+"@
+            } else {
+                $next = @"
+Setup does not know why this failed. The C++ build tools ARE on this PC
+($cpp), so that is not it.
 Scroll up to the first line containing the word "error" - that one is the real
-problem and everything after it is noise. The usual cause is the C++ build
-tools being installed without the "Desktop development with C++" part.
-Running the whole setup again (without -Only), as administrator, reinstalls
-them. The full output is also in:
+problem and everything after it is noise - and report it.
+Compiling again from scratch is worth one try, in case a part-built folder is
+the problem:
+  powershell -ExecutionPolicy Bypass -File setup.ps1 -Only build -Rebuild
+"@
+            }
+            $next = $next.TrimEnd() + @"
+
+The full output is also in:
   $script:DictateLogPath
 "@
+            Stop-Setup -Problem $problem -NextAction $next
+        }
         Write-Ok ('Compiled in ' + (Format-Duration $clock.Elapsed.TotalSeconds))
     } finally {
         Pop-Location
@@ -934,26 +984,65 @@ function Invoke-Models {
     Write-Detail 'Unpacking it...'
     if (Test-Path -LiteralPath $captionDir) { Remove-Item -LiteralPath $captionDir -Recurse -Force }
     $unpack = Invoke-Tool -FilePath 'tar' -Arguments @('-xf', $archive, '-C', $models)
-    Assert-ExitCode -Code $unpack.ExitCode -Problem 'The live-caption model downloaded but could not be unpacked.' `
-        -NextAction @"
-Delete this file and run setup again:
+    if ($unpack.ExitCode -ne 0) {
+        # No cause is named here because setup cannot establish one: the archive
+        # passed its SHA-256 a moment ago, so what tar said is the only evidence
+        # there is, and it is shown rather than summarised into a guess.
+        $problem = 'The live-caption model downloaded but could not be unpacked ' +
+            "(tar stopped with error code $($unpack.ExitCode))."
+        $said = @(Get-ToolErrorLines -Output $unpack.Output -Limit 6)
+        if ($said.Count -gt 0) {
+            $problem = $problem + [Environment]::NewLine + [Environment]::NewLine +
+                'This is what tar said:' + [Environment]::NewLine +
+                (($said | ForEach-Object { '  ' + $_ }) -join [Environment]::NewLine)
+        }
+        Stop-Setup -Problem $problem `
+            -NextAction @"
+The file it was unpacking matched its published fingerprint, so it arrived
+intact. Delete it and run setup again anyway - that is the cheap thing to rule
+out:
   Remove-Item '$archive'
-If it fails the same way a second time, run setup with -SkipCaptions. dictate
-works without live captions - you just do not see words on screen while you are
-speaking, and the text that gets pasted is unaffected.
+If it fails the same way a second time, report the lines above and run setup
+with -SkipCaptions in the meantime. dictate works without live captions - you
+just do not see words on screen while you are speaking, and the text that gets
+pasted is unaffected.
 "@
+    }
 
     $missing = @()
     foreach ($file in $CaptionModel.Files) {
         if (-not (Test-Path -LiteralPath (Join-Path $captionDir $file))) { $missing += $file }
     }
     if ($missing.Count -gt 0) {
-        Stop-Setup -Problem ("The live-caption model unpacked, but these files dictate needs are not in it: " + ($missing -join ', ')) `
+        # It used to say "this means the model has been repackaged differently",
+        # which setup has no way of knowing: a part-finished unpack and an
+        # antivirus quarantining one file out of the folder look exactly the
+        # same from here. So it lists what DID arrive - which is the evidence
+        # someone can actually read the answer off - and does not choose.
+        $arrived = @()
+        try {
+            $arrived = @(Get-ChildItem -LiteralPath $captionDir -File -ErrorAction Stop |
+                ForEach-Object { '  ' + $_.Name + '  (' + (Format-Bytes $_.Length) + ')' })
+        } catch { }
+        $problem = "The live-caption model unpacked, but these files dictate needs are not in it: " +
+            ($missing -join ', ')
+        if ($arrived.Count -gt 0) {
+            $problem = $problem + [Environment]::NewLine + [Environment]::NewLine +
+                "This is what did arrive in $($captionDir):" + [Environment]::NewLine +
+                ($arrived -join [Environment]::NewLine)
+        } else {
+            $problem = $problem + [Environment]::NewLine + [Environment]::NewLine +
+                "Nothing at all arrived in $captionDir."
+        }
+        Stop-Setup -Problem $problem `
             -NextAction @"
-This means the model has been repackaged differently since setup was written.
-See what did arrive with:
-  Get-ChildItem '$captionDir'
-and report it. In the meantime dictate runs without live captions:
+Setup does not know which of these it is: the download being repackaged since
+setup was written, an unpack that did not finish, or antivirus taking a file out
+of the folder afterwards. Report the list above and it can be told apart.
+Deleting the folder and running setup again fetches and unpacks it afresh:
+  Remove-Item -Recurse -Force '$captionDir'
+In the meantime dictate runs without live captions - you just do not see words
+on screen while you are speaking, and the text that gets pasted is unaffected:
   powershell -ExecutionPolicy Bypass -File setup.ps1 -SkipCaptions
 "@
     }
@@ -966,22 +1055,87 @@ and report it. In the meantime dictate runs without live captions:
 # 5. Install dictate and write its config
 # ===========================================================================
 
+function Get-PythonScriptsDir {
+    <# The folder pip puts console-script launchers in, asked of the interpreter
+       rather than guessed from its path: a virtual environment, a per-user
+       install and an all-users install all answer differently. #>
+    param([Parameter(Mandatory = $true)][object]$Python)
+    $answer = Get-LastLine (Invoke-Tool -FilePath $Python.Path `
+            -Arguments @('-c', "import sysconfig; print(sysconfig.get_path('scripts'))")).Output
+    if ($answer) { return $answer.Trim() }
+    return ''
+}
+
+function Get-InstallTargetFile {
+    <# The files `pip install -e` has to REPLACE on a re-install, which are the
+       ones another program can be holding.
+
+       Just the console-script launchers: they are what stopped the product
+       owner's install, they are the only part of the install that is a running
+       program in its own right, and a short list keeps the wait and the report
+       about something he can act on. Everything else pip writes is a fresh file
+       under site-packages that nothing has open. #>
+    param([string]$ScriptsDir)
+    if (-not $ScriptsDir) { return @() }
+    if (-not (Test-Path -LiteralPath $ScriptsDir -PathType Container)) { return @() }
+    $names = @('dictate.exe', 'dictate-script.py', 'dictate.cmd', 'dictate')
+    $found = New-Object System.Collections.Generic.List[string]
+    foreach ($name in $names) {
+        $candidate = Join-Path $ScriptsDir $name
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $found.Add($candidate) }
+    }
+    return $found.ToArray()
+}
+
 function Invoke-Install {
     $python = Get-RequiredPython
     Write-Detail "Installing dictate with Python $($python.Version) ($($python.Path))..."
+
+    # -- Can the files this is about to replace actually be replaced? --------
+    #
+    # `dictate stop --stale-only` ran back in step 1 and reported that dictate
+    # was not running. That was TRUE, and it is still not the question: it looks
+    # at the instance lock and the transcription port, and the thing that broke
+    # the product owner's install was a handle on Scripts\dictate.exe. A process
+    # check cannot answer "can this file be replaced" - the launcher is a
+    # separate process from the python one that holds the lock, and antivirus
+    # and the Windows indexer hold freshly written executables without being
+    # dictate at all. So the files are asked directly, and waited for, because a
+    # holder on its way out is the likeliest single explanation for a check that
+    # passed one moment and a refusal the next.
+    $scriptsDir = Get-PythonScriptsDir -Python $python
+    $targets = @(Get-InstallTargetFile -ScriptsDir $scriptsDir)
+    if ($targets.Count -gt 0) {
+        $wait = Wait-ForFilesReplaceable -Paths $targets -OnWaiting {
+            param($blocked, $timeout)
+            Write-Detail ("Something still has $($blocked[0].Path) open. Waiting up to " +
+                "$timeout seconds for it to let go...")
+        }
+        if (-not $wait.Ok) {
+            $report = Get-FileLockReport -Blocked $wait.Blocked `
+                -WaitedSeconds $wait.WaitedSeconds -LogPath $script:DictateLogPath
+            Stop-Setup -Problem $report.Problem -NextAction $report.NextAction
+        }
+        if ($wait.WaitedSeconds -ge 1) {
+            Write-Note ('Waited {0:N0} seconds for another program to let go of the dictate command; it did.' -f $wait.WaitedSeconds)
+        }
+    }
 
     Invoke-Tool -FilePath $python.Path -Arguments @('-m', 'pip', 'install', '--upgrade', 'pip') | Out-Null
     $install = Invoke-Tool -FilePath $python.Path -Arguments @('-m', 'pip', 'install', '-e', "$RepoRoot[windows]")
     foreach ($line in ($install.Output -split "`r?`n")) {
         if ($line -match '^\s*(ERROR|error:)') { Write-Detail $line.Trim() }
     }
-    Assert-ExitCode -Code $install.ExitCode -Problem 'Installing dictate and the packages it needs failed.' `
-        -NextAction @"
-The usual cause is no internet connection, or a company proxy blocking
-pypi.org. Check you are online and run setup again.
-The full output from the installer is in:
-  $script:DictateLogPath
-"@
+    if ($install.ExitCode -ne 0) {
+        # What went wrong is read out of what pip printed, never assumed. This
+        # step used to blame the internet for every failure, which is what it
+        # told the product owner when Windows refused to replace a file on his
+        # own PC - and he went and checked his connection and his proxy.
+        $report = Get-InstallFailureReport -ExitCode $install.ExitCode -Output $install.Output `
+            -LogPath $script:DictateLogPath -Targets $targets
+        Write-SetupLog "install failure classified as: $($report.Kind)"
+        Stop-Setup -Problem $report.Problem -NextAction $report.NextAction
+    }
 
     $check = Invoke-Tool -FilePath $python.Path -Arguments @('-c', 'import dictate; print(dictate.__version__)')
     if ($check.ExitCode -ne 0) {
@@ -996,8 +1150,9 @@ The full installer output is in:
     Write-Ok "dictate $(Get-LastLine $check.Output) installed"
 
     # -- Make `dictate` typeable at the prompt -------------------------------
-    $scriptsDir = Get-LastLine (Invoke-Tool -FilePath $python.Path `
-            -Arguments @('-c', "import sysconfig; print(sysconfig.get_path('scripts'))")).Output
+    # Asked again rather than reused: the install above is what creates this
+    # folder on a machine that has never had dictate on it.
+    if (-not $scriptsDir) { $scriptsDir = Get-PythonScriptsDir -Python $python }
     if ($scriptsDir -and (Test-Path -LiteralPath $scriptsDir)) {
         $wanted = $scriptsDir.TrimEnd('\')
         $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')

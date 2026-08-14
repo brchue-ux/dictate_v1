@@ -1110,12 +1110,19 @@ function Get-FileResumable {
                         "and if you are on a company network or a VPN, that it is not blocking the`n" +
                         "download. Then run setup again; nothing already done is lost.")
             }
-            Stop-Setup -Problem ("The download of $Label kept stopping early. " +
-                'It got ' + (Format-Bytes $got) + ' of ' + (Format-Bytes $ExpectedBytes) + '.') `
-                -NextAction ("This is almost always the internet connection rather than your PC.`n" +
-                    "Check you are online, then run setup again - it carries on from where it`n" +
-                    "stopped rather than starting the download again.`n" +
-                    "The file it was writing is: $part")
+            # It used to say this is "almost always the internet connection
+            # rather than your PC", which is a guess about whose fault it is.
+            # What setup knows is how far it got, how many times, and what the
+            # last error was - so that is what it says.
+            Stop-Setup -Problem ("The download of $Label kept stopping early. After $MaxAttempts tries " +
+                'it had got ' + (Format-Bytes $got) + ' of ' + (Format-Bytes $ExpectedBytes) + '.' +
+                $(if ($lastError) { " The last thing that went wrong was: $lastError" } else { '' })) `
+                -NextAction ("Setup cannot tell from here whether that is this PC, the network`n" +
+                    "between here and the download site, or the site itself. Running setup`n" +
+                    "again is worth a try either way - it carries on from where it stopped`n" +
+                    "rather than starting the download again - and trying it on a different`n" +
+                    "network, or with a VPN paused, is what separates the three.`n" +
+                    "The part-finished file it was writing is: $part")
         }
 
         if ($ExpectedSha256) {
@@ -1127,10 +1134,17 @@ function Get-FileResumable {
                     Write-Note "The downloaded file arrived damaged, so it is being fetched again."
                     continue
                 }
-                Stop-Setup -Problem "$Label downloaded, but it is not the file it should be (the contents do not match the published fingerprint)." `
-                    -NextAction ("Something between here and the download site is altering the file -`n" +
-                        "usually a proxy, a VPN, or antivirus. Try again on a different network,`n" +
-                        "or pause any VPN, then run setup again.")
+                # The established fact is the mismatch, after $MaxAttempts goes.
+                # WHAT altered it is not something setup can see, so the three
+                # usual suspects are offered as things to try, not asserted.
+                Stop-Setup -Problem ("$Label downloaded $MaxAttempts times, and every time the contents " +
+                    'came out different from the fingerprint published for it. Setup will not install ' +
+                    'a file it cannot verify, so nothing was changed.') `
+                    -NextAction ("Setup cannot see what is altering it. In order of how often each`n" +
+                        "one turns out to be the answer, try: a different network, pausing any`n" +
+                        "VPN, and pausing antivirus for the download. Run setup again after`n" +
+                        "each - it starts this download afresh, and everything else already`n" +
+                        "done is kept.")
             }
         }
 
@@ -1147,6 +1161,776 @@ function Get-FileResumable {
     Stop-Setup -Problem "$Label could not be downloaded. The last thing that went wrong was: $lastError" `
         -NextAction ("Check you are online and run setup again. It resumes rather than`n" +
             "starting over, so nothing already downloaded is wasted.")
+}
+
+# ---------------------------------------------------------------------------
+# Files another program is holding open
+#
+# `pip install -e` REPLACES the console-script launcher it wrote last time -
+# Scripts\dictate.exe - and Windows will not let it while any process has that
+# file open. The product owner's install stopped there:
+#
+#     OSError: [WinError 5] Access is denied: c:\python311\scripts\dictate.exe
+#
+# The step before it had run `dictate stop --stale-only`, and that had answered
+# "dictate is not running". Both were true. `stop --stale-only` looks at the
+# instance lock and the transcription port (src/dictate/recovery.py), and
+# neither of those is a handle on a file: the lock is held by the PYTHON process
+# and vanishes the moment it dies, while dictate.exe is the separate launcher
+# process ABOVE it, and antivirus and the Windows indexer hold newly written
+# executables without being dictate at all. A process check can never answer
+# "can this file be replaced". Only asking the file can.
+#
+# So that is what these do: ask the file, wait a few seconds for a transient
+# holder to let go, and if it does not, name the holder as precisely as Windows
+# is willing to - through the Restart Manager, which is the API Windows gives
+# installers for exactly this question.
+# ---------------------------------------------------------------------------
+
+#: How long to wait for something holding an install target to let go. The
+#: comparable measurement in this project is the port: CI showed a killed
+#: process leaves the process list roughly two seconds before Windows finishes
+#: releasing its TCP port (recovery.PORT_RELEASE_TIMEOUT_S). A file handle is
+#: the same class of gap, and an antivirus scan of a freshly written executable
+#: is a little longer, so this is generous by comparison and still short enough
+#: that nobody thinks setup has hung.
+$script:FileUnlockTimeoutSeconds = 20
+
+# Set-StrictMode 2.0 is on for this file, so both of these are declared here
+# rather than sprung into existence on first use inside Add-RestartManagerType.
+$script:RestartManagerReady = $false
+$script:RestartManagerFailed = $false
+
+function Get-InnerException {
+    <# The exception a .NET call actually threw, out of the wrapper PowerShell
+       puts round it.
+
+       Calling a .NET method from PowerShell and having it throw gives back a
+       MethodInvocationException whose Message begins 'Exception calling "Open"
+       with "4" argument(s)' and whose HResult is the wrapper's, not Windows'.
+       Both halves of the report here depend on the real one. #>
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+    $ex = $ErrorRecord.Exception
+    while ($ex -and ($ex -is [System.Management.Automation.MethodInvocationException]) -and
+        $ex.InnerException) {
+        $ex = $ex.InnerException
+    }
+    return $ex
+}
+
+function Get-Win32ErrorCode {
+    <# The Windows error number inside a .NET exception, or 0 if it carries
+       none. .NET wraps them as HRESULTs of the form 0x8007xxxx, where xxxx is
+       the number Windows itself reported - 5 for access denied, 32 for a
+       sharing violation - and those two mean different things to the person
+       reading the message, so the number is kept rather than flattened. #>
+    param([Parameter(Mandatory = $false)][AllowNull()][object]$Exception)
+    if ($null -eq $Exception) { return 0 }
+    $hr = 0
+    try { $hr = [int]$Exception.HResult } catch { return 0 }
+    # HResult is a SIGNED 32-bit value and every 0x8007xxxx code has the top bit
+    # set, so it arrives negative. Widen it to 64 bits before masking: the
+    # obvious `$hr -band 0xFFFF0000` does not work, because PowerShell reads a
+    # hex literal that fits in 32 bits as a signed Int32 and 0xFFFF0000 is
+    # -65536 there. These are the same three masks written as decimals, which
+    # PowerShell reads as Int64 because they do not fit.
+    $wide = ([int64]$hr) -band 4294967295          # 0xFFFFFFFF
+    if (($wide -band 4294901760) -eq 2147942400) { # 0xFFFF0000 -eq 0x80070000
+        return [int]($wide -band 65535)            # 0xFFFF
+    }
+    return 0
+}
+
+function Test-FileReplaceable {
+    <# Can the installer replace this exact file right now?
+
+       Returns @{ Path; Replaceable; Reason; Code; Said }, where Reason is one
+       of:
+         'absent'  there is no such file, so there is nothing to be held
+         'ok'      it opened for writing, so nothing has it
+         'held'    another process has it open (a sharing violation)
+         'denied'  Windows refused the access itself (permissions, or the
+                   read-only attribute, or a filter driver saying no)
+         'unknown' something else went wrong; Said carries what
+
+       The probe asks for ReadWrite access while GRANTING ReadWrite sharing.
+       That combination is deliberate and is the least strict probe that still
+       answers the question: it fails only when some other handle is denying
+       write sharing, which is exactly the condition that stops pip. A stricter
+       probe (FileShare.None) would also fail for a harmless reader and would
+       make setup wait, and then refuse, for an install that would have worked. #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return @{ Path = $Path; Replaceable = $true; Reason = 'absent'; Code = 0; Said = '' }
+    }
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+        return @{ Path = $Path; Replaceable = $true; Reason = 'ok'; Code = 0; Said = '' }
+    } catch {
+        # One catch, and the type is read off the unwrapped exception, rather
+        # than three typed catches: whether PowerShell matches `catch
+        # [IOException]` against the inner exception of the wrapper it puts
+        # round a failed .NET call is not something this should rest on.
+        $ex = Get-InnerException $_
+        $code = Get-Win32ErrorCode $ex
+        $said = ''
+        if ($ex) { $said = $ex.Message }
+        $reason = 'unknown'
+        if ($ex -is [System.UnauthorizedAccessException]) {
+            $reason = 'denied'
+            if ($code -eq 0) { $code = 5 }
+        } elseif ($ex -is [System.IO.IOException]) {
+            $reason = 'held'
+        }
+        return @{ Path = $Path; Replaceable = $false; Reason = $reason; Code = $code; Said = $said }
+    } finally {
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
+function Test-FolderWritable {
+    <# Can anything at all be written into this folder?
+
+       This is what separates the two causes that look identical from the error
+       message alone: one file being held open by a program, and a folder the
+       account simply may not write to (a Python installed for all users under
+       C:\, with setup run without administrator rights). Setup can establish
+       which, so it does, rather than guessing in the message. #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return @{ Writable = $false; Reason = 'absent'; Said = "there is no folder at $Path" }
+    }
+    $probe = Join-Path $Path ('.dictate-write-test-' + [System.IO.Path]::GetRandomFileName())
+    try {
+        [System.IO.File]::WriteAllText($probe, 'x')
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        return @{ Writable = $true; Reason = 'ok'; Said = '' }
+    } catch {
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        $ex = Get-InnerException $_
+        $said = ''
+        if ($ex) { $said = $ex.Message }
+        return @{ Writable = $false; Reason = 'denied'; Said = $said }
+    }
+}
+
+function Add-RestartManagerType {
+    <# Compile the four Restart Manager calls, once per session.
+
+       Windows ships no command that answers "which program has this file open",
+       and Sysinternals handle.exe is not something to make an install depend on
+       - but rstrtmgr.dll is in every Windows, needs no administrator rights,
+       and exists precisely so that an installer can name what is holding a file
+       it must replace. It is what Windows Installer itself uses.
+
+       Returns $true if the type is available. Every failure here is survivable:
+       the report falls back to matching running processes by their image path,
+       and says which of the two answers it is giving. #>
+    if ($script:RestartManagerReady) { return $true }
+    if ($script:RestartManagerFailed) { return $false }
+    $source = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class DictateRestartManager
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RM_UNIQUE_PROCESS
+    {
+        public int dwProcessId;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime;
+    }
+
+    private const int CCH_RM_MAX_APP_NAME = 255;
+    private const int CCH_RM_MAX_SVC_NAME = 63;
+    private const int ERROR_MORE_DATA = 234;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct RM_PROCESS_INFO
+    {
+        public RM_UNIQUE_PROCESS Process;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = CCH_RM_MAX_APP_NAME + 1)]
+        public string strAppName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = CCH_RM_MAX_SVC_NAME + 1)]
+        public string strServiceShortName;
+        public int ApplicationType;
+        public uint AppStatus;
+        public uint TSSessionId;
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool bRestartable;
+    }
+
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    private static extern int RmStartSession(out uint pSessionHandle, int dwSessionFlags,
+        StringBuilder strSessionKey);
+
+    [DllImport("rstrtmgr.dll")]
+    private static extern int RmEndSession(uint pSessionHandle);
+
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    private static extern int RmRegisterResources(uint pSessionHandle, uint nFiles,
+        string[] rgsFilenames, uint nApplications, RM_UNIQUE_PROCESS[] rgApplications,
+        uint nServices, string[] rgsServiceNames);
+
+    [DllImport("rstrtmgr.dll")]
+    private static extern int RmGetList(uint dwSessionHandle, out uint pnProcInfoNeeded,
+        ref uint pnProcInfo, [In, Out] RM_PROCESS_INFO[] rgAffectedApps,
+        ref uint lpdwRebootReasons);
+
+    // One string per holder: "<pid>|<name as the Restart Manager describes it>".
+    // An empty array means Windows named nobody, which is a real answer and not
+    // the same as the call having failed - that throws.
+    public static string[] WhoIsUsing(string path)
+    {
+        uint session;
+        StringBuilder key = new StringBuilder(64);
+        int rc = RmStartSession(out session, 0, key);
+        if (rc != 0) { throw new InvalidOperationException("RmStartSession returned " + rc); }
+        try
+        {
+            rc = RmRegisterResources(session, 1, new string[] { path }, 0, null, 0, null);
+            if (rc != 0) { throw new InvalidOperationException("RmRegisterResources returned " + rc); }
+
+            uint needed = 0;
+            uint got = 0;
+            uint reasons = 0;
+            rc = RmGetList(session, out needed, ref got, null, ref reasons);
+            // Nobody has it: that is an answer, not a failure.
+            if (rc == 0 && needed == 0) { return new string[0]; }
+            // Anything other than "you need a bigger array" is a failure, and
+            // the caller falls back rather than reporting an empty list as if
+            // Windows had said nothing holds the file.
+            if (rc != 0 && rc != ERROR_MORE_DATA)
+            {
+                throw new InvalidOperationException("RmGetList returned " + rc);
+            }
+
+            RM_PROCESS_INFO[] info = new RM_PROCESS_INFO[needed];
+            got = needed;
+            rc = RmGetList(session, out needed, ref got, info, ref reasons);
+            if (rc != 0) { throw new InvalidOperationException("RmGetList returned " + rc); }
+            if (got > info.Length) { got = (uint)info.Length; }
+
+            List<string> found = new List<string>();
+            for (int i = 0; i < got; i++)
+            {
+                found.Add(info[i].Process.dwProcessId + "|" + (info[i].strAppName ?? ""));
+            }
+            return found.ToArray();
+        }
+        finally
+        {
+            RmEndSession(session);
+        }
+    }
+}
+'@
+    try {
+        if (-not ('DictateRestartManager' -as [type])) {
+            Add-Type -TypeDefinition $source -Language CSharp -ErrorAction Stop
+        }
+        $script:RestartManagerReady = $true
+        return $true
+    } catch {
+        Write-SetupLog "Restart Manager unavailable: $($_.Exception.Message)"
+        $script:RestartManagerFailed = $true
+        return $false
+    }
+}
+
+function Get-FileHolder {
+    <# Who has this file open, as precisely as Windows will say.
+
+       Returns an array of @{ Pid; Name; Path; Source }. Source is 'windows'
+       when the Restart Manager named it and 'image' when the fallback found a
+       running program whose own executable IS this file - a launcher like
+       Scripts\dictate.exe, which Windows keeps open for as long as it runs.
+       Nothing here is ever presented as a complete list; see
+       Get-FileLockReport, which says which of the two answers it got. #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $holders = New-Object System.Collections.Generic.List[object]
+    $full = $Path
+    try { $full = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath } catch { }
+
+    $seen = New-Object System.Collections.Generic.List[int]
+    if (Add-RestartManagerType) {
+        try {
+            foreach ($entry in [DictateRestartManager]::WhoIsUsing($full)) {
+                $parts = $entry -split '\|', 2
+                $processId = 0
+                [void][int]::TryParse($parts[0], [ref]$processId)
+                $name = ''
+                if ($parts.Count -gt 1) { $name = $parts[1] }
+                $exe = ''
+                try {
+                    $proc = Get-Process -Id $processId -ErrorAction Stop
+                    if ($proc.Path) { $exe = $proc.Path }
+                    if (-not $name) { $name = $proc.ProcessName }
+                } catch { }
+                $holders.Add(@{ Pid = $processId; Name = $name; Path = $exe; Source = 'windows' })
+                $seen.Add($processId)
+            }
+        } catch {
+            Write-SetupLog "Restart Manager could not answer for ${full}: $($_.Exception.Message)"
+        }
+    }
+
+    # Run this whether or not the Restart Manager answered, and merge - it is
+    # not only a fallback. A program whose own image this file IS - a launcher
+    # like Scripts\dictate.exe, which Windows keeps open for as long as it runs
+    # - is the holder that matters most here, and it costs one query to name it
+    # rather than rest on the Restart Manager choosing to.
+    try {
+        $running = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
+            Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $full) })
+        foreach ($proc in $running) {
+            $processId = [int]$proc.ProcessId
+            if ($seen.Contains($processId)) { continue }
+            $holders.Add(@{ Pid = $processId; Name = $proc.Name
+                Path = $proc.ExecutablePath; Source = 'image' })
+        }
+    } catch {
+        Write-SetupLog "could not scan running processes for ${full}: $($_.Exception.Message)"
+    }
+    return $holders.ToArray()
+}
+
+function Get-DictateProcessList {
+    <# Every running program that could plausibly be a copy of dictate, for the
+       "look in Task Manager" step - filled in, rather than left as a search.
+
+       Deliberately reported and never acted on: setup does not end another
+       program's process. `dictate stop` is the command for that, and it is what
+       the next action names. #>
+    $found = New-Object System.Collections.Generic.List[object]
+    try {
+        $procs = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
+            Where-Object { $_.Name -match '(?i)^(dictate|python|pythonw|whisper-server)\.exe$' })
+        foreach ($proc in $procs) {
+            $path = ''
+            if ($proc.ExecutablePath) { $path = $proc.ExecutablePath }
+            $found.Add(@{ Pid = [int]$proc.ProcessId; Name = $proc.Name; Path = $path })
+        }
+    } catch {
+        Write-SetupLog "could not list running processes: $($_.Exception.Message)"
+    }
+    return $found.ToArray()
+}
+
+function Wait-ForFilesReplaceable {
+    <# Wait for every one of these files to become replaceable, and say what
+       happened.
+
+       Returns @{ Ok; WaitedSeconds; Blocked }, where Blocked is the
+       Test-FileReplaceable result for each file still held when time ran out.
+
+       The wait exists because the most likely single explanation for "our check
+       passed and the very next operation was refused" is a holder that was on
+       its way out: a launcher process finishing after the copy it started, or
+       an antivirus scanner reading an executable that has just been written.
+       Both let go on their own within a second or two. Nothing here can tell
+       those apart from a holder that will never leave - which is why it waits
+       first and only then reports. #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Paths,
+        [int]$TimeoutSeconds = 0,
+        [double]$FirstPollSeconds = 0.25,
+        [scriptblock]$OnWaiting = $null
+    )
+    if ($TimeoutSeconds -le 0) { $TimeoutSeconds = $script:FileUnlockTimeoutSeconds }
+
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $poll = $FirstPollSeconds
+    $announced = $false
+    $blocked = @()
+    while ($true) {
+        $blocked = @($Paths | ForEach-Object { Test-FileReplaceable -Path $_ } |
+            Where-Object { -not $_.Replaceable })
+        if ($blocked.Count -eq 0) {
+            $clock.Stop()
+            return @{ Ok = $true; WaitedSeconds = $clock.Elapsed.TotalSeconds; Blocked = @() }
+        }
+        if ($clock.Elapsed.TotalSeconds -ge $TimeoutSeconds) { break }
+        if (-not $announced -and $OnWaiting) {
+            $announced = $true
+            & $OnWaiting $blocked $TimeoutSeconds
+        }
+        # Back off rather than hammering the file: a scanner that is reading it
+        # finishes sooner if nothing keeps interrupting. Clamped to what is left
+        # of the budget as well as to 2 seconds, so that a run which says "up to
+        # 20 seconds" does not then report having waited 22.
+        $left = $TimeoutSeconds - $clock.Elapsed.TotalSeconds
+        $nap = [math]::Min([math]::Min(2.0, $poll), $left)
+        if ($nap -gt 0) { Start-Sleep -Milliseconds ([int]($nap * 1000)) }
+        $poll = $poll * 2
+    }
+    $clock.Stop()
+    return @{ Ok = $false; WaitedSeconds = $clock.Elapsed.TotalSeconds; Blocked = $blocked }
+}
+
+function Get-FileLockReport {
+    <# The words for "Windows will not let the installer replace this file".
+
+       Returns @{ Problem; NextAction }. Every sentence in it is something setup
+       established: the file it could not open, the number Windows gave, whether
+       the folder itself is writable, and who Windows named as holding it. Where
+       it does not know, it says so - the failure this replaces asserted a cause
+       (the internet) that had nothing to do with the evidence. #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Blocked,
+        [double]$WaitedSeconds = 0,
+        [string]$LogPath = ''
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add('Windows would not let the installer replace a file dictate had already')
+    $lines.Add('installed, so nothing was changed.')
+    $lines.Add('')
+
+    $folders = New-Object System.Collections.Generic.List[string]
+    $anyHolderNamed = $false
+    $anyFolderUnwritable = $false
+    $anyReleased = $false
+    foreach ($item in $Blocked) {
+        $lines.Add("  $($item.Path)")
+
+        if ($item.Reason -eq 'released') {
+            # It is free NOW. Saying "it is being held" would be describing a
+            # state that has already gone, and would send him looking for
+            # something that is no longer there.
+            $anyReleased = $true
+            $lines.Add('    Whatever had this open has since let go: it is free now.')
+        } else {
+            $said = 'Windows refused'
+            if ($item.Code -eq 5) { $said = 'Windows said "Access is denied" (error 5)' }
+            elseif ($item.Code -eq 32) { $said = 'Windows said the file is in use by another program (error 32)' }
+            elseif ($item.Code -eq 33) { $said = 'Windows said part of the file is locked (error 33)' }
+            elseif ($item.Code -gt 0) { $said = "Windows refused with error $($item.Code)" }
+            $lines.Add("    $said.")
+        }
+
+        $folder = Split-Path -Parent $item.Path
+        if ($folder -and -not $folders.Contains($folder)) { $folders.Add($folder) }
+
+        $holders = @()
+        if (Test-Path -LiteralPath $item.Path -PathType Leaf) {
+            $holders = @(Get-FileHolder -Path $item.Path)
+        }
+        if ($holders.Count -gt 0) {
+            $anyHolderNamed = $true
+            $lines.Add('    Windows names this as holding it:')
+            foreach ($holder in $holders) {
+                $where = ''
+                if ($holder.Path) { $where = " - $($holder.Path)" }
+                $lines.Add("      $($holder.Name) (process $($holder.Pid))$where")
+            }
+        } elseif ($item.Reason -ne 'released') {
+            $lines.Add('    Windows would not say what is holding it.')
+        }
+    }
+
+    $allReleased = $anyReleased -and -not (@($Blocked | Where-Object { $_.Reason -ne 'released' }).Count)
+    foreach ($folder in $folders) {
+        $writable = Test-FolderWritable -Path $folder
+        $lines.Add('')
+        if ($writable.Writable -and $allReleased) {
+            $lines.Add("Setup CAN write into $folder, so this was one file being held open")
+            $lines.Add('for a moment rather than a permissions problem.')
+        } elseif ($writable.Writable) {
+            $lines.Add("Setup CAN write into $folder, so this is one file being held open")
+            $lines.Add('by a running program rather than a permissions problem.')
+        } else {
+            $anyFolderUnwritable = $true
+            $lines.Add("Setup cannot write into $folder at all, so this is a permissions")
+            $lines.Add('problem with that folder rather than a program holding one file.')
+            if ($writable.Said) { $lines.Add("Windows said: $($writable.Said)") }
+        }
+    }
+
+    if ($WaitedSeconds -gt 0) {
+        $lines.Add('')
+        $lines.Add(('Setup waited {0:N0} seconds for it to be let go, and it was not.' -f $WaitedSeconds))
+    }
+
+    # -- What to do about it -------------------------------------------------
+    $next = New-Object System.Collections.Generic.List[string]
+    if ($anyFolderUnwritable) {
+        $next.Add('This is a folder your account may not write to, so:')
+        $next.Add('')
+        $next.Add('  1. Close this window, open PowerShell again with "Run as administrator",')
+        $next.Add('     and run setup from there.')
+        $next.Add('  2. If that is not something you can do on this PC, install Python for')
+        $next.Add('     yourself rather than for all users - its Scripts folder is then')
+        $next.Add('     under your own account and needs no administrator rights.')
+    } elseif ($anyReleased) {
+        $next.Add('Nothing is holding it now, so running setup again is very likely to work,')
+        $next.Add('and it carries on from here - everything already installed, built and')
+        $next.Add('downloaded is kept:')
+        $next.Add('')
+        $next.Add('  powershell -ExecutionPolicy Bypass -File setup.ps1')
+        $next.Add('')
+        $next.Add('If it stops in the same place a second time, something is taking hold of')
+        $next.Add('that file every time setup writes it - antivirus is the usual one, and an')
+        if ($folders.Count -gt 0) {
+            $next.Add('exclusion for these folders is what settles it:')
+            foreach ($folder in $folders) { $next.Add("  $folder") }
+        } else {
+            $next.Add('exclusion for the folder named above is what settles it.')
+        }
+    } else {
+        $next.Add('Something is holding that file open. In this order:')
+        $next.Add('')
+        $next.Add('  1. Close any window that is running dictate, and ask a copy that is')
+        $next.Add('     still going to stop:')
+        $next.Add('       dictate stop')
+        $next.Add('  2. Look in Task Manager for anything called dictate, python, pythonw')
+        $next.Add('     or whisper-server, and End task on it.')
+        if ($anyHolderNamed) {
+            $next.Add('     The programs named above are the ones to look for first.')
+        } else {
+            # Windows would not name the holder, so the next best thing is the
+            # list he would otherwise be scrolling Task Manager for. Reported,
+            # never acted on: setup does not end anyone else's process.
+            $running = @(Get-DictateProcessList)
+            if ($running.Count -gt 0) {
+                $next.Add('     These are running right now:')
+                foreach ($proc in $running) {
+                    $where = ''
+                    if ($proc.Path) { $where = " - $($proc.Path)" }
+                    $next.Add("       $($proc.Name) (process $($proc.Pid))$where")
+                }
+            } else {
+                $next.Add('     Setup could not see any of those running, so it may be')
+                $next.Add('     something else entirely - step 3 is the next thing to try.')
+            }
+        }
+        if ($folders.Count -gt 0) {
+            $next.Add('  3. If you run antivirus, it may be scanning the file setup has just')
+            $next.Add('     written. Add an exclusion for these folders and try again:')
+            foreach ($folder in $folders) { $next.Add("       $folder") }
+        } else {
+            # No folder to name, so do not print a list header with nothing
+            # under it - that reads as setup having lost the answer.
+            $next.Add('  3. If you run antivirus, it may be scanning the file setup has just')
+            $next.Add('     written. Add an exclusion for the folder named above and try')
+            $next.Add('     again.')
+        }
+        $next.Add('  4. Run setup again. Everything already installed, built and downloaded')
+        $next.Add('     is kept - it carries on from here.')
+        $next.Add('')
+        $next.Add('If it happens every time and nothing above is running, restarting the PC')
+        $next.Add('clears any handle that is left, and setup will carry on afterwards.')
+    }
+    $next.Add('')
+    $next.Add('This is nothing to do with your internet connection: replacing a file that')
+    $next.Add('is already on this PC does not use the network.')
+    if ($LogPath) {
+        $next.Add('')
+        $next.Add('The full output is in:')
+        $next.Add("  $LogPath")
+    }
+
+    return @{
+        Problem    = ($lines -join [Environment]::NewLine)
+        NextAction = ($next -join [Environment]::NewLine)
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Reading a failure rather than assuming one
+# ---------------------------------------------------------------------------
+
+function Get-PipFailurePath {
+    <# The file pip named in an access-denied message, or ''. #>
+    param([string]$Output)
+    if (-not $Output) { return '' }
+    $patterns = @(
+        "(?im)\[WinError\s+(?:5|32|33)\][^:\r\n]*:\s*'?([A-Za-z]:\\[^'\r\n]+?)'?\s*$",
+        "(?im)(?:Access is denied|being used by another process)[^:\r\n]*:\s*'?([A-Za-z]:\\[^'\r\n]+?)'?\s*$"
+    )
+    foreach ($pattern in $patterns) {
+        $match = [regex]::Match($Output, $pattern)
+        if ($match.Success) { return $match.Groups[1].Value.Trim() }
+    }
+    return ''
+}
+
+function Get-PipFailureKind {
+    <# What pip's own output SHOWS went wrong. One of:
+
+         'locked'   Windows refused access to a file, or said it is in use
+         'network'  pip reported it could not reach or resolve an index
+         'disk'     pip reported it ran out of room
+         'unknown'  nothing in the output establishes a cause
+
+       'unknown' is a real answer and the most important one here. The message
+       this replaced told the product owner to check his internet connection and
+       his proxy for a Windows file-lock error, and he went and looked. A step
+       that asserts a cause it has not established costs more time than one that
+       says plainly what the tool reported. #>
+    param([string]$Output)
+    if (-not $Output) { return 'unknown' }
+
+    # Order matters: pip prints its retry banner while a proxy is refusing it,
+    # but it also prints "Access is denied" with no retries at all. The file
+    # error is the specific one, so it is tested first.
+    if ($Output -match '(?im)\[WinError\s+(?:5|32|33)\]' -or
+        $Output -match '(?im)Access is denied' -or
+        $Output -match '(?im)being used by another process' -or
+        $Output -match '(?im)^\s*PermissionError') { return 'locked' }
+
+    if ($Output -match '(?im)No space left on device' -or
+        $Output -match '(?im)There is not enough space on the disk' -or
+        $Output -match '(?im)\[Errno 28\]') { return 'disk' }
+
+    if ($Output -match '(?im)Could not find a version that satisfies' -or
+        $Output -match '(?im)No matching distribution found' -or
+        $Output -match '(?im)Temporary failure in name resolution' -or
+        $Output -match '(?im)Failed to establish a new connection' -or
+        $Output -match '(?im)getaddrinfo failed' -or
+        $Output -match '(?im)Network is unreachable' -or
+        $Output -match '(?im)Tunnel connection failed' -or
+        $Output -match '(?im)(Connection|Proxy|SSL|ReadTimeout)Error' -or
+        $Output -match '(?im)Read timed out' -or
+        $Output -match '(?im)Retrying \(Retry\(') { return 'network' }
+
+    return 'unknown'
+}
+
+function Get-ToolErrorLines {
+    <# The lines of a tool's output that actually say something went wrong, most
+       recent last, capped so the screen stays readable.
+
+       This is how a step reports a cause it could not establish: it does not
+       invent one, it shows what the tool said. #>
+    param([string]$Output, [int]$Limit = 8)
+    if (-not $Output) { return @() }
+    $interesting = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($Output -split "`r?`n")) {
+        $text = $line.TrimEnd()
+        if (-not $text.Trim()) { continue }
+        if ($text -match '(?i)(^\s*(ERROR|error:|WARNING: Ignoring|Traceback)|Error\b|failed|cannot|could not|denied|refused|No such|not found)') {
+            $interesting.Add($text.Trim())
+        }
+    }
+    if ($interesting.Count -eq 0) {
+        # Nothing matched, so show the tail rather than nothing: the last thing a
+        # tool printed before it gave up is usually the reason it did.
+        $all = @($Output -split "`r?`n" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() })
+        if ($all.Count -eq 0) { return @() }
+        $start = [math]::Max(0, $all.Count - $Limit)
+        return @($all[$start..($all.Count - 1)])
+    }
+    if ($interesting.Count -le $Limit) { return $interesting.ToArray() }
+    $keep = $interesting.ToArray()
+    return @($keep[($keep.Count - $Limit)..($keep.Count - 1)])
+}
+
+function Get-InstallFailureReport {
+    <# The words for a failed `pip install -e`, decided by what pip printed.
+
+       Returns @{ Problem; NextAction; Kind }. Kind is Get-PipFailureKind's
+       answer, so the caller and the tests can see which branch was taken.
+
+       The network branch is now reached only when pip's own output shows a
+       network failure. It used to be the only branch there was, which is how
+       "check your internet connection and proxy settings" came to be printed
+       for a file that a program on his own PC had open. #>
+    param(
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [string]$Output = '',
+        [string]$LogPath = '',
+        [string[]]$Targets = @()
+    )
+    $kind = Get-PipFailureKind -Output $Output
+
+    if ($kind -eq 'locked') {
+        $named = Get-PipFailurePath -Output $Output
+        $paths = @()
+        if ($named) { $paths = @($named) }
+        elseif ($Targets) { $paths = @($Targets) }
+        $blocked = @()
+        foreach ($path in $paths) {
+            $state = Test-FileReplaceable -Path $path
+            if ($state.Replaceable) {
+                # It is free NOW. Say that rather than describing it as held:
+                # a holder that has since let go is a different situation, and
+                # running setup again is very likely to work.
+                $state = @{ Path = $path; Replaceable = $false; Reason = 'released'
+                    Code = 0; Said = '' }
+            }
+            $blocked += $state
+        }
+        if ($blocked.Count -eq 0) {
+            $blocked = @(@{ Path = '(pip did not name the file)'; Replaceable = $false
+                    Reason = 'unknown'; Code = 5; Said = '' })
+        }
+        $report = Get-FileLockReport -Blocked $blocked -LogPath $LogPath
+        $report.Kind = 'locked'
+        $said = @(Get-ToolErrorLines -Output $Output -Limit 4)
+        if ($said.Count -gt 0) {
+            $report.Problem = $report.Problem + [Environment]::NewLine + [Environment]::NewLine +
+                'pip said:' + [Environment]::NewLine +
+                (($said | ForEach-Object { '  ' + $_ }) -join [Environment]::NewLine)
+        }
+        return $report
+    }
+
+    $where = ''
+    if ($LogPath) {
+        $where = [Environment]::NewLine + 'The full output from the installer is in:' +
+            [Environment]::NewLine + "  $LogPath"
+    }
+
+    if ($kind -eq 'network') {
+        $next = "Check this PC is online - open a web page in a browser to be sure - and if you`n" +
+            "are on a company network or a VPN, that it is not blocking pypi.org. Then run`n" +
+            "setup again; everything already installed, built and downloaded is kept." + $where
+        return @{
+            Kind    = 'network'
+            Problem = ("Installing dictate and the packages it needs failed, and pip reported " +
+                "a problem reaching pypi.org (it stopped with error code $ExitCode).")
+            NextAction = $next
+        }
+    }
+
+    if ($kind -eq 'disk') {
+        $next = "Free up some space and run setup again; everything already installed, built`n" +
+            "and downloaded is kept." + $where
+        return @{
+            Kind    = 'disk'
+            Problem = ("Installing dictate and the packages it needs failed: pip reported it " +
+                "ran out of room on the disk (it stopped with error code $ExitCode).")
+            NextAction = $next
+        }
+    }
+
+    # Nothing in the output establishes a cause. Say exactly that, and show what
+    # pip said, rather than picking the most common one and being wrong.
+    $said = @(Get-ToolErrorLines -Output $Output)
+    $problem = "Installing dictate and the packages it needs failed (it stopped with error code $ExitCode)."
+    if ($said.Count -gt 0) {
+        $problem = $problem + [Environment]::NewLine + [Environment]::NewLine +
+            'Setup does not know why. This is what pip said:' + [Environment]::NewLine +
+            (($said | ForEach-Object { '  ' + $_ }) -join [Environment]::NewLine)
+    } else {
+        $problem = $problem + [Environment]::NewLine + [Environment]::NewLine +
+            'Setup does not know why, and pip printed nothing that says.'
+    }
+    $next = "Run setup again first - some of these do not happen twice, and everything`n" +
+        "already installed, built and downloaded is kept.`n" +
+        "If it stops in the same place, report the lines above." + $where
+    return @{
+        Kind       = 'unknown'
+        Problem    = $problem
+        NextAction = $next
+    }
 }
 
 # ---------------------------------------------------------------------------
