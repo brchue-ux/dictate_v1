@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import (
-    config_edit, history as history_mod, hotkey_switch, instance,
+    config_edit, history as history_mod, hotkey_switch, instance, overlay_size,
     tray as tray_mod, update as update_mod,
 )
 from .cleanup.service import CleanupService
@@ -253,6 +253,7 @@ class Application:
             open_history=self._open_history,
             delete_history=self._delete_history,
             set_hotkey=self.change_hotkey,
+            set_caption_size=self.set_caption_size,
         )
         try:
             self.tray = factory.make_tray_icon(
@@ -293,7 +294,8 @@ class Application:
                                   hotkey_combination=self.cfg.hotkey.combination,
                                   model_resident=resident, detail=self._last_error,
                                   updating=self.update_in_flight(),
-                                  history=self.history.enabled)
+                                  history=self.history.enabled,
+                                  caption_size=self.cfg.overlay.size)
 
     def update_in_flight(self) -> bool:
         """Is the update this copy started still going?
@@ -443,6 +445,69 @@ class Application:
             self.notify("info", "The dictation history has been deleted.")
         else:
             self.notify("info", "There was no dictation history to delete.")
+
+    def set_caption_size(self, name: str) -> bool:
+        """The tray's "Caption size", and one named rung of `overlay_size`.
+
+        Two things happen and the order is the point, though it is a gentler
+        order than the hotkey's above: nothing here can be refused by Windows.
+
+        1. the size on this process's own config changes, so the *next* caption
+           panel is the new size. The overlay reads these values once per
+           appearance, so a panel on screen right now does not move or resize -
+           rule 2b of the look, and it holds here by doing nothing;
+        2. then it is written to his config file, so it is still that size
+           tomorrow.
+
+        A file that cannot be written is worth saying out loud and is not worth
+        losing the change over: he asked for smaller captions and he has them
+        for this session. Nothing here may raise - it runs on the thread that
+        owns the icon.
+        """
+        try:
+            overlay_size.multiplier(name)
+        except DictateError as exc:
+            # A menu id from a copy of the menu built by an older version.
+            log.warning("%s", exc.message)
+            return False
+        if name == self.cfg.overlay.size and not self.cfg.overlay.text_size \
+                and not self.cfg.overlay.panel_size:
+            self.notify("info", f"The captions are already {name}.")
+            return False
+        # The two overrides go with it: choosing a size is also the way back
+        # from a text size and a panel size he has pulled apart by hand.
+        self.cfg.overlay.size = name
+        self.cfg.overlay.text_size = overlay_size.FOLLOW
+        self.cfg.overlay.panel_size = overlay_size.FOLLOW
+        kept = self._persist_caption_size(name)
+        self.notify("info", f"Captions are now {name}. The next thing you say "
+                            f"will be that size."
+                            + ("" if kept else " It could not be written to your "
+                               "config file, so it lasts until dictate restarts."))
+        self._refresh_tray()
+        return True
+
+    def _persist_caption_size(self, name: str) -> bool:
+        """Write it into his `dictate.toml`, comments untouched.
+
+        Through `overlay_size`, which goes through `config_edit` - the same
+        writer the hotkey above uses, and the only one.
+        """
+        if self.cfg.source_path is None:
+            return False
+        try:
+            overlay_size.write(Path(self.cfg.source_path), {
+                "size": name,
+                "text_size": overlay_size.FOLLOW,
+                "panel_size": overlay_size.FOLLOW,
+            })
+        except DictateError as exc:
+            log.error("%s", exc.report())
+            return False
+        except Exception:
+            log.exception("could not write the caption size")
+            return False
+        return True
 
     def change_hotkey(self, combination: str) -> bool:
         """The tray's "Change the hotkey", and `dictate hotkey` for a copy that

@@ -12,6 +12,7 @@
     dictate punctuate     turn spoken marks ("comma") into marks (",")
     dictate history       open what you have dictated, or delete it
     dictate overlay       show the caption overlay with sample text
+    dictate look          how big the captions are, and what they are set in
     dictate transcribe    push a .wav through the resident GPU pass and time it
     dictate captions      measure the live-caption model on a .wav: when the
                           first words appear, how often they change, what it heard
@@ -19,7 +20,9 @@
 `doctor`, `init`, `clean` and `punctuate` all work on any platform, on purpose:
 they are the commands you want when the app will not start. So does
 `history --delete`: getting rid of a record of everything you have said must not
-depend on dictate being in a fit state to run.
+depend on dictate being in a fit state to run. `look` does too - it reads and
+writes one line of a config file - though `look --fonts` needs a desktop session
+to ask, and `overlay` needs one to show you anything.
 
 Exit codes: 0 fine, 1 something is missing, 2 an error with a remedy attached,
 3 a copy of dictate is already running (and `stop --stale-only` left it alone),
@@ -38,8 +41,8 @@ from pathlib import Path
 
 from . import (
     __version__, app as app_mod, autostart as autostart_mod, config as config_mod,
-    doctor as doctor_mod, instance as instance_mod, pipeline as pipeline_mod,
-    recovery as recovery_mod, update as update_mod,
+    doctor as doctor_mod, instance as instance_mod, overlay_size as size_mod,
+    pipeline as pipeline_mod, recovery as recovery_mod, update as update_mod,
 )
 from .errors import AlreadyRunningError, DictateError
 
@@ -412,6 +415,198 @@ def cmd_punctuate(args: argparse.Namespace) -> int:
     return 0
 
 
+#: The three things about the captions that are worth changing without opening a
+#: file, and the flag each one is behind. `size` is the one knob - it moves the
+#: type and the box together - and the other two split it when he wants the
+#: words bigger than the panel, or the panel smaller than the words.
+_LOOK_FLAGS = (("text", "text_size"), ("panel", "panel_size"), ("font", "font_family"))
+
+
+def _look_changes(cfg: config_mod.Config, args: argparse.Namespace) -> dict[str, str]:
+    """What the `--size/--text/--panel/--font` flags ask to change, if anything.
+
+    `--size` is the one knob, so it also CLEARS the two overrides: "make it all
+    medium" has to be the way back from a panel and a text size he has
+    deliberately pulled apart, or the one knob would silently do nothing.
+    """
+    changes: dict[str, str] = {}
+    text_now, panel_now = size_mod.effective(
+        cfg.overlay.size, cfg.overlay.text_size, cfg.overlay.panel_size)
+    if getattr(args, "size", None):
+        text_now = panel_now = size_mod.apply_word(args.size, cfg.overlay.size)
+        changes["size"] = text_now
+        changes["text_size"] = size_mod.FOLLOW
+        changes["panel_size"] = size_mod.FOLLOW
+    # `--size medium --text bigger` therefore means one step above medium: the
+    # flags read left to right, the way they are typed.
+    current = {"text_size": text_now, "panel_size": panel_now}
+    for flag, key in _LOOK_FLAGS:
+        value = getattr(args, flag, None)
+        if value is None:
+            continue
+        changes[key] = (value if key == "font_family"
+                        else size_mod.apply_word(value, current[key]))
+    return changes
+
+
+def _apply_changes(cfg: config_mod.Config, changes: dict[str, str]) -> None:
+    """Put `changes` into the loaded config, so a preview shows them.
+
+    Straight onto the dataclass rather than back through the file: trying a size
+    must not need write access to anything, and the overlay reads these values
+    once per appearance anyway.
+    """
+    for key, value in changes.items():
+        setattr(cfg.overlay, key, value)
+    config_mod.validate(cfg)
+
+
+def _look_summary(cfg: config_mod.Config) -> list[str]:
+    """The three lines that answer "what am I looking at, and what do I type"."""
+    text, panel = size_mod.effective(cfg.overlay.size, cfg.overlay.text_size,
+                                     cfg.overlay.panel_size)
+    both = "" if text == panel else "   (text and panel are set apart)"
+    return [
+        f"  size       {text} text, {panel} panel{both}",
+        f"  font       {cfg.overlay.font_family}, {cfg.overlay.font_size}pt at "
+        f"huge - about {size_mod.caption_px(text, cfg.overlay.font_size)}px now",
+        f"  position   {cfg.overlay.position}, {cfg.overlay.margin_px}px margin at "
+        f"huge, up to {cfg.overlay.max_width_px}px wide",
+    ]
+
+
+def _save_changes(cfg: config_mod.Config, changes: dict[str, str]) -> None:
+    """Write `changes` into his config file and say what happened."""
+    if cfg.source_path is None:
+        raise DictateError(
+            "There is no config file to write this into - dictate is running "
+            "on its built-in defaults.",
+            "Run `dictate init` to write one, then try this again.",
+        )
+    size_mod.write(Path(cfg.source_path), changes)
+    for key, value in changes.items():
+        _out(f"Kept: {key} = \"{value}\" in {cfg.source_path}")
+    # Said every time rather than only when a copy is running: the honest
+    # answer to "why has nothing changed" has to arrive before the question.
+    _out("If dictate is running, it keeps the size it started with - restart it,"
+         " or use the tray icon's Caption size menu, to see this now.")
+
+
+def _offer_to_keep(cfg: config_mod.Config, changes: dict[str, str],
+                   command: str, ask=input) -> None:
+    """Ask whether to keep what he just looked at.
+
+    The preview is the only way he can judge this, so the answer belongs
+    immediately after it rather than in a second command he has to remember.
+    Where nobody can answer - a redirected stdin, or `pythonw` with none at all
+    - it prints the one line to type instead and changes nothing.
+    """
+    try:
+        answer = ask("Keep it? [y/N] ")
+    except (EOFError, KeyboardInterrupt, OSError, RuntimeError, AttributeError):
+        _out(f"Keep it with: {command}")
+        return
+    if answer.strip().lower() in ("y", "yes"):
+        _save_changes(cfg, changes)
+    else:
+        _out(f"Left as it was. Keep it later with: {command}")
+
+
+def _keep_command(args: argparse.Namespace) -> str:
+    """The exact command that would keep what was just previewed."""
+    parts = ["dictate overlay"]
+    for flag in ("size", "text", "panel", "font"):
+        value = getattr(args, flag, None)
+        if value:
+            parts.append(f'--{flag} "{value}"' if " " in value else f"--{flag} {value}")
+    return " ".join(parts + ["--keep"])
+
+
+def _list_font_families() -> int:
+    """Every font family this machine has, which is the thing `--font` needs.
+
+    Tk is the only thing that knows: it is what draws the captions, and it is
+    also what silently substitutes a family that is not installed (see
+    `platform/fonts.py`). So the list comes from the same place the drawing
+    does, rather than from a guess about where Windows keeps fonts.
+    """
+    try:
+        import tkinter as tk  # noqa: PLC0415 - stdlib, and only wanted here
+        import tkinter.font as tkfont  # noqa: PLC0415
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            families = sorted({f for f in tkfont.families(root) if not f.startswith("@")})
+        finally:
+            root.destroy()
+    except Exception as exc:  # noqa: BLE001 - any Tk failure means the same thing
+        raise DictateError(
+            f"dictate could not ask the graphics system which fonts are "
+            f"installed: {exc}",
+            "This needs a desktop session - run it on the machine you dictate "
+            "on.",
+        ) from exc
+    for family in families:
+        _out(family)
+    _out("")
+    _out(f"{len(families)} families. Try one without keeping it: "
+         f'dictate overlay --font "Consolas"')
+    return 0
+
+
+def _add_look_flags(parser: argparse.ArgumentParser, sizes: str,
+                    positional_size: bool = False) -> None:
+    """The three controls, spelled the same way on both commands.
+
+    They are the same words in the same order everywhere - the config keys, the
+    flags, the tray items - so that knowing one place is knowing all of them.
+    """
+    if not positional_size:
+        parser.add_argument("--size", metavar="NAME",
+                            help=f"the whole panel: {sizes}, or smaller/bigger")
+    parser.add_argument("--text", metavar="NAME",
+                        help="the words only, without the panel following")
+    parser.add_argument("--panel", metavar="NAME",
+                        help="the panel only, without the words following")
+    parser.add_argument("--font", metavar="FAMILY",
+                        help='a font family, e.g. "Consolas"')
+    parser.add_argument("--fonts", action="store_true",
+                        help="list the font families this machine has, and stop")
+
+
+def cmd_look(args: argparse.Namespace) -> int:
+    """Say how the captions look, or change one thing about it.
+
+    The command the tray's two size items name, and the one to type when he
+    already knows what he wants. `dictate overlay` is the one to type when he
+    does not: it shows the result and then offers to keep it.
+    """
+    if args.fonts:
+        return _list_font_families()
+    cfg = _load_config(args)
+    changes = _look_changes(cfg, args)
+    if changes:
+        _apply_changes(cfg, changes)
+        _save_changes(cfg, changes)
+        _out("")
+    text, panel = size_mod.effective(cfg.overlay.size, cfg.overlay.text_size,
+                                     cfg.overlay.panel_size)
+    for line in _look_summary(cfg):
+        _out(line)
+    _out("")
+    for line in size_mod.ladder(text, panel, cfg.overlay.font_size):
+        _out(line)
+    _out("")
+    _out("  dictate look smaller          everything one step down")
+    _out("  dictate look medium           everything at that size")
+    _out("  dictate look --text bigger    the words only")
+    _out("  dictate look --panel small    the box only")
+    _out('  dictate look --font Consolas  a different font (--fonts lists them)')
+    _out("  dictate overlay --size small  try it on screen before keeping it")
+    return 0
+
+
 def cmd_overlay(args: argparse.Namespace) -> int:
     """Show the caption overlay with sample text, without dictating.
 
@@ -421,22 +616,35 @@ def cmd_overlay(args: argparse.Namespace) -> int:
 
     It drives the real overlay through the real interface. It is not a mock: the
     only thing standing in for the pipeline is a timer that feeds it words.
+
+    `--size`, `--text`, `--panel` and `--font` change the panel for this
+    preview only, without touching his config; `--keep` (or answering the
+    question at the end) is what writes them. That is the whole loop: look,
+    judge, keep - no editing a file and hoping.
     """
     from .platform import base, factory
     from .platform.base import OverlayState
 
+    if args.fonts:
+        return _list_font_families()
     cfg = _load_config(args)
+    changes = _look_changes(cfg, args)
+    _apply_changes(cfg, changes)
     overlay = factory.make_overlay(cfg, notify=lambda level, msg: _err(f"   {msg}"))
+    text, panel = size_mod.effective(cfg.overlay.size, cfg.overlay.text_size,
+                                     cfg.overlay.panel_size)
 
     _out("Showing the caption overlay. It appears, fills with words, holds them")
     _out("greyed while it 'thinks', clears them as the text 'lands', then fades")
     _out("out. Ctrl+C to stop early.")
     _out("")
-    _out(f"  font       {cfg.overlay.font_family} {cfg.overlay.font_size}pt")
-    _out(f"  position   {cfg.overlay.position}, {cfg.overlay.margin_px}px margin, "
-         f"{cfg.overlay.max_width_px}px wide")
+    for line in _look_summary(cfg):
+        _out(line)
     _out(f"  fade       {'off' if not cfg.overlay.fade else f'{cfg.overlay.fade_in_ms}ms in, {cfg.overlay.fade_out_ms}ms out'}")
     _out(f"  monitor    {'follows the focused window' if cfg.overlay.follow_focus else 'primary only'}")
+    _out("")
+    for line in size_mod.ladder(text, panel, cfg.overlay.font_size):
+        _out(line)
     _out("")
     if args.error:
         _out("Showing the error state, then stopping.")
@@ -487,7 +695,15 @@ def cmd_overlay(args: argparse.Namespace) -> int:
         overlay.close()
     _out("")
     _out(f"That was: {overlay.describe}")
-    _out("Everything above is in the [overlay] block of your config.")
+    if not changes:
+        _out("Change it with `dictate overlay --size smaller` (or --text, "
+             "--panel, --font); everything else is in the [overlay] block of "
+             "your config.")
+        return 0
+    if args.keep:
+        _save_changes(cfg, changes)
+    else:
+        _offer_to_keep(cfg, changes, _keep_command(args))
     return 0
 
 
@@ -679,6 +895,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="delete the whole history, now")
     p_hist.set_defaults(func=cmd_history)
 
+    sizes = ", ".join(size_mod.names())
     p_ov = sub.add_parser("overlay",
                           help="show the caption overlay with sample text, "
                                "without dictating")
@@ -690,7 +907,20 @@ def build_parser() -> argparse.ArgumentParser:
                            "`dictate captions`)")
     p_ov.add_argument("--error", action="store_true",
                       help="show the error state instead")
+    _add_look_flags(p_ov, sizes)
+    p_ov.add_argument("--keep", action="store_true",
+                      help="write what you tried into your config, without "
+                           "being asked at the end")
     p_ov.set_defaults(func=cmd_overlay)
+
+    p_look = sub.add_parser("look",
+                            help="how big the captions are and what they are "
+                                 "set in - and change it in one word")
+    p_look.add_argument("size", nargs="?",
+                        help=f"{sizes}, or smaller/bigger. Moves the words and "
+                             f"the panel together.")
+    _add_look_flags(p_look, sizes, positional_size=True)
+    p_look.set_defaults(func=cmd_look)
 
     p_tr = sub.add_parser("transcribe", help="time the GPU pass on a .wav file")
     p_tr.add_argument("wav")

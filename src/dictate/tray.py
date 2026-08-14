@@ -29,7 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
-from . import hotkey_switch
+from . import hotkey_switch, overlay_size
 from .errors import DictateError
 from .platform.hotkey_spec import describe
 
@@ -44,6 +44,11 @@ STATUS = "status"
 HISTORY = "history"
 HISTORY_DELETE = "history-delete"
 HOTKEY = "hotkey"
+SIZE = "caption-size"
+#: One key per caption size, the same shape as the hotkey's keys below and for
+#: the same reason: the Win32 side carries a string and knows nothing about it.
+SIZE_PREFIX = "caption-size="
+SIZE_OTHER = "caption-size-other"
 #: One key per offered combination: the key carries the combination itself, so
 #: the Win32 side still knows nothing but a string, and `TrayActions.invoke`
 #: is the only thing that has to read it.
@@ -111,6 +116,10 @@ class TrayState:
     #: mentions one at all: a feature he has turned off has no business being on
     #: the only surface he can see.
     history: bool = False
+    #: The caption size in force, so the two size items can stop offering a step
+    #: there is no room for. Empty when nobody has said - the items are then
+    #: offered, because doing nothing is better than hiding the control.
+    caption_size: str = ""
 
     @property
     def colour(self) -> str:
@@ -196,19 +205,52 @@ def hotkey_items(state: TrayState) -> list[MenuItem]:
     return items
 
 
+def size_items(state: TrayState) -> list[MenuItem]:
+    """The submenu under "Caption size".
+
+    A click and it is the size of the next thing he says, and it is in his
+    config file, and the tick is what tells him which one he is on. The names
+    and what each one measures are `overlay_size`; the last line is the command
+    that does the things a menu cannot - the words and the box apart, and the
+    font - greyed, because it is a thing to type rather than a thing to click.
+    """
+    current = state.caption_size or overlay_size.DEFAULT
+    items = [
+        MenuItem(SIZE_PREFIX + name,
+                 f"{name} - about {overlay_size.caption_px(name)} px text",
+                 f"dictate look {name}",
+                 checked=name == current,
+                 separator_after=name == overlay_size.names()[-1])
+        for name in overlay_size.names()
+    ]
+    items.append(MenuItem(SIZE_OTHER, "Just the words, just the box, or the font",
+                          "dictate overlay --text bigger", enabled=False))
+    return items
+
+
 def menu(state: TrayState) -> list[MenuItem]:
     """What right-clicking the icon offers.
 
-    Seven lines, in five groups: what it is doing, the two that change whether
-    it is running, the two that change which version it is, the hotkey, and the
-    log - plus two more when a dictation history is being kept. None of them
-    needs him to have worked out what went wrong first - Stop clears a stuck
-    copy as well as a healthy one, because `dictate stop` does.
+    Eight lines, in six groups: what it is doing, how big the captions are,
+    the two that change whether it is running, the two that change which
+    version it is, the hotkey, and the log - plus two more when a dictation
+    history is being kept. None of them needs him to have worked out what went
+    wrong first - Stop clears a stuck copy as well as a healthy one, because
+    `dictate stop` does.
 
-    **Change the hotkey is the only item with a submenu**, and the only one that
-    shows a current value. It is also the only one that writes to his config
-    file; `hotkey_switch` carries why it is a list of combinations rather than
-    "press the keys you want" or "here is your config file, edit it".
+    **Caption size and Change the hotkey are the two items with a submenu**, and
+    the two that show a current value. They are also the two that write to his
+    config file, through the same `config_edit`; `hotkey_switch` carries why the
+    hotkey is a list of combinations rather than "press the keys you want" or
+    "here is your config file, edit it", and `overlay_size` carries why the
+    caption size is one named ladder rather than five pixel measurements.
+
+    **Caption size is on the tray because the captions are the thing he looks
+    at** and this is the only surface a logon-started copy has: a panel that is
+    a bit too big should not require finding a terminal. The submenu moves the
+    one knob, which takes the words and the box together; splitting those two,
+    or changing the font, is a preview-and-judge job and stays in
+    `dictate overlay`, which the last line of the submenu names.
 
     **Check for updates changes nothing, ever**, which is why it is offered even
     while an update is already running: it is a report and cannot make anything
@@ -228,6 +270,8 @@ def menu(state: TrayState) -> list[MenuItem]:
     """
     items = [
         MenuItem(STATUS, status_line(state), enabled=False, separator_after=True),
+        MenuItem(SIZE, "Caption size", "dictate look",
+                 children=tuple(size_items(state)), separator_after=True),
         MenuItem(STOP, "Stop dictate", "dictate stop", default=True),
         MenuItem(RESTART, "Restart dictate", "dictate stop, dictate run",
                  separator_after=True),
@@ -259,9 +303,11 @@ class TrayActions:
     update_now: Callable[[], None]
     open_history: Callable[[], None] | None = None
     delete_history: Callable[[], None] | None = None
-    #: Takes the combination the menu item carries. The only action here that is
-    #: given anything, which is why it is not in `handlers` with the rest.
+    #: These two take what the menu item carries - a combination, a size name.
+    #: The only actions here that are given anything, which is why they are not
+    #: in `handlers` with the rest.
     set_hotkey: Callable[[str], None] | None = None
+    set_caption_size: Callable[[str], None] | None = None
     handlers: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -279,6 +325,12 @@ class TrayActions:
     def invoke(self, key: str) -> bool:
         """Run the action for `key`. False if there is nothing to run, which is
         the right answer for the status line and for a stale menu id."""
+        if key.startswith(SIZE_PREFIX):
+            name = key[len(SIZE_PREFIX):]
+            if self.set_caption_size is None or not name:
+                return False
+            self.set_caption_size(name)
+            return True
         if key.startswith(HOTKEY_PREFIX):
             combination = key[len(HOTKEY_PREFIX):]
             if self.set_hotkey is None or not combination:

@@ -12,7 +12,7 @@ import struct
 import unittest
 from pathlib import Path
 
-from dictate import tray
+from dictate import overlay_size, tray
 
 
 def state(**kwargs) -> tray.TrayState:
@@ -75,6 +75,7 @@ def actions(done: list[str]) -> tray.TrayActions:
         open_history=lambda: done.append("history"),
         delete_history=lambda: done.append("history-delete"),
         set_hotkey=lambda combination: done.append(f"hotkey:{combination}"),
+        set_caption_size=lambda name: done.append(f"size:{name}"),
     )
 
 
@@ -83,11 +84,50 @@ def hotkey_submenu(**kwargs) -> list[tray.MenuItem]:
     return list(items[tray.HOTKEY].children)
 
 
+def size_submenu(**kwargs) -> list[tray.MenuItem]:
+    items = {item.key: item for item in tray.menu(state(**kwargs))}
+    return list(items[tray.SIZE].children)
+
+
 class WhatItOffers(unittest.TestCase):
-    def test_the_menu_is_status_stop_restart_the_updates_the_hotkey_and_the_log(self):
+    def test_the_menu_is_status_size_stop_restart_updates_hotkey_and_the_log(self):
         keys = [item.key for item in tray.menu(state())]
-        self.assertEqual(keys, [tray.STATUS, tray.STOP, tray.RESTART,
+        self.assertEqual(keys, [tray.STATUS, tray.SIZE, tray.STOP, tray.RESTART,
                                 tray.CHECK, tray.UPDATE, tray.HOTKEY, tray.LOG])
+
+    def test_the_captions_can_be_resized_from_the_only_surface_there_is(self):
+        """A panel that is a bit too big must not need a terminal: this is the
+        one visible thing a copy started at logon has."""
+        items = {item.key: item for item in tray.menu(state())}
+        self.assertEqual(items[tray.SIZE].command, "dictate look")
+        self.assertFalse(items[tray.SIZE].default)
+        offered = [i.key for i in items[tray.SIZE].children]
+        self.assertEqual(offered[:-1],
+                         [tray.SIZE_PREFIX + n for n in overlay_size.names()])
+
+    def test_the_size_he_is_on_is_the_one_with_the_tick(self):
+        """The submenu is the only place that says what size the captions are,
+        which is half of what it is for."""
+        ticked = [i for i in size_submenu(caption_size="medium") if i.checked]
+        self.assertEqual([i.key for i in ticked],
+                         [tray.SIZE_PREFIX + "medium"])
+
+    def test_with_nobody_having_said_the_shipped_size_is_the_ticked_one(self):
+        ticked = [i for i in size_submenu(caption_size="") if i.checked]
+        self.assertEqual([i.key for i in ticked],
+                         [tray.SIZE_PREFIX + overlay_size.DEFAULT])
+
+    def test_each_size_says_what_it_measures_and_names_its_command(self):
+        item = {i.key: i for i in size_submenu()}[tray.SIZE_PREFIX + "compact"]
+        self.assertIn("15 px", item.label)
+        self.assertEqual(item.command, "dictate look compact")
+
+    def test_the_things_a_menu_cannot_do_are_named_rather_than_hidden(self):
+        """The words and the box apart, and the font: a preview-and-judge job,
+        so the submenu's last line points at the command that does it."""
+        last = size_submenu()[-1]
+        self.assertFalse(last.enabled)
+        self.assertIn("dictate overlay", last.command)
 
     def test_a_history_being_kept_can_be_opened_and_deleted_from_here(self):
         """The tray is the only surface a logon-started copy has, so it is
@@ -153,6 +193,22 @@ class WhatItOffers(unittest.TestCase):
             wired.invoke(item.key)
         self.assertEqual(done, ["stop", "restart", "check", "update", "log",
                                 "history", "history-delete"])
+
+    def test_a_size_chosen_from_the_submenu_reaches_the_action_with_its_name(self):
+        """Like the hotkey's, the key carries the value, so the Win32 side
+        still knows nothing but a string."""
+        done: list[str] = []
+        wired = actions(done)
+        self.assertTrue(wired.invoke(tray.SIZE_PREFIX + "medium"))
+        self.assertEqual(done, ["size:medium"])
+
+    def test_a_size_action_that_was_never_supplied_does_nothing(self):
+        bare = tray.TrayActions(stop=lambda: None, restart=lambda: None,
+                                open_log=lambda: None,
+                                check_updates=lambda: None,
+                                update_now=lambda: None)
+        self.assertFalse(bare.invoke(tray.SIZE_PREFIX + "medium"))
+        self.assertFalse(actions([]).invoke(tray.SIZE_PREFIX))
 
     def test_an_unknown_id_does_nothing_rather_than_raising(self):
         done: list[str] = []
@@ -547,6 +603,92 @@ class WhatTheAppTellsIt(unittest.TestCase):
         app.notify = lambda level, message: said.append(message)
         app._open_history()
         self.assertIn("nothing in the dictation history yet", said[0])
+
+    def test_resizing_from_the_tray_changes_the_next_panel_and_the_config(self):
+        """Both halves matter: the size this copy uses from now on, so the next
+        thing he says is the size he just asked for, and the file, so it is
+        still that size tomorrow."""
+        import tempfile
+        from pathlib import Path
+
+        from dictate import config as config_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dictate.toml"
+            path.write_text('[overlay]\nsize = "huge"\n', encoding="utf-8")
+            app = self.app()
+            app.cfg = config_mod.load(path)
+            said: list[str] = []
+            app.notify = lambda level, message: said.append(message)
+
+            self.assertTrue(app.set_caption_size("small"))
+            self.assertEqual(app.cfg.overlay.size, "small")
+            self.assertEqual(config_mod.load(path).overlay.size, "small")
+            self.assertIn("small", said[0])
+            # Nothing on screen moves: the overlay reads this once, when the
+            # next panel appears.
+            self.assertFalse(app.overlay.states)
+
+    def test_resizing_from_the_tray_puts_a_split_pair_back_together(self):
+        import tempfile
+        from pathlib import Path
+
+        from dictate import config as config_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dictate.toml"
+            path.write_text('[overlay]\nsize = "huge"\ntext_size = "small"\n',
+                            encoding="utf-8")
+            app = self.app()
+            app.cfg = config_mod.load(path)
+            app.notify = lambda level, message: None
+            app.set_caption_size("medium")
+            self.assertEqual(app.cfg.overlay.text_size, "")
+            self.assertEqual(config_mod.load(path).overlay.text_size, "")
+
+    def test_choosing_the_size_it_is_already_on_says_so_and_writes_nothing(self):
+        app = self.app()
+        said: list[str] = []
+        app.notify = lambda level, message: said.append(message)
+        app.cfg.overlay.size = "small"
+        self.assertFalse(app.set_caption_size("small"))
+        self.assertIn("already", said[0])
+
+    def test_a_size_from_an_older_menu_does_nothing_rather_than_raising(self):
+        """It runs on the thread that owns the icon, so nothing here may raise
+        - and a menu built by a version with different names is the way an
+        unknown one could arrive."""
+        app = self.app()
+        app.notify = lambda level, message: None
+        self.assertFalse(app.set_caption_size("enormous"))
+        self.assertEqual(app.cfg.overlay.size, "compact")
+
+    def test_a_config_it_cannot_write_still_resizes_for_this_session(self):
+        """He asked for smaller captions. A read-only config file is worth
+        saying out loud and is not worth refusing him over."""
+        from pathlib import Path
+
+        app = self.app()
+        said: list[str] = []
+        app.notify = lambda level, message: said.append(message)
+        app.cfg.source_path = Path("/nowhere/at/all/dictate.toml")
+        self.assertTrue(app.set_caption_size("medium"))
+        self.assertEqual(app.cfg.overlay.size, "medium")
+        self.assertIn("could not be written", said[-1])
+
+    def test_no_config_file_at_all_is_a_message_and_not_a_crash(self):
+        app = self.app()
+        said: list[str] = []
+        app.notify = lambda level, message: said.append(message)
+        app.cfg.source_path = None
+        self.assertTrue(app.set_caption_size("medium"))
+        self.assertEqual(app.cfg.overlay.size, "medium")
+        self.assertIn("could not be written", said[-1])
+
+    def test_the_menu_shows_the_size_the_running_copy_is_using(self):
+        app = self.app()
+        app.cfg.overlay.size = "small"
+        self.assertEqual(app._tray_state().caption_size, "small")
 
     def test_restart_from_the_tray_shuts_down_first_and_says_so(self):
         from dictate.app import EXIT_RESTART
