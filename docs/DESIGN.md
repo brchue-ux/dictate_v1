@@ -276,6 +276,7 @@ absolute times are from a loaded box, the comparison is what is being claimed):
 | LibriSpeech clip, 16.7 s | first words 1.12 s, every 0.32 s — ends `…A BLESSED SOUL IN HE` | first words 0.93 s, every 0.16 s — ends `…a blessed soul in heaven` |
 | `jfk.wav` + noise at 20 / 10 / 5 dB SNR | three more errors appear, and `ASK` is lost entirely | identical and complete at all three |
 | cost, warm, interleaved ×5 | RTF **0.051** | RTF **0.175** — 3.4×, still 5.7× faster than speech |
+| cost on a GitHub Windows runner (`dictate captions`, in CI) | not measured there | RTF **0.582** |
 
 Two things follow, and they are the two halves of what he reported. The words are
 right because the replacement's training set includes Fisher and Switchboard —
@@ -283,6 +284,12 @@ conversational telephone speech — rather than read audiobooks only. And it is
 never a word behind at the moment he lets go, which the old model always was:
 that trailing word is what he was left looking at while the GPU worked, now that
 the caption stays on screen until the text lands.
+
+That last row is the honest ceiling and the reason the drop counter above exists:
+a shared, throttled CI VM leaves less than half the budget spare. His 5800X3D is
+nothing like that machine, but nobody here can prove it — so if the caption
+thread ever does fall behind on his, the message at the release says so, and the
+old model is still one config line away at a fifth of the cost.
 
 It is **NVIDIA NeMo `stt_en_fastconformer_hybrid_large_streaming_80ms`**, int8,
 exported to ONNX by the sherpa-onnx project, CC-BY-4.0, English only: a 98 MB
