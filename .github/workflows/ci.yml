@@ -789,15 +789,18 @@ jobs:
           $scripts = & python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
           $exe = Join-Path $scripts 'dictate.exe'
           if (-not (Test-Path -LiteralPath $exe)) { throw "pip installed no launcher at $exe" }
+          # Deliberately NOT handed on through GITHUB_ENV: Windows PowerShell
+          # 5.1 writes a byte order mark, and the next two steps can ask the
+          # same question for themselves in one line.
           Write-Host "the file the next two steps hold open: $exe"
-          "DICTATE_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: A holder that never lets go stops the install, and it says what is holding it
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
           . .\scripts\setup-lib.ps1
-          $exe = $env:DICTATE_EXE
+          $exe = Join-Path (& python -c "import sysconfig; print(sysconfig.get_path('scripts'))") 'dictate.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "there is no launcher at $exe to hold" }
           $holder = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden `
             -ArgumentList @('-NoProfile', '-Command',
               "`$h = [IO.File]::Open('$exe','Open','Read','Read'); Start-Sleep -Seconds 300")
@@ -843,7 +846,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           . .\scripts\setup-lib.ps1
-          $exe = $env:DICTATE_EXE
+          $exe = Join-Path (& python -c "import sysconfig; print(sysconfig.get_path('scripts'))") 'dictate.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "there is no launcher at $exe to hold" }
           $sentinel = Join-Path $env:RUNNER_TEMP 'let-go-now'
           Remove-Item -LiteralPath $sentinel -Force -ErrorAction SilentlyContinue
           # A holder that lets go on a signal, so the release really does land
