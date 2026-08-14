@@ -20,8 +20,8 @@
 #                a supervised child process is ended by Windows when its parent
 #                is killed outright, which is what makes the orphaned
 #                whisper-server impossible; and `dictate update` really fetches
-#                THIS private repository over the GitHub CLI and replaces a real
-#                editable install with what came back.
+#                THIS repository over the GitHub CLI and replaces a real editable
+#                install with what came back.
 #
 #   NOT PROVED   anything about the mouse trigger's hook. A runner has no mouse
 #                and nobody to press one, so `platform/windows/mouse.py` - the
@@ -558,21 +558,18 @@ jobs:
 
   # =========================================================================
   update:
-    name: dictate update (fetches this private repo for real, on Windows)
-    # A fork's pull request has neither this branch nor a token that can read a
-    # private repository, so the job would fail for a reason that is not a fault.
+    name: dictate update (fetches this repo for real, on Windows)
+    # A fork's pull request does not run this real-repository integration job.
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-latest
     timeout-minutes: 15
     env:
-      # This is what stands in for his sign-in, and it is the ONLY part of the
-      # authentication this can exercise: `gh` reads a token from the
+      # This is what stands in for his sign-in: `gh` reads a token from the
       # environment here, where on his PC it reads the one Windows remembers
-      # after `gh auth login`. Everything past that point - the API calls, the
-      # source archive, the private repository being visible at all - is
-      # identical, and is genuinely proved below.
+      # after `gh auth login`. The API calls, source archive and install update
+      # that follow are genuinely proved below.
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -646,7 +643,7 @@ jobs:
           "UPDATE_EXPECT=$expect"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           exit 0
 
-      - name: It fetches this private repository and installs what came back
+      - name: It fetches this repository and installs what came back
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -782,7 +779,7 @@ jobs:
           @'
           ### dictate update
 
-          **Proved on real Windows, against this private repository:** the
+          **Proved on real Windows, against this repository:** the
           GitHub CLI reads it, the source archive for a specific revision comes
           back and unpacks, and a real editable install is replaced with what
           came back - a file behind the current source is brought forward, a
