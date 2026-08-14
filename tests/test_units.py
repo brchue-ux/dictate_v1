@@ -177,15 +177,32 @@ class InjectionPlan(unittest.TestCase):
         self.assertEqual(events[2].code, 0xDE00)
 
     def test_newline_is_a_return_keypress_not_a_unicode_character(self):
-        events = plan_text("\n")
+        events = plan_text("\n", allow_return=True)
         self.assertEqual([e.kind for e in events], ["vk", "vk"])
         self.assertEqual(events[0].code, 0x0D)
 
     def test_crlf_is_one_return_not_two(self):
-        self.assertEqual(len(plan_text("\r\n")), 2)
+        self.assertEqual(len(plan_text("\r\n", allow_return=True)), 2)
 
     def test_tab_is_a_tab_key(self):
-        self.assertEqual(plan_text("\t")[0].code, 0x09)
+        self.assertEqual(plan_text("\t", allow_return=True)[0].code, 0x09)
+
+    def test_by_default_nothing_planned_can_press_a_key(self):
+        """The default is not "a Return is unlikely", it is "there is no Return
+        in the plan". A newline that reached here from anywhere - Whisper, a
+        rule he wrote, a stage nobody has thought of - is a space."""
+        for text in ("a\nb", "a\r\nb", "a\tb", "a b", "a\vb"):
+            with self.subTest(text=text):
+                events = plan_text(text)
+                self.assertEqual([e.kind for e in events],
+                                 ["unicode"] * len(events))
+                self.assertNotIn(0x0D, [e.code for e in events])
+                self.assertNotIn(0x09, [e.code for e in events])
+
+    def test_the_line_break_becomes_a_space_rather_than_disappearing(self):
+        """Flattened, not dropped: "one.\\ntwo." is still two sentences."""
+        events = plan_text("a\nb")
+        self.assertEqual("".join(chr(e.code) for e in events if not e.up), "a b")
 
     def test_empty_text_plans_nothing(self):
         self.assertEqual(plan_text(""), [])

@@ -166,6 +166,55 @@ class HistoryCommand(unittest.TestCase):
         self.assertIn("nothing new is being kept", out)
 
 
+class HotkeyCommand(unittest.TestCase):
+    """`dictate hotkey` is the typed half of the tray's own item, and it is what
+    anyone without a notification area has. It writes a config file, so what is
+    checked here is that it writes a config file that still loads."""
+
+    def config(self, tmp: str) -> Path:
+        path = Path(tmp) / "dictate.toml"
+        path.write_bytes((REPO / "config" / "dictate.example.toml").read_bytes())
+        return path
+
+    def test_it_says_what_the_hotkey_is_and_what_is_on_offer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, _ = run(["--config", str(self.config(tmp)), "hotkey"])
+        self.assertEqual(code, 0)
+        self.assertIn("Ctrl + Alt + Space", out)
+        self.assertIn("dictate hotkey", out)
+
+    def test_it_sets_one_and_the_config_still_loads(self):
+        from dictate import config as config_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.config(tmp)
+            code, out, _ = run(["--config", str(path), "hotkey", "ctrl-shift-d"])
+            self.assertEqual(code, 0)
+            self.assertIn("Ctrl + Shift + D", out)
+            self.assertEqual(config_mod.load(path).hotkey.combination,
+                             "control + shift + d")
+
+    def test_a_combination_that_cannot_work_is_refused_before_it_is_written(self):
+        """A config naming a hotkey that does not work is a dictate that will
+        not start, and the way out of it is the text editor he will not open."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.config(tmp)
+            before = path.read_bytes()
+            code, _, err = run(["--config", str(path), "hotkey", "ctrl + alt"])
+        self.assertEqual(code, 2)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("modifier", err)
+        self.assertEqual(path.read_bytes() if path.exists() else before, before)
+
+    def test_with_no_config_file_it_says_which_command_makes_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(cli.config_mod, "default_config_path",
+                                   return_value=Path(tmp) / "nothing.toml"):
+                code, _, err = run(["hotkey", "ctrl + alt + d"])
+        self.assertEqual(code, 2)
+        self.assertIn("dictate init", err)
+
+
 class Parser(unittest.TestCase):
     def test_no_arguments_prints_help_and_succeeds(self):
         code, out, _ = run([])

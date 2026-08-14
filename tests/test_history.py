@@ -70,9 +70,37 @@ class WhatItKeeps(HistoryTestCase):
     def test_nothing_else_about_the_dictation_is_recorded(self):
         """Deliberate: how long transcription took is a developer's question
         and is already in the log, and where the text was pasted would make
-        this a record of his day rather than of his words."""
+        this a record of his day rather than of his words.
+
+        `returns` earns its place on the other side of that line: it is not
+        about the dictation, it is about what pasting it DID - the one thing in
+        a paste that can run something."""
         fields = {f for f in Entry.__dataclass_fields__}
-        self.assertEqual(fields, {"when", "spoke_s", "text", "raw"})
+        self.assertEqual(fields, {"when", "spoke_s", "text", "raw", "returns"})
+
+    def test_a_dictation_that_pressed_return_says_so(self):
+        """The stray Enter he did not notice at the time. If one is ever sent
+        again - which takes `[paste] line_breaks = "return"` - the entry that
+        sent it says so, so he can find out afterwards which one it was."""
+        entry = Entry.of("dir\nls", returns=1, when=NOON)
+        rendered = entry.render()
+        self.assertIn("Return", rendered)
+        self.assertIn("submits", rendered)
+        self.assertIn("line_breaks", rendered)
+
+    def test_and_says_how_many(self):
+        self.assertIn("3 times", Entry.of("a", returns=3, when=NOON).render())
+        self.assertIn("once", Entry.of("a", returns=1, when=NOON).render())
+
+    def test_an_ordinary_dictation_says_nothing_about_return(self):
+        """Which is every dictation, by default. A line that appeared on all of
+        them would say nothing at all."""
+        self.assertNotIn("Return", Entry.of("Hello world.", when=NOON).render())
+
+    def test_the_store_passes_it_through(self):
+        store = self.store()
+        store.record("dir\nls", returns=1)
+        self.assertIn("Return", self.read())
 
     def test_an_empty_dictation_is_not_an_entry(self):
         store = self.store()

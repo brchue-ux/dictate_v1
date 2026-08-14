@@ -63,6 +63,10 @@ LR_LOADFROMFILE = 0x0010
 LR_DEFAULTSIZE = 0x0040
 
 MF_STRING, MF_SEPARATOR, MF_GRAYED, MF_DISABLED = 0x0000, 0x0800, 0x0001, 0x0002
+#: A submenu hangs off an item with MF_POPUP, and its handle goes where the
+#: command id would. `DestroyMenu` on the menu it is attached to destroys it
+#: too, which is why nothing here keeps a list of them.
+MF_POPUP, MF_CHECKED = 0x0010, 0x0008
 TPM_RIGHTBUTTON, TPM_RETURNCMD = 0x0002, 0x0100
 
 #: The window this owns is an ordinary top-level window that is simply never
@@ -179,8 +183,8 @@ class WindowsTrayIcon:
 
     @property
     def describe(self) -> str:
-        return ("an icon in the notification area, with stop, restart and the "
-                "update commands on it")
+        return ("an icon in the notification area, with stop, restart, the "
+                "update commands and the hotkey on it")
 
     # -- the thread that owns the window ---------------------------------
 
@@ -370,6 +374,31 @@ class WindowsTrayIcon:
         if event in (WM_RBUTTONUP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_LBUTTONDBLCLK):
             self._show_menu()
 
+    def _append(self, handle, items) -> None:
+        """Fill a popup menu, submenus and all.
+
+        Command ids are handed out as the items are walked, so a submenu's items
+        get ids of their own and `TrackPopupMenu` returns whichever was chosen,
+        at whatever depth. The submenu handle goes in the id's place under
+        MF_POPUP and is destroyed with its parent.
+        """
+        for item in items:
+            if item.children:
+                submenu = self.user32.CreatePopupMenu()
+                if submenu:
+                    self._append(submenu, item.children)
+                    self.user32.AppendMenuW(handle, MF_POPUP | MF_STRING,
+                                            submenu, item.text)
+            else:
+                command = _FIRST_COMMAND + len(self._commands)
+                self._commands[command] = item.key
+                flags = MF_STRING
+                flags |= 0 if item.enabled else MF_GRAYED | MF_DISABLED
+                flags |= MF_CHECKED if item.checked else 0
+                self.user32.AppendMenuW(handle, flags, command, item.text)
+            if item.separator_after:
+                self.user32.AppendMenuW(handle, MF_SEPARATOR, 0, None)
+
     def _show_menu(self) -> None:
         with self._lock:
             state = self._state
@@ -380,13 +409,7 @@ class WindowsTrayIcon:
         self._commands = {}
         chosen = 0
         try:
-            for index, item in enumerate(items):
-                command = _FIRST_COMMAND + index
-                self._commands[command] = item.key
-                flags = MF_STRING | (0 if item.enabled else MF_GRAYED | MF_DISABLED)
-                self.user32.AppendMenuW(handle, flags, command, item.text)
-                if item.separator_after:
-                    self.user32.AppendMenuW(handle, MF_SEPARATOR, 0, None)
+            self._append(handle, items)
             point = wintypes.POINT()
             self.user32.GetCursorPos(ctypes.byref(point))
             # Documented requirement: without this the menu does not close when
