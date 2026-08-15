@@ -38,6 +38,18 @@ class HeIsStillWhereHeStarted(unittest.TestCase):
         self.assertEqual(delivery.decide(TERMINAL, TERMINAL, target_exists=True).action,
                          delivery.DELIVER)
 
+    def test_a_recycled_handle_owned_by_another_process_is_not_the_target(self):
+        captured = TargetWindow(11, "old title", "terminal.exe", process_id=40)
+        recycled = TargetWindow(11, "new title", "browser.exe", process_id=41)
+        d = delivery.decide(captured, recycled, target_exists=False)
+        self.assertEqual(d.action, delivery.HOLD)
+        self.assertEqual(d.reason, delivery.CLOSED)
+
+    def test_an_unreadable_pid_keeps_the_handle_only_answer(self):
+        captured = TargetWindow(11, "old title", "terminal.exe", process_id=40)
+        unreadable = TargetWindow(11, "new title", "", process_id=0)
+        self.assertTrue(delivery.same_window(captured, unreadable))
+
 
 class AnUnknownIsNeverTreatedAsAChange(unittest.TestCase):
     """"Nothing may report a healthy system as broken" applies to the one thing
@@ -62,10 +74,11 @@ class HeMovedWhileHeWasSpeaking(unittest.TestCase):
         self.assertEqual(d.reason, delivery.MOVED)
         self.assertFalse(d.pastes)
 
-    def test_restore_mode_brings_the_window_he_started_in_back(self):
+    def test_restore_mode_waits_for_the_window_he_started_in(self):
         d = delivery.decide(TERMINAL, BROWSER, mode=delivery.RESTORE_MODE)
-        self.assertEqual(d.action, delivery.RESTORE)
-        self.assertTrue(d.pastes)
+        self.assertEqual(d.action, delivery.DEFER)
+        self.assertTrue(d.waits)
+        self.assertFalse(d.pastes)
 
     def test_there_is_no_mode_that_pastes_into_the_window_he_moved_to(self):
         """The one behaviour that is not on offer, at any setting. Text arriving
@@ -76,16 +89,15 @@ class HeMovedWhileHeWasSpeaking(unittest.TestCase):
                 with self.subTest(mode=mode, restore_focus=restore):
                     d = delivery.decide(TERMINAL, BROWSER, mode=mode,
                                         restore_focus=restore)
-                    self.assertIn(d.action, (delivery.HOLD, delivery.RESTORE))
-                    # RESTORE pastes into the CAPTURED window, never `focused`.
+                    self.assertIn(d.action, (delivery.HOLD, delivery.DEFER))
+                    # DEFER waits for the CAPTURED window, never `focused`.
                     self.assertNotIn(str(BROWSER.handle), d.action)
 
-    def test_restore_without_permission_to_raise_a_window_holds(self):
-        """`config.validate` refuses that pair, so this is the belt: restoring
-        means raising, and doing the other half instead is not an option."""
+    def test_restore_never_depends_on_permission_to_raise_a_window(self):
+        """The historical key remains valid, but this route never raises."""
         d = delivery.decide(TERMINAL, BROWSER, mode=delivery.RESTORE_MODE,
                             restore_focus=False)
-        self.assertEqual(d.action, delivery.HOLD)
+        self.assertEqual(d.action, delivery.DEFER)
 
 
 class TheWindowClosedWhileHeWasSpeaking(unittest.TestCase):
@@ -126,11 +138,22 @@ class WhatHeIsTold(unittest.TestCase):
         self.assertIn("Windows PowerShell", message)
         self.assertIn("Firefox", message)
 
-    def test_it_says_how_to_get_the_old_behaviour_back(self):
+    def test_it_says_how_to_wait_for_the_original_window(self):
         message = delivery.held_message(delivery.MOVED, target=TERMINAL,
                                         focused=BROWSER, on_clipboard=True)
         self.assertIn("on_focus_change", message)
         self.assertIn("restore", message)
+        self.assertIn("without bringing it to the front", message)
+
+    def test_waiting_names_the_target_and_says_the_foreground_stays_put(self):
+        message = delivery.waiting_message(
+            TERMINAL, BROWSER, on_clipboard=True, in_history=True)
+        self.assertIn("Waiting to paste", message)
+        self.assertIn("Windows PowerShell", message)
+        self.assertIn("Firefox", message)
+        self.assertIn("stays in front", message)
+        self.assertIn("Ctrl+V", message)
+        self.assertIn("Starting another dictation", message)
 
     def test_a_closed_window_is_not_blamed_on_him(self):
         message = delivery.held_message(delivery.CLOSED, target=TERMINAL,
@@ -152,7 +175,8 @@ class WhatHeIsTold(unittest.TestCase):
                                         focused=BROWSER, on_clipboard=False,
                                         in_history=False)
         self.assertNotIn("Ctrl+V", message)
-        self.assertIn("could not keep a copy", message)
+        self.assertIn("could not keep a recoverable copy", message)
+        self.assertNotIn("only in the log", message)
 
     def test_a_half_finished_paste_says_to_look_before_pasting_again(self):
         """The one way this change could paste a dictation twice: some of it

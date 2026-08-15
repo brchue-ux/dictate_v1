@@ -58,7 +58,7 @@ import os
 import re
 import textwrap
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import instance
@@ -152,8 +152,23 @@ class Entry:
         return (f"dictate pressed Return {self.returns} times while pasting this"
                 if many else "dictate pressed Return once while pasting this") + \
             (" - in a terminal or a chat box that submits. Set [paste] "
-             'line_breaks = "space" in your dictate.toml to have line breaks '
+            'line_breaks = "space" in your dictate.toml to have line breaks '
              "pasted as a space instead.")
+
+
+@dataclass(frozen=True)
+class HeldReceipt:
+    """The exact history entry a deferred delivery may later complete.
+
+    The history is intentionally human-readable rather than a database, so the
+    receipt keeps the exact rendered block which was written. A successful
+    deferred paste can replace that one block atomically with the same entry
+    marked delivered; if it cannot find the block, it leaves the file alone and
+    reports failure instead of editing a similar-looking dictation.
+    """
+
+    entry: Entry
+    rendered: str
 
 
 def _wrap(text: str, *, first: str = "") -> str:
@@ -252,20 +267,64 @@ class HistoryStore:
         a held dictation is then on the clipboard and nowhere else, and the
         message he is shown says exactly that.
         """
-        if not self.enabled or not text.strip():
-            return False
+        if delivered:
+            return self._record_entry(Entry.of(
+                text, raw=raw, spoke_s=spoke_s, returns=returns,
+                delivered=True)) is not None
+        return self.record_held(text, raw=raw, spoke_s=spoke_s,
+                                returns=returns) is not None
+
+    def record_held(self, text: str, *, raw: str = "", spoke_s: float = 0.0,
+                    returns: int = 0) -> HeldReceipt | None:
+        """Record text which has not landed, and return how to complete it.
+
+        The receipt is process-local; the file remains ordinary readable text.
+        If the process ends before a deferred paste succeeds, the entry stays
+        marked not pasted, which is the conservative and recoverable answer.
+        """
         entry = Entry.of(text, raw=raw, spoke_s=spoke_s, returns=returns,
-                         delivered=delivered)
+                         delivered=False)
+        rendered = self._record_entry(entry)
+        return HeldReceipt(entry, rendered) if rendered is not None else None
+
+    def mark_delivered(self, receipt: HeldReceipt, *, returns: int = 0) -> bool:
+        """Atomically mark one previously held entry as delivered.
+
+        A missing exact block is not guessed at. The text did land, but an
+        inaccurate history rewrite would turn one success into a second fault;
+        the delivery log remains the authoritative evidence in that rare case.
+        """
+        if not self.enabled:
+            return False
+        try:
+            raw = self._read()
+            if receipt.rendered not in raw:
+                log.warning("could not mark a deferred dictation delivered: "
+                            "its exact history entry is no longer present")
+                return False
+            delivered = replace(receipt.entry, delivered=True,
+                                returns=max(0, returns)).render()
+            self._write(raw.replace(receipt.rendered, delivered, 1))
+        except OSError as exc:
+            self._complain(f"dictate could not update the dictation history at "
+                           f"{self.path}: {exc}")
+            return False
+        return True
+
+    def _record_entry(self, entry: Entry) -> str | None:
+        if not self.enabled or not entry.text.strip():
+            return None
+        rendered = entry.render()
         try:
             existing = entries_in(self._read())
             self._write(header(self.keep)
-                        + entry.render()
+                        + rendered
                         + "".join(existing[:max(0, self.keep - 1)]))
         except OSError as exc:
             self._complain(f"dictate could not write the dictation history at "
                            f"{self.path}: {exc}")
-            return False
-        return True
+            return None
+        return rendered
 
     def count(self) -> int:
         """How many dictations are in the file right now."""

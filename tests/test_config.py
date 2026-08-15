@@ -187,6 +187,13 @@ class Ranges(unittest.TestCase):
             config_mod.from_mapping({"paste": {"method": "telepathy"}})
         self.assertIn("sendinput", ctx.exception.remedy)
 
+    def test_deferred_restore_does_not_require_permission_to_raise_windows(self):
+        cfg = config_mod.from_mapping({
+            "paste": {"on_focus_change": "restore", "restore_focus": False},
+        })
+        self.assertEqual(cfg.paste.on_focus_change, "restore")
+        self.assertFalse(cfg.paste.restore_focus)
+
     def test_bad_overlay_position_lists_the_options(self):
         with self.assertRaises(ConfigError) as ctx:
             config_mod.from_mapping({"overlay": {"position": "middle"}})

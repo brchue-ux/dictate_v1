@@ -37,7 +37,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import (
-    autostart as autostart_mod, config_edit, history as history_mod,
+    autostart as autostart_mod, config_edit, deferred as deferred_mod,
+    history as history_mod,
     hotkey_switch, instance, overlay_size, tray as tray_mod,
     update as update_mod,
 )
@@ -148,6 +149,19 @@ class Application:
         #: anything leaves this copy running, and he must be able to try again.
         self._update = None
 
+        # Restore mode never restores foreground now. This owner keeps one
+        # finished batch result, watches for the user to return to its captured
+        # window, and sends through the same one-worker lane as transcription so
+        # two text deliveries can never overlap.
+        self.deferred = deferred_mod.DeferredDelivery(
+            windows=self.tracker,
+            injector=self.injector,
+            overlay=self.overlay,
+            history=self.history,
+            submit=self._submit,
+            notify=self.notify,
+        )
+
         self.pipeline = Pipeline(
             batch=self.batch,
             cleaner=self.cleaner,
@@ -168,6 +182,8 @@ class Application:
             on_focus_change=cfg.paste.on_focus_change,
             restore_focus=cfg.paste.restore_focus,
             hold_to_clipboard=cfg.paste.hold_to_clipboard,
+            begin_deferred=self.deferred.begin_utterance,
+            defer_delivery=self.deferred.defer,
             submit=self._submit,
             notify=self.notify,
             record=self.history.record,
@@ -833,6 +849,13 @@ class Application:
                     instance.clear_stop_request()
                     self.overlay.close()  # ends run_forever, which triggers stop()
                     return
+                # The same slow, read-only watch notices when the user has put
+                # a deferred destination in front again. Delivery itself is
+                # submitted to the one finalise worker and re-checks foreground
+                # immediately before sending; this loop never types.
+                deferred = getattr(self, "deferred", None)
+                if deferred is not None:
+                    deferred.poll()
                 # The same tick keeps the tray honest about the two things it
                 # cannot be told about: the model being released after an idle
                 # spell, which nothing else in this process announces, and
@@ -887,6 +910,7 @@ class Application:
         for step, fn in (
             ("hotkey listener", self.hotkey.stop),
             ("microphone", self.audio.close),
+            ("deferred delivery", self.deferred.close),
             ("pipeline", self.pipeline.close),
             # cancel_futures drops work that has not started; the running job
             # is allowed to complete.

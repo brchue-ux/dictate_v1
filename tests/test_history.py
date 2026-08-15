@@ -112,6 +112,24 @@ class WhatItKeeps(HistoryTestCase):
         self.assertFalse(store.record("   "))
         self.assertFalse(self.path.exists())
 
+    def test_a_deferred_delivery_changes_its_exact_held_entry_to_delivered(self):
+        store = self.store()
+        receipt = store.record_held("Words which are waiting.", spoke_s=2.0)
+        self.assertIsNotNone(receipt)
+        self.assertIn("did not paste", self.read())
+
+        self.assertTrue(store.mark_delivered(receipt))
+        self.assertIn("Words which are waiting.", self.read())
+        self.assertNotIn("did not paste", self.read())
+        self.assertEqual(store.count(), 1)
+
+    def test_a_missing_receipt_is_not_guessed_at(self):
+        store = self.store()
+        receipt = store.record_held("The first version.")
+        self.path.write_text(history_mod.header(200), encoding="utf-8")
+        self.assertFalse(store.mark_delivered(receipt))
+        self.assertNotIn("The first version.", self.read())
+
 
 class WhatItLooksLike(HistoryTestCase):
     def test_the_newest_dictation_is_the_first_thing_he_sees(self):

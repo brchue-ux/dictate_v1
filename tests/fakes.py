@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import threading
 
+from dictate.errors import TargetNotForegroundError
 from dictate.platform.base import OverlayState, TargetWindow
 
 
@@ -137,11 +138,20 @@ class FakeInjector:
         #: Set to make the clipboard refuse, which is the case where dictate has
         #: to say the words are only in the history.
         self.clipboard_fails = False
+        #: Calls which required the captured target to remain foreground. The
+        #: deferred route always does; the ordinary route never needs to.
+        self.required_foreground: list[bool] = []
 
-    def send(self, text: str, target: TargetWindow | None) -> None:
+    def send(self, text: str, target: TargetWindow | None, *,
+             require_target_foreground: bool = False,
+             still_allowed=None) -> int:
+        if still_allowed is not None and not still_allowed():
+            raise TargetNotForegroundError("automatic wait ended")
         if self.error:
             raise self.error
         self.sent.append((text, target))
+        self.required_foreground.append(require_target_foreground)
+        return 0
 
     def to_clipboard(self, text: str) -> bool:
         if self.clipboard_fails:
@@ -183,7 +193,13 @@ class FakeWindows:
     def exists(self, target: TargetWindow) -> bool:
         if self.raise_on_exists:
             raise self.raise_on_exists
-        return target.handle not in self.closed
+        if target.handle in self.closed:
+            return False
+        current = self.window
+        if current is not None and current.handle == target.handle \
+                and target.process_id and current.process_id:
+            return target.process_id == current.process_id
+        return True
 
 
 class FakeOverlay:

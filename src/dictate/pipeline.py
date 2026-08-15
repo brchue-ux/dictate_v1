@@ -19,10 +19,12 @@
                        │            the screen is cleared and says "pasted" -
                        │            which is the moment the words he was
                        │            reading go
-                       └── no  ──►  paste NOWHERE. The words go on the
-                                    clipboard and into the history, and the
-                                    panel says so. Nothing is ever typed into
-                                    a window he did not dictate into.
+                       └── no  ──►  default: paste NOWHERE; keep the words
+                                    restore mode: wait until the captured
+                                    window is foreground again, then use the
+                                    ordinary paste without raising it
+                                    Either way, nothing is ever typed into a
+                                    window he did not dictate into.
 
 `clean` may only delete words; `punctuate` turns a spoken "comma" into ",". They
 are separate stages in that order on purpose - see `_punctuate`.
@@ -63,7 +65,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from . import delivery
+from . import deferred as deferred_mod, delivery
 from .audio.buffer import UtteranceBuffer
 from .cleanup.engine import CleanResult
 from .errors import DictateError, InjectionError
@@ -92,6 +94,9 @@ class Utterance:
     sample_rate: int
     target: TargetWindow | None
     duration_s: float
+    #: Which automatic-wait generation owned this press. A later hotkey press
+    #: invalidates it even if this utterance is still in the finalise worker.
+    delivery_generation: int = 0
     overflowed: bool = False
     #: Audio callbacks in which the OS said it had thrown input audio away
     #: before dictate saw it. Non-zero means this recording has holes in it,
@@ -147,6 +152,8 @@ class Pipeline:
         on_focus_change: str = delivery.HOLD_MODE,
         restore_focus: bool = True,
         hold_to_clipboard: bool = True,
+        begin_deferred: Callable[[], int] | None = None,
+        defer_delivery: Callable[[deferred_mod.Request], None] | None = None,
         streaming=None,
         submit: Submit | None = None,
         notify: Notify | None = None,
@@ -175,6 +182,11 @@ class Pipeline:
         self.on_focus_change = on_focus_change
         self.restore_focus = restore_focus
         self.hold_to_clipboard = hold_to_clipboard
+        #: Finished text is never retained on this Pipeline. Restore mode hands
+        #: it to the separate deferred-delivery owner; the integer generation
+        #: is all this state machine keeps between press and release.
+        self.begin_deferred = begin_deferred or (lambda: 0)
+        self.defer_delivery = defer_delivery
         self.submit: Submit = submit or (lambda fn: fn())
         self.notify: Notify = notify or (lambda level, msg: None)
         self.record: Record = record or (lambda text, **kwargs: None)
@@ -187,6 +199,7 @@ class Pipeline:
         self._uid = 0
         self._session = None
         self._target: TargetWindow | None = None
+        self._delivery_generation = 0
         self._started_at = 0.0
         self._captions: queue.Queue = queue.Queue(maxsize=CAPTION_QUEUE_BLOCKS)
         self._closed = False
@@ -227,6 +240,13 @@ class Pipeline:
                 return False
             self._recording = True
             self._uid += 1
+            try:
+                self._delivery_generation = int(self.begin_deferred())
+            except Exception:
+                # The automatic route is a convenience above the clipboard and
+                # history floor. Its book-keeping may not stop a recording.
+                log.exception("could not begin a deferred-delivery generation")
+                self._delivery_generation = 0
             self._target = self._capture_target()
             self.buffer.reset()
             self._drain_queue()
@@ -440,6 +460,7 @@ class Pipeline:
             pcm = self.buffer.pcm()
             overflowed = self.buffer.overflowed
             target = self._target
+            delivery_generation = self._delivery_generation
             lost = self._lost_now
             dropped = self._dropped_now
             self._lost_now = 0
@@ -477,7 +498,9 @@ class Pipeline:
 
         self._report_losses(lost, dropped)
         utt = Utterance(pcm=pcm, sample_rate=self.sample_rate, target=target,
-                        duration_s=duration, overflowed=overflowed,
+                        duration_s=duration,
+                        delivery_generation=delivery_generation,
+                        overflowed=overflowed,
                         input_lost=lost, captions_dropped=dropped)
         try:
             self.submit(lambda: self._finalize(utt))
@@ -530,6 +553,35 @@ class Pipeline:
             focused = self._focused_now()
             decision = self._decide(utt.target, focused)
             log.info("delivery: %s (%s)", decision.action, decision.why)
+            if decision.waits:
+                on_clipboard = self._to_clipboard(final)
+                if self.defer_delivery is not None and utt.target is not None:
+                    try:
+                        self.defer_delivery(deferred_mod.Request(
+                            generation=utt.delivery_generation,
+                            text=final,
+                            raw=text,
+                            spoke_s=utt.duration_s,
+                            target=utt.target,
+                            focused=focused,
+                            on_clipboard=on_clipboard,
+                        ))
+                        return
+                    except Exception as exc:
+                        log.exception("could not start waiting for the captured "
+                                      "window")
+                        detail = ("dictate could not start its background wait: "
+                                  f"{type(exc).__name__}: {exc}")
+                else:
+                    detail = ("dictate has no delivery watcher for the captured "
+                              "window in this run.")
+                self._hold(
+                    final, raw=text, utt=utt,
+                    decision=delivery.Decision(
+                        delivery.HOLD, detail, delivery.REFUSED),
+                    focused=focused, detail=detail,
+                    on_clipboard=on_clipboard, route="deferred")
+                return
             if not decision.pastes:
                 self._hold(final, raw=text, utt=utt, decision=decision,
                            focused=focused)
@@ -544,15 +596,13 @@ class Pipeline:
                            decision=delivery.Decision(
                                delivery.HOLD, exc.message, delivery.REFUSED),
                            focused=focused, detail=exc.report(),
-                           partial=getattr(exc, "partial", False))
+                           partial=getattr(exc, "partial", False),
+                           route="foreground")
                 return
             self.completed += 1
-            log.info("delivered %d chars to %s in %.2fs",
+            log.info("delivery route foreground: succeeded; delivered %d chars "
+                     "to %s in %.2fs",
                      len(final), utt.target or "the focused window", self.clock() - t0)
-            if decision.action == delivery.RESTORE:
-                self.notify("info", f"You had moved to another window, so dictate "
-                                    f"brought {utt.target} back to the front and "
-                                    f"pasted there.")
             # An empty string, never KEEP: the caption goes at exactly the
             # moment the real text lands in his document. Leaving it up under
             # the word "pasted" is the one arrangement in which he could take
@@ -589,7 +639,7 @@ class Pipeline:
         """Ask `delivery` what to do. Nothing is decided in here."""
         exists: bool | None = None
         if target is not None and focused is not None \
-                and focused.handle != target.handle:
+                and not delivery.same_window(target, focused):
             # Only asked when it can change what he is told - "it has closed" is
             # a different sentence from "you moved". Never asked on the ordinary
             # path, which is one Win32 call that used not to happen at all.
@@ -604,7 +654,8 @@ class Pipeline:
 
     def _hold(self, final: str, *, raw: str, utt: Utterance,
               decision: delivery.Decision, focused: TargetWindow | None,
-              detail: str = "", partial: bool = False) -> None:
+              detail: str = "", partial: bool = False,
+              on_clipboard: bool | None = None, route: str = "hold") -> None:
         """Nothing was pasted. Keep his words and tell him where they are.
 
         The whole of the difference between refusing and losing. Two places, and
@@ -619,19 +670,30 @@ class Pipeline:
         4 is enforced by (`CaptionsCanNeverBePasted`), and a "last dictation"
         field would be the first exception to it.
         """
-        on_clipboard = False
-        if self.hold_to_clipboard:
-            try:
-                on_clipboard = bool(self.injector.to_clipboard(final))
-            except Exception:
-                log.exception("could not put the held text on the clipboard")
+        if on_clipboard is None:
+            on_clipboard = self._to_clipboard(final)
         in_history = self._remember(final, raw=raw, utt=utt, delivered=False)
         message = delivery.held_message(
             decision.reason or delivery.REFUSED,
             target=utt.target, focused=focused, on_clipboard=on_clipboard,
             in_history=in_history, partial=partial, detail=detail)
-        log.warning("not pasted: %s", decision.why)
+        if decision.reason == delivery.REFUSED:
+            log.warning("delivery route %s: failed; text held (%s)",
+                        route, decision.why)
+        else:
+            log.info("delivery route %s: succeeded; pasted nowhere (%s)",
+                     route, decision.why)
         self._fail(message)
+
+    def _to_clipboard(self, final: str) -> bool:
+        """The single door from undelivered text to the clipboard."""
+        if not self.hold_to_clipboard:
+            return False
+        try:
+            return bool(self.injector.to_clipboard(final))
+        except Exception:
+            log.exception("could not put the held text on the clipboard")
+            return False
 
     def _punctuate(self, text: str) -> str:
         """Spoken punctuation, run AFTER the cleanup pass and never inside it.

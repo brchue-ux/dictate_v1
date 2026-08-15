@@ -91,6 +91,7 @@ ERROR_LINGER_MS = 6000
 _LABELS = {
     OverlayState.LISTENING: ("listening", "live"),
     OverlayState.THINKING: ("thinking", "idle"),
+    OverlayState.WAITING: ("waiting", "idle"),
     OverlayState.DONE: ("pasted", "idle"),
     OverlayState.ERROR: ("error", "bad"),
 }
@@ -416,7 +417,7 @@ class TkCaptionOverlay:
 
         if state is OverlayState.DONE:
             self._hide_job = self._root.after(DONE_LINGER_MS, self._hide)
-        elif state is OverlayState.ERROR:
+        elif state in (OverlayState.WAITING, OverlayState.ERROR):
             self._hide_job = self._root.after(ERROR_LINGER_MS, self._hide)
 
     def _text_colour(self, state: OverlayState) -> str:

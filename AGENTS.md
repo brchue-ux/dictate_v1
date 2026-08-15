@@ -79,11 +79,18 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   refusal must never lose the text — `Pipeline._hold` puts it on the clipboard
   (the one exception to constraint 3, announced in the same message) and in the
   history marked `delivered=False`, and it does **not** keep it on `self`, which
-  is the shape `CaptionsCanNeverBePasted` enforces. `docs/DESIGN.md` → "Where the
-  finished text goes when he has moved on" carries the reasoning;
-  `tests/test_delivery.py` and `test_pipeline.py::FocusMovedWhileHeWasSpeaking`
-  hold it. What no one here can run: the two Win32 reads it is made from, and
-  `injector.to_clipboard`.
+  is the shape `CaptionsCanNeverBePasted` enforces. **`on_focus_change =
+  "restore"` no longer restores foreground:** `deferred.DeferredDelivery` holds
+  one finished *batch* result outside the pipeline and pastes only after the
+  user returns to the captured handle. A new dictation, a closed target or a
+  real injection refusal ends the wait with the clipboard/history fallback;
+  the injector's last foreground check may retry but may never focus the target,
+  also re-checks that no newer dictation retired the wait, and a known process
+  id guards against a closed target's hwnd being recycled.
+  `docs/DESIGN.md` → "Where the finished text goes when he has moved on" carries
+  the Windows API reasoning; `tests/test_delivery.py`, `tests/test_deferred.py`
+  and `test_pipeline.py::FocusMovedWhileHeWasSpeaking` hold it. The final run in
+  his actual terminal is still unverified and is spelled out in README.
 - **The trigger can be one mouse button, and the button keeps its own job on a
   click.** Windows shows the middle and thumb buttons to nobody except a
   `WH_MOUSE_LL` hook, so `platform/windows/mouse.py` sits in the path of every

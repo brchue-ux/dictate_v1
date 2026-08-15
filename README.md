@@ -627,15 +627,22 @@ window is dragged in front of what you are doing.
 Clicking away and clicking **back** before the words arrive is not a change at
 all: that pastes as usual. So does a notification stealing focus for a moment.
 
-If you would rather it brought the window you started in back to the front and
-pasted there — which is what dictate used to do, and is the right answer if you
-dictate long passages into a document and read something else while they
-transcribe:
+If you want the words to stay assigned to the window where you started, without
+having that window jump in front of what you are doing, use:
 
 ```toml
 [paste]
 on_focus_change = "restore"
 ```
+
+The name is kept so an existing config does not break. It no longer means
+"restore the foreground". dictate leaves the window you moved to exactly where
+it is, puts the finished words on the clipboard and into the history for safety,
+and waits. When **you** return to the captured window, it pastes there through
+the ordinary, proven foreground route. Starting another dictation ends that one
+automatic wait; the clipboard and history copies remain. A closed target or a
+paste the application refuses ends the wait the same way and says which case it
+was. Nothing is ever redirected into whatever happens to be focused.
 
 The same thing happens if a paste fails for any other reason (an application
 running as administrator will refuse synthesised keystrokes): the words are kept
@@ -770,7 +777,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 984 tests, run and passing
+### Verified anywhere — 1,001 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -798,17 +805,15 @@ python -m unittest discover -s tests -t .
   message rather than the dictation.
 * That the target window is captured at press and not at paste time.
 * **What happens when you click somewhere else while you are still speaking**:
-  that nothing is pasted anywhere, that the words are on the clipboard and in
-  the history marked as not pasted, that both windows are named in what you are
-  told, that clicking away and back again pastes as usual, that a window which
-  closes mid-sentence is a different message from one you moved away from, that
-  `on_focus_change = "restore"` puts the old behaviour back and says out loud
-  that it moved a window, that there is **no** setting which pastes into
-  whatever you happen to be looking at, and that a paste which fails for any
-  other reason keeps the text the same way instead of discarding it. Also that a
-  clipboard which refuses, or a history that is switched off, changes what you
-  are told rather than being claimed anyway — and that none of it leaves the
-  held text sitting on the pipeline.
+  the default pastes nowhere and keeps the words on the clipboard and in the
+  history; `on_focus_change = "restore"` waits for the captured handle without
+  calling the focus API, then uses the ordinary paste only after that handle is
+  foreground again. The final injector check refuses a last-moment focus race;
+  a closed target, a new dictation and a real injection failure all end or retry
+  the wait as documented, with no silent loss. Also that clicking away and back
+  before transcription finishes pastes as usual, there is **no** setting which
+  pastes into whatever happens to be focused, and none of this leaves held text
+  on the pipeline itself.
 * The resident-backend lifecycle against a **real child process**: start, wait
   for health, slow start, crash → restart, repeated crashes → give up with a
   reason, clean shutdown, and the stop-during-restart deadlock. Including that
@@ -946,7 +951,7 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
-* **The 984 tests above, on Windows** as well as on Linux — which is where the
+* **The suite above is a Windows CI gate too** — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.
 * **That a supervised child process cannot outlive its parent.** CI starts a
@@ -997,16 +1002,19 @@ misbehaves.
   CI is the mechanism underneath that case, a parent dying with no chance to
   clean up; nobody has typed those two keys at a real `dictate run` with a real
   whisper-server holding a real 1.6 GB of VRAM.
-* **Clicking away mid-dictation, on your PC.** Everything dictate *decides* in
-  that case is tested here and the reported bug is a test now — but the two
-  Windows calls the decision is made from (`GetForegroundWindow` at the moment
-  the words are ready, and `IsWindow` on the window you started in) have never
-  been run, and neither has putting the text on the clipboard when a paste is
-  refused. The check is one dictation: press the hotkey in your terminal, click
-  into a browser while you talk, stay there, and see that the panel says **Not
-  pasted**, that nothing is typed into the browser, and that Ctrl+V in the
-  terminal gives you the sentence. Then do it again clicking straight back, and
-  see that it pastes as it always did.
+* **Deferred delivery into your actual terminal.** The state machine is tested
+  off Windows, including the final foreground re-check and every fallback, but
+  nobody here can run the Win32 reads or watch the deferred timing on your PC.
+  Your log already proves that the ordinary foreground route this reuses can
+  deliver 441- and 803-character dictations to that SSH terminal. With
+  `on_focus_change = "restore"`: start in the SSH terminal,
+  toggle on, move to a browser while speaking, and toggle off. The browser must
+  stay in front, receive nothing, and the panel must say **Waiting to paste**.
+  Return to the same terminal window; within about half a second the words
+  should land without any window being raised. Repeat once with the target
+  closed and once starting a new dictation before returning: both must leave the
+  words on the clipboard and in the history and say why the wait ended. The
+  default `"hold"` path remains the earlier one-Ctrl+V check.
 * **Spoken punctuation in your own voice.** The transcripts it is designed
   against are real Whisper large-v3-turbo output, but the speaker was a
   synthetic voice, not you, on a processor rather than your card. That matters
