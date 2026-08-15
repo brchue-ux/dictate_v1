@@ -415,7 +415,7 @@ influence on the structure, and it is deliberate rather than apologetic:
   component that cannot work says so and stops. `tests/test_cli.py` asserts that
   `src/` contains no test doubles at all.
 * **The pipeline, cleanup, config, process supervision, model residency and HTTP
-  client are plain Python** and are tested for real, here — 1,001 tests on
+  client are plain Python** and are tested for real, here — 1,006 tests on
   Linux, with the same suite as a Windows CI gate.
 * **The fiddly bits of the platform code were factored out into pure functions**
   so they could be tested anyway: `platform/geometry.py` (overlay placement and
@@ -809,6 +809,18 @@ affects only the screen, and the second may cost him a word in the document.
   `src/dictate/tray.autostart_item` and `setup-lib.Get-AutostartPlan` carry the
   rest, and neither keeps its own idea of whether it is on: both read what
   `dictate autostart status` reads, so the three answers cannot differ.
+* **The windowless entry writes before it imports the CLI.** `pythonw.exe` has
+  no stdout or stderr, and the regular `LogonLog` used to begin only after
+  `dictate.__main__` had imported the whole CLI and parsed its arguments. The
+  code does not establish that this gap caused the product owner's silent
+  exit — an exception there would have returned nonzero, while Windows recorded
+  0 — but a second unexplained start must not disappear through it. The
+  `--autostart` branch in `src/dictate/__main__.py` opens the canonical state log,
+  puts it behind both streams, and records the interpreter, arguments, working
+  directory and resolved log path before importing `cli`. The ordinary
+  `autostart.run_at_logon` block remains the account of the run after dispatch.
+  Windows CI launches the real `pythonw.exe -m dictate`, rather than merely
+  checking the task XML that names it.
 * **Turning it on starts it now, and turning it off does not stop it.** The same
   discoverability defect came back wearing a different hat: he turned it on, saw
   nothing happen, and had no reason to believe it had worked - the feature did

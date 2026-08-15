@@ -777,7 +777,7 @@ graphics card in them at all.
 
 So there are now three lists, not two.
 
-### Verified anywhere — 1,001 tests, run and passing
+### Verified anywhere — 1,006 tests, run and passing
 
 ```bash
 python -m unittest discover -s tests -t .
@@ -951,6 +951,12 @@ Windows machines. These are things that used to be on the "never run" list:
   with `dictate autostart status`, then `disable`s it and checks Windows agrees
   it is gone. What that does *not* prove is the part that needs a logon — see
   below.
+* **That the console-less package entry really runs under `pythonw.exe`.** CI
+  launches the same GUI interpreter and `-m dictate ... run --autostart`
+  arguments as the task, with no console streams. It requires the entry
+  breadcrumb, pid, attempted start, failure reason and exit code to survive in
+  `autostart.log`. This closes the pre-CLI gap; it still does not make a hosted
+  runner log on or give it the product owner's GPU and desktop.
 * **The suite above is a Windows CI gate too** — which is where the
   single-instance lock is exercised against Windows' own byte-range locking
   rather than Linux's `flock`.

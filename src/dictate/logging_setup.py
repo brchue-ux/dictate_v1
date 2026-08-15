@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import sys
 from pathlib import Path
 
 FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
@@ -21,10 +22,16 @@ def configure(level: str = "INFO", file: str = "", *, quiet_console: bool = True
     for handler in list(root.handlers):
         root.removeHandler(handler)
 
-    console = logging.StreamHandler()
-    console.setLevel(logging.WARNING if quiet_console else getattr(logging, level.upper()))
-    console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-    root.addHandler(console)
+    # ``pythonw.exe`` has no stderr. The autostart entry normally replaces it
+    # with its durable log before this function is reached; this guard keeps a
+    # future caller from installing a StreamHandler whose first emit raises on
+    # a ``None`` stream.
+    if sys.stderr is not None:
+        console = logging.StreamHandler(sys.stderr)
+        console.setLevel(
+            logging.WARNING if quiet_console else getattr(logging, level.upper()))
+        console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        root.addHandler(console)
 
     if file:
         path = Path(file).expanduser()
@@ -35,3 +42,9 @@ def configure(level: str = "INFO", file: str = "", *, quiet_console: bool = True
         rotating.setLevel(getattr(logging, level.upper(), logging.INFO))
         rotating.setFormatter(logging.Formatter(FORMAT))
         root.addHandler(rotating)
+
+    # Without either destination, logging must be silent rather than becoming
+    # the failure. This is only a last guard: the logon bootstrap supplies a
+    # real stream, and an interactive run supplies stderr.
+    if not root.handlers:
+        root.addHandler(logging.NullHandler())
