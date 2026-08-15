@@ -38,7 +38,8 @@ import ctypes
 import logging
 import time
 
-from ...errors import InjectionError
+from ... import delivery
+from ...errors import InjectionError, TargetNotForegroundError
 from .. import line_breaks, modifier_guard
 from ..base import TargetWindow
 from ..injection_plan import KeyEvent, chunk, plan_text
@@ -102,6 +103,7 @@ def _send(events: list[KeyEvent]) -> None:
             "most often an application running as administrator while dictate "
             "is not. Run dictate as administrator, or switch [paste] method to "
             '"clipboard".',
+            partial=sent > 0,
         )
 
 
@@ -136,7 +138,9 @@ class WindowsTextInjector:
                   else "line breaks pasted as a space, never Return")
         return f"{how}, {breaks}"
 
-    def send(self, text: str, target: TargetWindow | None) -> int:
+    def send(self, text: str, target: TargetWindow | None, *,
+             require_target_foreground: bool = False,
+             still_allowed=None) -> int:
         """Deliver `text`. Returns how many Return keypresses it sent.
 
         That count is what the dictation history reports, so an Enter he did not
@@ -148,7 +152,8 @@ class WindowsTextInjector:
         text = line_breaks.apply(text, self.line_break_mode)
         payload = text + " " if self.trailing_space and not text.endswith(" ") else text
 
-        if target is not None and self.restore_focus:
+        if target is not None and not require_target_foreground \
+                and self.restore_focus:
             if not self.tracker.focus(target):
                 raise InjectionError(
                     f"The window you were typing into ({target}) could not be "
@@ -159,11 +164,37 @@ class WindowsTextInjector:
                 )
 
         self._settle_modifiers()
+        before_send = None
+        if target is not None and require_target_foreground:
+            def before_send() -> None:
+                self._require_foreground(target)
+                if still_allowed is not None and not still_allowed():
+                    raise TargetNotForegroundError(
+                        "A newer dictation ended this automatic wait before "
+                        "the text was sent.")
         if self.method == "clipboard":
-            self._send_via_clipboard(payload)
+            self._send_via_clipboard(payload, before_send=before_send)
         else:
-            self._send_via_keystrokes(payload)
+            self._send_via_keystrokes(payload, before_batch=before_send)
         return line_breaks.returns_in(payload)
+
+    def _require_foreground(self, target: TargetWindow) -> None:
+        """Refuse rather than raise `target` if the user has moved again."""
+        try:
+            focused = self.tracker.foreground()
+        except Exception as exc:
+            raise TargetNotForegroundError(
+                f"dictate could not confirm that {target} was still in front, "
+                "so it did not paste the waiting text.",
+                f"The foreground-window check failed: {exc}",
+            ) from exc
+        if focused is None or not delivery.same_window(target, focused):
+            raise TargetNotForegroundError(
+                f"{target} was no longer in front when the waiting text was "
+                "about to be pasted, so dictate did not paste anywhere.",
+                "Return to that window again and dictate will retry while this "
+                "waiting copy is still active.",
+            )
 
     # -- the text that was not pasted -------------------------------------
 
@@ -219,7 +250,7 @@ class WindowsTextInjector:
 
     # -- keystroke path --------------------------------------------------
 
-    def _send_via_keystrokes(self, text: str) -> None:
+    def _send_via_keystrokes(self, text: str, *, before_batch=None) -> None:
         events = plan_text(text,
                            allow_return=self.line_break_mode == line_breaks.RETURN)
         size = 2 if self.per_char_delay_ms > 0 else 200  # 2 events = one character
@@ -227,12 +258,17 @@ class WindowsTextInjector:
         sent = 0
         for batch in chunk(events, size):
             try:
+                if before_batch is not None:
+                    # Deferred delivery checks beside every SendInput call. A
+                    # long utterance is several batches; checking only before
+                    # the first would let later text follow a focus change.
+                    before_batch()
                 _send(batch)
             except InjectionError as exc:
                 # Whatever went in before this batch is in his document already.
                 # Saying so is what stops the held copy being pasted on top of
                 # it - see `InjectionError.partial`.
-                exc.partial = sent > 0
+                exc.partial = exc.partial or sent > 0
                 raise
             sent += len(batch)
             if gap:
@@ -241,7 +277,7 @@ class WindowsTextInjector:
 
     # -- clipboard path --------------------------------------------------
 
-    def _send_via_clipboard(self, text: str) -> None:
+    def _send_via_clipboard(self, text: str, *, before_send=None) -> None:
         formats = _clipboard_formats()
         unrestorable = [f for f in formats if f not in _RESTORABLE_FORMATS]
         if unrestorable:
@@ -250,12 +286,17 @@ class WindowsTextInjector:
                 "(format ids %s), so this paste used keystrokes instead",
                 ", ".join(str(f) for f in unrestorable),
             )
-            self._send_via_keystrokes(text)
+            self._send_via_keystrokes(text, before_batch=before_send)
             return
 
         saved = _clipboard_text()
         try:
             _set_clipboard_text(text)
+            if before_send is not None:
+                # Clipboard acquisition can wait behind another process. The
+                # target check belongs after that wait and immediately before
+                # Ctrl+V, not before touching the clipboard.
+                before_send()
             _send([
                 KeyEvent("vk", VK_CONTROL, False),
                 KeyEvent("vk", VK_V, False),

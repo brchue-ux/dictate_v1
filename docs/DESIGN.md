@@ -415,8 +415,8 @@ influence on the structure, and it is deliberate rather than apologetic:
   component that cannot work says so and stops. `tests/test_cli.py` asserts that
   `src/` contains no test doubles at all.
 * **The pipeline, cleanup, config, process supervision, model residency and HTTP
-  client are plain Python** and are tested for real, here — 984 tests, on Linux
-  and on Windows.
+  client are plain Python** and are tested for real, here — 1,001 tests on
+  Linux, with the same suite as a Windows CI gate.
 * **The fiddly bits of the platform code were factored out into pure functions**
   so they could be tested anyway: `platform/geometry.py` (overlay placement and
   the slab's per-monitor layout), `platform/fade.py` (the opacity ramp),
@@ -601,10 +601,47 @@ Three behaviours were possible and none is obviously right; the reasoning is in
   into the dictation history, marked as not pasted. Refusing is only allowed to
   be the default *because* of that second half; a refusal that loses the sentence
   would be worse than the bug.
-* **Restore: raise the captured window and paste there** — what dictate did
-  before, now `[paste] on_focus_change = "restore"`, and a real preference for
-  someone dictating a long passage into a document while reading something else.
-  It says out loud that it moved a window.
+* **Restore: wait for the captured window, then paste there** —
+  `[paste] on_focus_change = "restore"` keeps its historical spelling so an
+  existing config still loads. It never restores foreground now. The finished
+  batch text moves to `deferred.DeferredDelivery`, and the ordinary paste runs
+  only after the user has put the captured handle in front again.
+
+Why waiting is the terminal-capable answer, rather than the first implementation
+idea:
+
+* [`SendInput`](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-sendinput)
+  inserts events into the keyboard input stream and has no destination handle;
+  keyboard messages go to the window with focus.
+* [`AttachThreadInput`](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-attachthreadinput)
+  shares input state, but does not aim that stream. Calling
+  [`SetFocus`](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setfocus)
+  after attaching explicitly activates the receiving window or its parent, so
+  it is another foreground grab.
+* [`PostMessage`](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-postmessagew)
+  only proves that a message joined a queue, not that an application inserted
+  it. A synchronous
+  [`WM_PASTE`](https://learn.microsoft.com/windows/win32/dataxchg/wm-paste)
+  is documented for Edit and combo controls and has no result value. Modern
+  terminals are custom surfaces: Windows Terminal, for example, creates a XAML
+  island under `CASCADIA_HOSTING_WINDOW_CLASS` in
+  [`IslandWindow.cpp`](https://github.com/microsoft/terminal/blob/main/src/cascadia/WindowsTerminal/IslandWindow.cpp)
+  and implements paste as its own `PasteFromClipboard` event into
+  `ControlCore::PasteText` in
+  [`ControlInteractivity.cpp`](https://github.com/microsoft/terminal/blob/main/src/cascadia/TerminalControl/ControlInteractivity.cpp),
+  not as a standard Edit child. That narrow route can help Notepad and still
+  fail the actual SSH terminal, and it supplies no reliable insertion result,
+  so it is not presented as a generic delivery mechanism.
+
+The deferred wait is deliberately bounded to one. Starting another dictation
+ends it, including when the older utterance was still transcribing; closing the
+target or a real injection refusal ends it too. Before the wait begins, dictate
+attempts to put the text on the clipboard and records it in history as not
+delivered; the message names which copies actually succeeded. A successful
+later paste atomically changes that exact history entry to delivered. If the
+process ends, the conservative not-delivered entry remains. There is no timeout:
+it waits until one of those explicit outcomes, and a clipboard copy which was
+written remains the immediate way to place it without returning.
 
 Three properties are load-bearing:
 
@@ -618,8 +655,13 @@ Three properties are load-bearing:
 * **The decision is not in the injector.** It is two window handles and two
   settings, so all of it is plain Python and tested off Windows
   (`tests/test_delivery.py`, `tests/test_pipeline.py::FocusMovedWhileHeWasSpeaking`).
-  The platform's whole share is two read-only calls, `GetForegroundWindow` and
-  `IsWindow`.
+  The platform's share is two read-only calls, `GetForegroundWindow` and
+  `IsWindow`. The injector performs one additional `GetForegroundWindow`
+  immediately before deferred SendInput as a race guard; it may refuse there,
+  but it may not focus or raise anything. A known process id is compared too,
+  because Windows may recycle a closed window's handle. The same adjacent guard
+  confirms that a newer dictation has not retired this wait while modifier keys
+  were settling.
 
 A paste that *fails* is now held the same way rather than discarded, including
 the elevated-application case, and `InjectionError.partial` says whether any of
@@ -627,9 +669,10 @@ it went in first — a half-typed paste plus a full clipboard is how a dictation
 gets pasted twice, so he is told to look before he pastes.
 
 What this cannot close: `SendInput` types into whatever has keyboard focus at the
-instant it runs, so a focus change inside the few milliseconds between the check
-and the keystrokes still lands in the wrong window. That race is narrowed, not
-removed, and it cannot be removed without an API that names a target.
+instant it runs, so a focus change in the few instructions after the injector's
+final check can still land in the wrong window. The check is now adjacent to the
+send rather than back at transcription, but an API without a target cannot make
+that race zero.
 
 ---
 

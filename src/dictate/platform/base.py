@@ -38,6 +38,10 @@ class TargetWindow:
     handle: int
     title: str = ""
     process: str = ""
+    #: A handle can be recycled after its window closes. The process id makes
+    #: a deferred target distinguishable from a later window which happens to
+    #: receive the same handle. Zero means the platform could not read it.
+    process_id: int = 0
 
     def __str__(self) -> str:
         label = self.title or self.process or "unknown window"
@@ -48,6 +52,7 @@ class OverlayState(Enum):
     HIDDEN = "hidden"
     LISTENING = "listening"      # captions streaming in
     THINKING = "thinking"        # hotkey released, GPU pass running
+    WAITING = "waiting"          # finished text waits for its captured window
     DONE = "done"                # text delivered
     ERROR = "error"              # something the user needs to read
 
@@ -77,19 +82,29 @@ class WindowTracker(Protocol):
     def exists(self, target: TargetWindow) -> bool:
         """Is `target` still a window? Read-only, and never raises it.
 
-        Asked at paste time, when the window that had focus at press is not the
-        one in front any more: "he moved somewhere else" and "the window he was
-        dictating into has closed" are two different sentences to be told, and
-        this is the only thing that can tell them apart. Only the message
-        changes - see `delivery.decide`, which takes the answer and may take
-        `None` for "nobody asked".
+        Asked at paste time to distinguish "he moved" from "the target closed",
+        and on each deferred poll so a wait for a dead or recycled target ends
+        safely. `delivery.decide` may still take `None` for "nobody could ask";
+        an unknown is never a verdict.
         """
 
 
 @runtime_checkable
 class TextInjector(Protocol):
-    def send(self, text: str, target: TargetWindow | None) -> int:
+    def send(self, text: str, target: TargetWindow | None, *,
+             require_target_foreground: bool = False,
+             still_allowed: Callable[[], bool] | None = None) -> int:
         """Deliver `text` to `target`. Raises `InjectionError` on failure.
+
+        `require_target_foreground` is the no-focus-stealing route. It must
+        re-check that `target` is still in front immediately before delivery
+        and refuse if that cannot be established; it must never focus or raise
+        the target. This closes most of the race between a deferred delivery's
+        foreground observation and its SendInput call.
+
+        `still_allowed` belongs to that same route: it is checked beside each
+        send so a newer utterance can retire a waiting one while the injector
+        was settling modifiers. False means refuse without sending.
 
         Returns how many Return keypresses delivering it involved - 0 unless
         `[paste] line_breaks = "return"`, because dictated text is typed and

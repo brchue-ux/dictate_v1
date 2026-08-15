@@ -564,21 +564,28 @@ class FocusMovedWhileHeWasSpeaking(PipelineTestCase):
         self.assertIn("closed", said)
         self.assertEqual(self.injector.kept, ["Hello world."])
 
-    def test_restore_mode_pastes_into_the_window_he_started_in(self):
-        p = self.build(on_focus_change="restore")
+    def test_restore_mode_hands_finished_text_to_the_waiting_route(self):
+        waiting = []
+        p = self.build(on_focus_change="restore",
+                       begin_deferred=lambda: 7,
+                       defer_delivery=waiting.append)
         started_in = self.windows.window
         self.speak_then_move(p)
-        self.assertEqual(self.injector.sent, [("Hello world.", started_in)])
-        self.assertEqual(self.injector.kept, [])
-        self.assertIs(self.recorded[0]["delivered"], True)
+        self.assertEqual(self.injector.sent, [])
+        self.assertEqual(self.injector.kept, ["Hello world."])
+        self.assertEqual(len(waiting), 1)
+        self.assertEqual(waiting[0].target, started_in)
+        self.assertEqual(waiting[0].generation, 7)
+        self.assertEqual(waiting[0].text, "Hello world.")
 
-    def test_restore_mode_says_out_loud_that_it_moved_a_window(self):
-        """A window jumping in front of him is not a thing to do silently, even
-        when it is the thing he asked for."""
-        p = self.build(on_focus_change="restore")
+    def test_restore_mode_does_not_ask_the_injector_or_tracker_to_move_focus(self):
+        waiting = []
+        p = self.build(on_focus_change="restore",
+                       defer_delivery=waiting.append)
         self.speak_then_move(p)
-        self.assertTrue(any("brought" in m and "front" in m
-                            for _, m in self.notices))
+        self.assertEqual(self.injector.sent, [])
+        self.assertEqual(self.windows.focused, [])
+        self.assertEqual(len(waiting), 1)
 
     def test_a_clipboard_that_refuses_leaves_the_history_and_says_so(self):
         injector = FakeInjector()

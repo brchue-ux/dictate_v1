@@ -9,11 +9,14 @@ and is still there when the words are ready.**
 
 Three things could happen and none of them is obviously right:
 
-* **Paste into the window he started in.** It has to be brought back to the front
-  first - SendInput types into whatever has keyboard focus, so there is no such
-  thing as typing into a window without raising it. So this means a window
-  jumping in front of him and text appearing in it, up to a second or two after
-  he stopped speaking and while he is reading something else.
+* **Wait for the window he started in.** Windows' ordinary keyboard input has no
+  target handle: it goes to the foreground queue. Attaching input queues does
+  not change that, and setting a background window's focus activates it. A
+  targeted ``WM_PASTE`` is documented only for standard Edit controls, not as a
+  generic route into custom terminal surfaces. So the route which reuses the
+  already-proven paste into the owner's terminal without stealing focus is to
+  keep the finished text and deliver it the moment he puts that window in front
+  again.
 * **Paste into whatever is focused now.** Text arriving in an application that
   never asked for it, which is the same family of harm as the stray Return that
   ran a command in his terminal (`platform/line_breaks.py`, constraint 6). Not
@@ -23,10 +26,10 @@ Three things could happen and none of them is obviously right:
   useless if the text is then unreachable - which is why the hold path is only
   half of this change, and `Pipeline._hold` is the other half.
 
-The third is the default. The first is `[paste] on_focus_change = "restore"`,
-which is what dictate did before and is a real preference: someone dictating a
-long paragraph into a document and reading something else while it transcribes
-wants the text in the document.
+The third is the default. The first is `[paste] on_focus_change = "restore"`.
+The spelling stays because existing config files already contain it; what it
+restores now is the destination, when the user returns there, never the window's
+foreground position.
 
 **The common accidental case never reaches a hold.** If he clicks away and clicks
 back before the transcription comes back - which is most of them - the window in
@@ -48,7 +51,7 @@ from .platform.base import TargetWindow
 
 #: What `Pipeline._finalize` should do with the finished text.
 DELIVER = "deliver"   # the window he started in is the one in front: paste, as ever
-RESTORE = "restore"   # bring that window back to the front and paste into it
+DEFER = "defer"       # wait until the captured window is foreground again
 HOLD = "hold"         # paste nowhere; keep the text and tell him where it is
 
 #: The values `[paste] on_focus_change` takes. Deliberately two: "paste into
@@ -76,7 +79,11 @@ class Decision:
 
     @property
     def pastes(self) -> bool:
-        return self.action in (DELIVER, RESTORE)
+        return self.action == DELIVER
+
+    @property
+    def waits(self) -> bool:
+        return self.action == DEFER
 
 
 def decide(
@@ -87,7 +94,7 @@ def decide(
     mode: str = HOLD_MODE,
     restore_focus: bool = True,
 ) -> Decision:
-    """Deliver, restore or hold, from the two windows and the two settings.
+    """Deliver, defer or hold, from the two windows and the two settings.
 
     `target` is what was captured at press and `focused` is what is in front
     now; either may be `None`, because reading the foreground window can fail and
@@ -105,25 +112,77 @@ def decide(
         return Decision(DELIVER, "no window was captured at press")
     if focused is None:
         return Decision(DELIVER, "could not read which window is in front now")
-    if focused.handle == target.handle:
+    if same_window(target, focused):
         return Decision(DELIVER, "still in the window it was started in")
 
     reason = CLOSED if target_exists is False else MOVED
-    if mode == RESTORE_MODE and restore_focus and reason == MOVED:
-        return Decision(RESTORE, f"focus moved to {focused}; restoring {target}")
-    if mode == RESTORE_MODE and not restore_focus:
-        # Not reachable through a validated config - `config.validate` refuses
-        # the pair - but this function is total and a Pipeline can be built by
-        # hand. "Restore" without permission to call SetForegroundWindow is not
-        # a thing that can be done, and doing the dangerous half of it instead
-        # is not an option.
-        return Decision(HOLD, "restore asked for, but [paste] restore_focus is "
-                              "false, so no window may be raised", MOVED)
     if reason == CLOSED:
-        # Nothing to restore even in restore mode: there is no window left.
+        # Nothing to wait for even in restore mode: there is no window left.
         return Decision(HOLD, f"the captured window {target} no longer exists",
                         CLOSED)
+    if mode == RESTORE_MODE:
+        # `restore_focus` is deliberately irrelevant here. It remains a config
+        # key for existing files and for the ordinary injector path, but this
+        # route never calls a foreground API at either value.
+        return Decision(DEFER, f"focus moved to {focused}; waiting for {target} "
+                               "without bringing it to the front")
     return Decision(HOLD, f"focus moved from {target} to {focused}", MOVED)
+
+
+def same_window(captured: TargetWindow, current: TargetWindow) -> bool:
+    """Is ``current`` still the window represented by ``captured``?
+
+    Titles legitimately change and process names are not identities. HWND is
+    the primary identity, with the captured pid as a reuse guard when both
+    reads supplied one. An unknown pid keeps the pre-existing handle-only
+    behaviour: an unreadable property may not turn a healthy delivery into a
+    refusal.
+    """
+    if captured.handle != current.handle:
+        return False
+    if captured.process_id and current.process_id:
+        return captured.process_id == current.process_id
+    return True
+
+
+def waiting_message(
+    target: TargetWindow,
+    focused: TargetWindow | None,
+    *,
+    on_clipboard: bool = False,
+    in_history: bool = False,
+) -> str:
+    """What he is told while restore mode waits for its captured window."""
+    where = _where(on_clipboard, in_history)
+    lines = [f"Waiting to paste into {_name(target)} when you return to it. "
+             f"{where[0]}"]
+    if focused is not None:
+        lines.append(f"{_name(focused)} stays in front. dictate did not raise "
+                     f"another window and did not type into this one.")
+    else:
+        lines.append("dictate did not raise another window and did not type "
+                     "into whichever window is in front now.")
+    lines.append("When the captured window is in front again, dictate will use "
+                 "its ordinary paste route there. Starting another dictation "
+                 "ends this automatic wait; the clipboard and history copies "
+                 "remain.")
+    lines.extend(where[1:])
+    return "\n".join(lines)
+
+
+def stopped_waiting_message(
+    target: TargetWindow,
+    why: str,
+    *,
+    on_clipboard: bool = False,
+    in_history: bool = False,
+) -> str:
+    """What he is told when a deferred paste becomes an ordinary hold."""
+    where = _where(on_clipboard, in_history)
+    lines = [f"No longer waiting to paste into {_name(target)} - {why}. "
+             f"{where[0]}"]
+    lines.extend(where[1:])
+    return "\n".join(lines)
 
 
 def held_message(
@@ -183,9 +242,9 @@ def held_message(
                      "before Windows refused the rest, so look before you paste.")
     lines.extend(where[1:])
     if reason == MOVED:
-        lines.append('To have dictate bring that window back to the front and '
-                     'paste there instead, set [paste] on_focus_change = '
-                     '"restore" in your dictate.toml.')
+        lines.append('To have dictate wait and paste when you return to that '
+                     'window, without bringing it to the front, set [paste] '
+                     'on_focus_change = "restore" in your dictate.toml.')
     return "\n".join(lines)
 
 
@@ -200,9 +259,10 @@ def _where(on_clipboard: bool, in_history: bool) -> list[str]:
     if in_history:
         return ["Your words are at the top of your dictation history (right-click "
                 "the dictate icon by the clock, or run `dictate history`)."]
-    # Both failed. Say so rather than implying there is a copy somewhere.
-    return ["dictate could not keep a copy of them either - not on the clipboard "
-            "and not in your dictation history - so they are only in the log."]
+    # Both failed. The log records the failure, not the user's full text. Say
+    # the hard truth rather than inventing a recoverable copy.
+    return ["dictate could not keep a recoverable copy of them either - not on "
+            "the clipboard and not in your dictation history."]
 
 
 def _name(window: TargetWindow | None) -> str:

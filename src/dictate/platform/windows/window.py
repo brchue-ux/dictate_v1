@@ -26,38 +26,42 @@ class WindowsWindowTracker:
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
             return None
+        process_id = _process_id(hwnd)
         return TargetWindow(
             handle=int(hwnd),
             title=_window_title(hwnd),
-            process=_process_name(hwnd),
+            process=_process_name(process_id),
+            process_id=process_id,
         )
 
     def exists(self, target: TargetWindow) -> bool:
         """`IsWindow` on the captured handle. Read-only; activates nothing.
 
-        Asked when the paste is about to be held, so that "it has closed" and
-        "you moved" are told apart rather than guessed at. A handle can be
-        re-used by a later window, which would make this say yes about a
-        different window - that costs a sentence's accuracy and never an action,
-        because nothing is pasted either way (`delivery.decide`).
+        Asked when the paste is about to be held or while a deferred delivery
+        waits. A handle can be re-used by a later window, so two known process
+        ids must still agree. An unreadable id remains unknown, not "closed".
         """
         try:
-            return bool(user32.IsWindow(wintypes.HWND(target.handle)))
+            hwnd = wintypes.HWND(target.handle)
+            if not user32.IsWindow(hwnd):
+                return False
+            current_process_id = _process_id(hwnd)
+            return (not target.process_id or not current_process_id
+                    or current_process_id == target.process_id)
         except Exception:
             log.debug("could not ask whether %s still exists", target, exc_info=True)
             return True
 
     def focus(self, target: TargetWindow) -> bool:
-        """Bring `target` to the foreground if it is not already there.
+        """Try to bring `target` to the foreground on the ordinary paste path.
 
-        SetForegroundWindow refuses when the calling process does not own the
-        foreground window - a deliberate Windows anti-focus-stealing rule. The
-        documented way round it, and the one every automation tool uses, is to
-        attach our input queue to the foreground thread's for the duration of
-        the call. Ugly, but it is the supported mechanism.
+        This is best-effort only. Attaching input queues lets the threads share
+        input state; it does not grant permission to bypass Windows'
+        foreground-lock rules, so SetForegroundWindow may still refuse. The
+        deferred focus-change route deliberately never calls this method.
         """
         hwnd = wintypes.HWND(target.handle)
-        if not user32.IsWindow(hwnd):
+        if not self.exists(target):
             log.warning("target window %s no longer exists", target)
             return False
         current = user32.GetForegroundWindow()
@@ -98,12 +102,17 @@ def _window_title(hwnd) -> str:
     return buf.value
 
 
-def _process_name(hwnd) -> str:
+def _process_id(hwnd) -> int:
     pid = wintypes.DWORD()
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    if not pid.value:
+    return int(pid.value)
+
+
+def _process_name(process_id: int) -> str:
+    if not process_id:
         return ""
-    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+    handle = kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, False, process_id)
     if not handle:
         return ""
     try:

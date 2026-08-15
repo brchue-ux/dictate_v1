@@ -83,3 +83,12 @@ class InjectionError(DictateError):
     def __init__(self, message: str, remedy: str = "", partial: bool = False) -> None:
         super().__init__(message, remedy)
         self.partial = partial
+
+
+class TargetNotForegroundError(InjectionError):
+    """A no-focus-stealing delivery lost its foreground precondition.
+
+    Ordinarily nothing was sent and deferred delivery treats this as "keep
+    waiting". If a long keystroke run sent an earlier batch first, ``partial``
+    is true and the automatic attempt ends instead of duplicating those words.
+    """
