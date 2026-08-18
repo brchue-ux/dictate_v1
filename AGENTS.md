@@ -383,6 +383,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   box and a closing line after it; the report reads those back. Do not "simplify"
   either write away, and do not make the dialog non-blocking without deciding
   what then tells him at all.
+- **The console-less log begins before the CLI import.** The task and
+  `start_now` enter through `pythonw.exe -m dictate`, where stdout and stderr are
+  absent. `src/dictate/__main__.py` must open the canonical `autostart.log` and
+  redirect both before importing `cli`; `run_at_logon` then writes the ordinary
+  run block. Keep its minimal state-path resolver and marker literals aligned
+  with `instance.state_dir`/`autostart` (the tests compare them), and keep the
+  Windows CI launch of the real `pythonw.exe` — registering task XML alone does
+  not exercise this boundary.
 - **`dictate autostart status --why` reports and changes nothing.** It is the one
   line he pastes: what Windows has running (`ProcessTools.pids_named`, tasklist),
   who holds the transcription port, the lock, and schtasks' raw answer. It may

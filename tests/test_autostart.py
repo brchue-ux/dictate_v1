@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -284,6 +285,155 @@ class TheLogonLog(unittest.TestCase):
         # Both survive; the middle is what goes.
         self.assertTrue(shown.startswith(autostart.BLOCK_MARK))
         self.assertTrue(shown.endswith("199"))
+
+
+class TheConsolelessPackageEntry(unittest.TestCase):
+    """The real boundary the logon task crosses: ``pythonw -m dictate``.
+
+    ``run_at_logon`` already records everything after the CLI dispatch. These
+    tests hold the earlier boundary, where importing the CLI used to happen
+    before any durable stream existed.
+    """
+
+    def test_its_minimal_path_and_markers_match_the_regular_log(self):
+        from unittest import mock
+
+        from dictate import __main__ as package_entry
+        from dictate import instance
+
+        environments = (
+            {"DICTATE_STATE_DIR": r"C:\state"},
+            {"LOCALAPPDATA": r"C:\Users\owner\AppData\Local"},
+            {"APPDATA": r"C:\Users\owner\AppData\Roaming"},
+            {"XDG_STATE_HOME": "/var/tmp/owner-state"},
+        )
+        for env in environments:
+            with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(package_entry._state_dir(),  # noqa: SLF001
+                                 instance.state_dir())
+        self.assertEqual(package_entry._LOG_NAME, autostart.LOG_NAME)  # noqa: SLF001
+        self.assertEqual(package_entry._BLOCK_MARK, autostart.BLOCK_MARK)  # noqa: SLF001
+        self.assertEqual(package_entry._PID_MARK, autostart.PID_MARK)  # noqa: SLF001
+
+    def test_it_opens_the_log_before_dispatch_with_no_standard_streams(self):
+        from dictate import __main__ as package_entry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("DICTATE_STATE_DIR")
+            os.environ["DICTATE_STATE_DIR"] = tmp
+            saved = sys.stdout, sys.stderr
+            seen = []
+
+            def dispatch(argv):
+                seen.append((argv, sys.stdout is not None,
+                             sys.stderr is sys.stdout))
+                print("the first imported code wrote this")
+                return 0
+
+            try:
+                sys.stdout = None
+                sys.stderr = None
+                code = package_entry._windowless_main(  # noqa: SLF001
+                    ["run", "--autostart"], dispatch=dispatch)
+            finally:
+                sys.stdout, sys.stderr = saved
+                if previous is None:
+                    os.environ.pop("DICTATE_STATE_DIR", None)
+                else:
+                    os.environ["DICTATE_STATE_DIR"] = previous
+
+            text = (Path(tmp) / "autostart.log").read_text(encoding="utf-8")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, [(["run", "--autostart"], True, True)])
+        self.assertIn("console-less package entry reached", text)
+        self.assertIn("the first imported code wrote this", text)
+        self.assertIn(autostart.BLOCK_MARK, text)
+        self.assertIn(autostart.PID_MARK, text)
+
+    def test_a_fault_before_run_at_logon_is_recorded_and_fails(self):
+        from dictate import __main__ as package_entry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("DICTATE_STATE_DIR")
+            os.environ["DICTATE_STATE_DIR"] = tmp
+            try:
+                code = package_entry._windowless_main(  # noqa: SLF001
+                    ["run", "--autostart"],
+                    dispatch=lambda _argv: 1 / 0)
+            finally:
+                if previous is None:
+                    os.environ.pop("DICTATE_STATE_DIR", None)
+                else:
+                    os.environ["DICTATE_STATE_DIR"] = previous
+            text = (Path(tmp) / "autostart.log").read_text(encoding="utf-8")
+
+        self.assertEqual(code, 1)
+        self.assertIn("failed before the logon start could report", text)
+        self.assertIn("ZeroDivisionError", text)
+        self.assertIn("Traceback", text)
+
+    def test_the_whole_module_path_runs_without_a_console(self):
+        """The closest portable equivalent of ``pythonw -m dictate``.
+
+        Windows CI runs the actual executable. Everywhere else this starts a
+        fresh interpreter, removes both streams before package execution, and
+        uses the exact module arguments the task uses. A known doctor refusal
+        keeps the child bounded while exercising CLI import, parsing,
+        ``run_at_logon`` and both layers of the durable log.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            cfg = state / "dictate.toml"
+            cfg.write_text(
+                "[autostart]\nstartup_attempts = 1\n"
+                "notify_on_failure = false\n",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["DICTATE_STATE_DIR"] = str(state)
+            source = str(Path(__file__).resolve().parent.parent / "src")
+            env["PYTHONPATH"] = (
+                source + os.pathsep + env["PYTHONPATH"]
+                if env.get("PYTHONPATH") else source)
+            script = (
+                "import runpy, sys; "
+                "sys.stdout = None; sys.stderr = None; "
+                "runpy.run_module('dictate', run_name='__main__')"
+            )
+            proc = subprocess.run(
+                [sys.executable, "-c", script, "--config", str(cfg),
+                 "run", "--autostart"],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False, timeout=15,
+            )
+            text = (state / "autostart.log").read_text(encoding="utf-8")
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("console-less package entry reached", text)
+        self.assertIn("attempt 1 of 1", text)
+        self.assertIn("gave up after 1 attempt(s)", text)
+
+
+class LoggingWithoutAConsole(unittest.TestCase):
+    def test_a_missing_stderr_installs_a_sink_not_a_broken_handler(self):
+        import logging
+
+        from dictate.logging_setup import configure
+
+        root = logging.getLogger()
+        saved_handlers, saved_level = list(root.handlers), root.level
+        saved_stderr = sys.stderr
+        try:
+            sys.stderr = None
+            configure(file="")
+            self.assertEqual(len(root.handlers), 1)
+            self.assertIsInstance(root.handlers[0], logging.NullHandler)
+            logging.getLogger("dictate.consoleless-test").warning("safe")
+        finally:
+            sys.stderr = saved_stderr
+            root.handlers[:] = saved_handlers
+            root.setLevel(saved_level)
 
 
 class TempState(unittest.TestCase):
