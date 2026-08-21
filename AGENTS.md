@@ -397,6 +397,35 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `autostart.bootstrap_block` looks one block back and shows it (only when
   that block's own pid line matches) under `--why`; `status` alone stays at
   40 lines and does not.
+- **`python -m dictate` and `python -c "import dictate"` both prepend the
+  current directory to `sys.path`, so a `dictate.py` or `dictate/` folder
+  wherever the process starts is found before the installed package - and
+  merely importing it can run an entire other program that never returns.**
+  MEASURED on the product owner's machine: `python -m dictate run --autostart`
+  and `python -c "import dictate"`, both run from `C:\Users\bchue` (Task
+  Scheduler's `Start In` for the logon task), printed a banner from neither
+  this codebase nor his configured hotkey and never returned. Six prior fixes
+  (PRs on `main`) missed this because every hand-run `dictate ...` command
+  goes through the console-script entry point, which is never affected - only
+  `-m` and `-c` are. The fix is `autostart.SAFE_PATH_FLAG` (`-P`), written
+  into `task_arguments()` ahead of `-m dictate`: Python's own switch for "do
+  not prepend the current directory", carried in the task's own `Arguments`
+  field rather than an environment variable that could be lost. `enable()`
+  also stopped starting the task in `%USERPROFILE%` - the folder where the
+  shadowing was actually observed - in favour of the install root, though
+  `-P` is what makes that irrelevant rather than the working directory choice
+  itself. Because `/Create ... /F` always overwrites the task under this
+  name, `dictate autostart enable` is also the repair for a task registered
+  before `-P` existed - `enable()` checks `task_is_shadow_safe()` against
+  what was registered *before* overwriting it and says "Repaired" when it
+  was not. `dictate autostart status` carries the same check permanently, so
+  an unrepaired task reads UNSAFE without waiting for `--why`. Never check
+  this by importing the candidate to see what it is - that IS the failure
+  mode - `doctor.check_import_shadow()` asks `importlib.util.find_spec` in a
+  short-lived, timed-out child process instead, which only resolves where a
+  name would load from and never executes it. `tests/test_autostart.py` (see
+  `ImmuneToAShadowingDictate`, which runs a real fake `dictate.py` through a
+  real interpreter) and the CI `autostart` job hold this on real Windows.
 - **`dictate autostart status --why` reports and changes nothing.** It is the one
   line he pastes: what Windows has running (`ProcessTools.pids_named`, tasklist),
   who holds the transcription port, the lock, and schtasks' raw answer. It may

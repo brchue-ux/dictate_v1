@@ -13,6 +13,7 @@ installed.
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -298,6 +299,79 @@ def check_install() -> CheckResult:
     return CheckResult("Install folder", Status.OK, where)
 
 
+#: Probe run in a short-lived child process, never in this one. It asks
+#: `importlib.util.find_spec` where the name `dictate` would come from and
+#: prints that path - it does not import the name, because the whole point is
+#: to answer this without running whatever is found. Root cause: `python -m
+#: dictate` and `python -c "import dictate"` both prepend the process's
+#: current directory to `sys.path`, so a stray `dictate.py` or `dictate/`
+#: folder wherever the process starts is found before the installed package
+#: ever is - and importing it can run an entire other program that never
+#: returns. That is what happened at logon (see AGENTS.md): the check below is
+#: how it is *found* without making the same mistake finding it.
+_SHADOW_PROBE = (
+    "import importlib.util\n"
+    "spec = importlib.util.find_spec('dictate')\n"
+    "print(spec.origin or '' if spec else '')\n"
+)
+
+#: A child process asking a filesystem finder where a name resolves should be
+#: instant. This is generous, not measured - the point is a bound, not a tight
+#: one, since a finder that never answers is exactly the failure mode this
+#: exists to survive.
+_SHADOW_PROBE_TIMEOUT_S = 10
+
+
+def check_import_shadow(cwd: Path | str | None = None) -> CheckResult:
+    """Would `import dictate`, run from `cwd`, find THIS install - or something
+    else that happens to sit there?
+
+    `cwd` defaults to the directory dictate is being run from right now,
+    because that is the one place this process can answer for; a registered
+    logon task is checked separately, in `dictate autostart status`, by
+    reading what it is registered to run rather than by asking it to run.
+    """
+    where = Path(cwd) if cwd is not None else Path.cwd()
+    installed = str(Path(__file__).resolve().parent)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _SHADOW_PROBE],
+            cwd=str(where), capture_output=True, text=True,
+            timeout=_SHADOW_PROBE_TIMEOUT_S, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            "Import safety", Status.WARN,
+            f"could not tell within {_SHADOW_PROBE_TIMEOUT_S}s whether something "
+            f"in {where} would shadow dictate",
+            f"Something answering to the name `dictate` in {where} did not "
+            "resolve in time. dictate does not know what it is and will not "
+            "touch it - if you put something there on purpose, this is safe to "
+            "ignore; if not, look for a `dictate.py` file or `dictate` folder "
+            f"in {where}.",
+        )
+    found = (proc.stdout or "").strip()
+    if not found:
+        return CheckResult("Import safety", Status.OK,
+                            f"nothing in {where} would shadow dictate")
+    found_dir = str(Path(found).resolve().parent)
+    if found_dir == installed:
+        return CheckResult("Import safety", Status.OK,
+                            f"`dictate` resolves to the installed copy ({found})")
+    return CheckResult(
+        "Import safety", Status.FAIL,
+        f"`import dictate` from {where} would load {found}, not the installed "
+        f"copy at {installed}",
+        f"Something else in {where} answers to the name `dictate` - a file "
+        "called `dictate.py`, or a folder called `dictate`. dictate will not "
+        "move, rename or delete it; whatever it is, it is yours. It only "
+        "matters if a `dictate` command is run from that folder, or from "
+        "anything that starts there - the logon task no longer does "
+        "(`dictate autostart status` says whether yours still needs "
+        "`dictate autostart enable` to fix that).",
+    )
+
+
 #: Phrases that are ordinary speech somewhere, so removing them wherever they
 #: appear eats real sentences. All six shipped in `filler_phrases`, which has no
 #: guard of any kind, and the subsequence guarantee cannot catch it - a deletion
@@ -447,6 +521,7 @@ def collect(cfg: Config, *, checks: list[Callable[[], CheckResult]] | None = Non
         check_platform(),
         check_python(),
         check_install(),
+        check_import_shadow(),
         check_hotkey(cfg),
         check_cleanup_rules(cfg),
         check_punctuation_rules(cfg),

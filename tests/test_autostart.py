@@ -113,7 +113,7 @@ class TheTaskDefinition(unittest.TestCase):
         exec_node = ET.fromstring(build_xml()).find(".//t:Exec", NS)
         self.assertTrue(exec_node.find("t:Command", NS).text.endswith("pythonw.exe"))
         self.assertEqual(exec_node.find("t:Arguments", NS).text,
-                         "-m dictate run --autostart")
+                         "-P -m dictate run --autostart")
         self.assertEqual(exec_node.find("t:WorkingDirectory", NS).text, r"C:\Users\owner")
 
     def test_the_description_says_how_to_turn_it_off(self):
@@ -130,13 +130,35 @@ class TheTaskDefinition(unittest.TestCase):
 
 class TheCommandItRuns(unittest.TestCase):
     def test_the_ordinary_case_pins_no_config_path(self):
-        self.assertEqual(autostart.task_arguments(), "-m dictate run --autostart")
+        self.assertEqual(autostart.task_arguments(), "-P -m dictate run --autostart")
 
     def test_a_config_that_was_named_is_pinned_and_quoted(self):
         args = autostart.task_arguments(r"C:\Users\o wner\dictate.toml")
         self.assertEqual(args,
-                         '-m dictate --config "C:\\Users\\o wner\\dictate.toml" '
+                         '-P -m dictate --config "C:\\Users\\o wner\\dictate.toml" '
                          "run --autostart")
+
+    def test_the_safe_path_flag_precedes_the_module_flag(self):
+        """Interpreter flags only mean anything before `-m` - after it, they are
+        the module's own arguments, not the interpreter's."""
+        self.assertTrue(autostart.task_arguments().startswith("-P -m"))
+
+
+class TheShadowSafetyCheck(unittest.TestCase):
+    def test_a_task_with_the_flag_is_safe(self):
+        self.assertTrue(autostart.task_is_shadow_safe(
+            r"C:\Python312\pythonw.exe -P -m dictate run --autostart"))
+
+    def test_a_task_without_it_is_not(self):
+        self.assertFalse(autostart.task_is_shadow_safe(
+            r"C:\Python312\pythonw.exe -m dictate run --autostart"))
+
+    def test_a_substring_match_does_not_count(self):
+        """A config path or flag that merely CONTAINS -P must not read as
+        safe - only the bare flag, as its own token, does."""
+        self.assertFalse(autostart.task_is_shadow_safe(
+            r'C:\Python312\pythonw.exe -m dictate --config "C:\Users\o\-Project" '
+            "run --autostart"))
 
     def test_quoting_leaves_ordinary_arguments_alone(self):
         self.assertEqual(autostart.quote_argument("--autostart"), "--autostart")
@@ -545,6 +567,71 @@ class TheScheduledLaunchShape(unittest.TestCase):
         self.assertNotIn("attempt 1 of 1", found)
 
 
+class ImmuneToAShadowingDictate(unittest.TestCase):
+    """The bug that took six attempts: a working directory holding its own
+    `dictate.py` is found before the installed package, and merely importing
+    it can run an entire other program. `task_arguments` now puts `-P` first,
+    which is Python's own switch for "never let the current directory shadow
+    an installed package" - this proves that switch actually does it, against
+    a real fake `dictate.py`, the same way `python -m dictate` and
+    `python -c "import dictate"` were run by hand when this was found.
+    """
+
+    def _shadowed(self, cwd: Path, *, safe: bool) -> subprocess.CompletedProcess:
+        source = str(Path(__file__).resolve().parent.parent / "src")
+        env = dict(os.environ)
+        env["PYTHONPATH"] = (
+            source + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH")
+            else source)
+        args = [sys.executable]
+        if safe:
+            args.append(autostart.SAFE_PATH_FLAG)
+        args += ["-m", "dictate", "--help"]
+        return subprocess.run(
+            args, cwd=str(cwd), env=env,
+            capture_output=True, text=True, check=False, timeout=15,
+        )
+
+    def test_without_the_flag_the_impostor_runs_first(self):
+        """The vulnerability, reproduced: this is the control case, not the
+        fix - it documents what `python -m dictate` did on his machine."""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as home:
+            (Path(home) / "dictate.py").write_text(
+                "print('SHADOW-IMPORTED')\nimport sys\nsys.exit(0)\n",
+                encoding="utf-8",
+            )
+            proc = self._shadowed(Path(home), safe=False)
+        self.assertIn("SHADOW-IMPORTED", proc.stdout)
+
+    def test_the_flag_the_task_now_carries_stops_it(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as home:
+            (Path(home) / "dictate.py").write_text(
+                "print('SHADOW-IMPORTED')\nimport sys\nsys.exit(0)\n",
+                encoding="utf-8",
+            )
+            proc = self._shadowed(Path(home), safe=True)
+        self.assertNotIn("SHADOW-IMPORTED", proc.stdout)
+        # And the installed package is what actually ran, not merely "not the
+        # impostor" - the ordinary --help output is still there.
+        self.assertIn("Push-to-talk dictation", proc.stdout)
+
+    def test_a_package_shaped_impostor_is_stopped_too(self):
+        """Not only a bare `dictate.py` - a `dictate/` folder with its own
+        `__init__.py` shadows exactly the same way and must be stopped the
+        same way."""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as home:
+            pkg = Path(home) / "dictate"
+            pkg.mkdir()
+            (pkg / "__init__.py").write_text(
+                "print('SHADOW-IMPORTED')\nimport sys\nsys.exit(0)\n",
+                encoding="utf-8",
+            )
+            (pkg / "__main__.py").write_text("", encoding="utf-8")
+            proc = self._shadowed(Path(home), safe=True)
+        self.assertNotIn("SHADOW-IMPORTED", proc.stdout)
+        self.assertIn("Push-to-talk dictation", proc.stdout)
+
+
 class LoggingWithoutAConsole(unittest.TestCase):
     def test_a_missing_stderr_installs_a_sink_not_a_broken_handler(self):
         import logging
@@ -791,6 +878,21 @@ class TheStatusReport(TempState):
         self.assertIn("Before the CLI was even imported", why)
         self.assertIn("interpreter: C:\\Python311\\pythonw.exe", why)
         self.assertIn("working directory: C:\\Users\\bchue", why)
+
+    def test_a_task_registered_before_the_fix_is_called_out_by_name(self):
+        """`SCHTASKS_RUNNING` names a task without `-P` - the shape every
+        already-registered task has, since it predates the flag. The report
+        must say so plainly, and say `enable` is the fix, without him having
+        to know what `-P` is."""
+        text = "\n".join(autostart.render(a_reading()))
+        self.assertIn("UNSAFE", text)
+        self.assertIn("dictate autostart enable", text)
+
+    def test_a_repaired_task_gets_no_such_warning(self):
+        schtasks = SCHTASKS_RUNNING.replace(
+            "-m dictate run --autostart", "-P -m dictate run --autostart")
+        text = "\n".join(autostart.render(a_reading(schtasks=schtasks)))
+        self.assertNotIn("UNSAFE", text)
 
 
 class WhereHeWillActuallyRead(TempState):
@@ -1049,6 +1151,37 @@ class WhatEnableSaysItDid(TempState):
         self.assertIn("already running", text)
         self.assertIn("process 1234", text)
         self.assertNotIn("running NOW", text)
+
+    def test_it_no_longer_starts_the_task_in_his_home_folder(self):
+        """`%USERPROFILE%` is where the shadowing was actually observed - the
+        task now starts in the installed package's own folder instead, which
+        `-P` makes irrelevant to safety but which costs nothing to also get
+        right."""
+        from unittest import mock
+
+        from dictate import update as update_mod
+
+        self._windows(autostart.StartOutcome("started", pid=4242))
+        seen = {}
+        real_task_xml = autostart.task_xml
+
+        def spy(**kwargs):
+            seen.update(kwargs)
+            return real_task_xml(**kwargs)
+
+        with mock.patch.object(autostart, "task_xml", spy):
+            autostart.enable(config_mod.load(None))
+
+        self.assertEqual(seen["working_directory"], str(update_mod.find_install_root()))
+        self.assertNotIn("USERPROFILE", seen["working_directory"])
+
+    def test_a_task_registered_the_old_way_is_reported_as_repaired(self):
+        """`registered_command` here answers with the pre-`-P` shape (see
+        `_windows` above), matching his actual machine - `enable` must notice
+        and say so, not silently fix it."""
+        self._windows(autostart.StartOutcome("started", pid=4242))
+        text = "\n".join(autostart.enable(config_mod.load(None)))
+        self.assertIn("Repaired", text)
 
     def test_the_typed_command_is_the_same_two_paragraphs(self):
         """`dictate autostart enable` is what he types, what the tray runs and
