@@ -6,30 +6,51 @@ separate press and release callbacks, which is what push-to-talk needs.
 `PinW/whisper-key-local` (MIT) uses the same package for the same reason;
 reading it is what pointed here.
 
-**Correction, found while diagnosing toggle-off being missed away from the
-window he started in (2026-08-21): this is not a `WH_KEYBOARD_LL` hook.**
+**Correction (2026-08-21, PR #30): this is not a `WH_KEYBOARD_LL` hook.**
 `global_hotkeys==0.1.7` (`hotkey_checker.py::HotkeyChecker.run`) is a plain
 Python thread that calls `win32api.GetAsyncKeyState()` for every registered
 combination every 20 ms. It only *behaves* like a hook because that poll is
 fast enough and global enough that the difference is invisible in the
-ordinary case. The distinction matters because `GetAsyncKeyState` is a
-key-STATE query, not an event: unlike a real `WH_KEYBOARD_LL` hook it cannot
-be "missed" by a slow callback, but it inherits whatever Windows will and will
-not tell an unelevated process about the keyboard right now - the same
-boundary this codebase already documents for the mouse hook and for
-`SendInput` (`hotkey_switch.MOUSE_COST`, `inject.py`'s "administrator" error).
-That boundary is the leading suspect for the toggle-off report; it is not
-confirmed, because it depends on which window he was in, which nobody here can
-observe. See the PR that added this correction for what is proved and what
-still needs his machine.
+ordinary case.
 
-`actuate_on_partial_release=True` matters for "hold": releasing the *last* key
-of Ctrl+Alt+Space should end the recording even though Ctrl and Alt are still
-down, because that is how people actually let go of a chord. Traced through
-`hotkey_checker.py`'s own state machine, this setting does not change toggle
-mode's observed behaviour for an ordinary full press-then-release - toggle's
-`False` was not the cause of a missed stop, and is left as it was rather than
-changed on an unproven hunch.
+PR #30 also proposed the elevated-window/UIPI privilege boundary as the
+leading suspect for toggle-off being missed - unconfirmed there, correctly.
+**He has since reproduced it staying in the dictate window, in the terminal,
+and on another screen, with identical results, including when he never left
+the terminal at all. That rules focus out entirely; the boundary is not the
+cause.**
+
+**Root cause, found by driving the real pinned `hotkey_checker.py` source
+with a synthetic key-state feed (win32api stubbed) rather than reasoning
+about it: `actuate_on_partial_release=False` requires every key of the chord
+to read as simultaneously "not pressed" in the same 20 ms poll before the
+library will arm itself for the next press.** PR #30's hand trace covered
+only the idealised case - all three keys released within the same poll - and
+correctly found no problem there. It never tested a release that is not
+fully simultaneous. A human letting go of a three-key chord like
+Ctrl+Alt+Space essentially never does; and if even one of them (most often a
+modifier he is still resting a finger on) never reads as fully up before he
+presses the whole chord again, `hotkey_checker.py` never sees the down-edge
+of that second press at all: no `press_callback` call, no "toggle hotkey
+seen" log line, nothing. This is not focus-dependent - it is a plain
+comparison of key states - which is exactly why the UIPI theory's own
+disconfirming test could not touch it. Toggle's own internal reset then
+never runs until every key of the chord happens to read simultaneously up,
+which can outlast the press he actually meant to register.
+
+`actuate_on_partial_release=True` is exactly the fix "hold" mode already
+relies on for the mirror-image problem: releasing the *last* key of
+Ctrl+Alt+Space should end the recording even though Ctrl and Alt are still
+down, because that is how people actually let go of a chord. Toggle mode now
+sets it too - not to fire a release callback (it still passes `None` for
+that, so toggle's own on/off alternation is unchanged), only to let the
+library re-arm the instant any one key of the chord comes up, rather than
+waiting for all of them to agree at once. Driving the same synthetic feed
+with this flag set confirms the previously-stuck sequence now re-arms
+correctly, and that an intentional continuous hold (all three keys reading
+down at every poll) is unaffected - the flag only changes when the *reset*
+after a release happens, never the press edge. See the PR that made this
+change for the full methodology and what still needs his machine.
 """
 
 from __future__ import annotations
@@ -88,7 +109,11 @@ class WindowsHotkeyListener:
                          "on" if self._toggle_on else "off")
                 (on_press if self._toggle_on else on_release)()
 
-            binding = [self.combination, _guard(press), None, False]
+            # actuate_on_partial_release=True - see the module docstring's
+            # root-cause note. release_callback stays None: this only changes
+            # when the library re-arms itself for the next press, never
+            # whether a release fires anything.
+            binding = [self.combination, _guard(press), None, True]
         else:
             def press() -> None:
                 log.debug("hotkey press seen")

@@ -513,17 +513,33 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `WH_KEYBOARD_LL` hook, whatever `platform/windows/hotkey.py` used to claim.**
   Its actual mechanism, read from the real 0.1.7 source
   (`hotkey_checker.py::HotkeyChecker.run`), is a plain thread polling
-  `win32api.GetAsyncKeyState()` every 20 ms. Found diagnosing a report that
-  toggle-off (`[hotkey] mode = "toggle"`) only registered while focused in the
-  window dictation started in — traced the whole state machine and it resets
-  correctly on an ordinary full press-release-press-release regardless of
-  `actuate_on_partial_release`, so that setting is not the cause. The leading
-  suspect is the same boundary this file already documents for the mouse hook and
-  for `SendInput` (`hotkey_switch.MOUSE_COST`, `inject.py`'s "administrator"
-  error): what Windows will tell an unelevated process about the keyboard while a
-  different-privilege window is in front. Not confirmed — it depends on which
-  window he was in, which nobody off his machine can observe. `press()` now logs
-  every toggle it sees, so the next report carries evidence instead of a guess.
+  `win32api.GetAsyncKeyState()` every 20 ms.
+- **Toggle-off never registering was not focus-dependent — the elevated-window/UIPI
+  theory (once the leading suspect here) is refuted: he reproduced the identical
+  failure staying in the dictate window, in the terminal, and on another screen,
+  including with the terminal's input line focused the whole time.** The real cause,
+  found by driving the real pinned `hotkey_checker.py` source with a synthetic
+  key-state feed rather than reasoning about it: toggle's
+  `actuate_on_partial_release=False` requires every key of the chord to read as
+  simultaneously "not pressed" in the same 20 ms poll before the library re-arms
+  for the next press. A human letting go of a three-key chord like Ctrl+Alt+Space
+  essentially never does that — one modifier (often the one his finger is still
+  resting on) never reads as fully up, and `hotkey_checker.py` never sees the next
+  press's down-edge at all: no `press_callback` call, no "toggle hotkey seen" log
+  line, nothing. Focus-independent by construction, which is exactly why the UIPI
+  theory's own disconfirming test couldn't touch it. Fixed by setting
+  `actuate_on_partial_release=True` for toggle too — the same flag "hold" mode
+  already relies on for the mirror-image case (ending a recording on the *last* key
+  of the chord to lift) — while leaving `release_callback=None`, so toggle's own
+  on/off alternation is still driven entirely by the press edge, never by a release.
+  `tests/test_hotkey_listener.py` pins that dictate asks the library for this flag
+  and that toggle's alternation is unaffected; the library's own state-machine
+  response to the flag is established by direct testing of the real pinned source
+  (methodology in the PR that made this change), not re-implemented in this repo's
+  test suite — `platform/windows/hotkey.py` remains untested off Windows for the
+  same reason `platform/windows/mouse.py` and `platform/windows/tray.py` are.
+  `press()` still logs every toggle it sees, which is what would show whether a
+  *different* cause remains if this one turns out not to be the whole story.
 
 ## Maintaining this file
 
