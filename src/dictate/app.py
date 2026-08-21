@@ -135,6 +135,14 @@ class Application:
             notify=self.notify,
         )
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dictate-finalize")
+        # A worker of its own, never the transcription pool above: the mic has
+        # to come down the instant a recording ends, not whenever a queued
+        # GPU pass happens to finish, and `push_audio` can call all the way
+        # into a stop on the audio callback's own thread (the max_utterance_s
+        # ceiling) - PortAudio forbids stopping a stream from inside its own
+        # callback, so that call can never run inline. See Pipeline's
+        # `mic_submit` and the module docstring's guarantee.
+        self._mic_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dictate-mic")
         #: Transcriptions queued or running, so the tray can say "transcribing"
         #: for exactly as long as that is true and not a moment longer.
         self._in_flight = 0
@@ -187,6 +195,11 @@ class Application:
             submit=self._submit,
             notify=self.notify,
             record=self.history.record,
+            # The pipeline owns the mic's lifetime from here - started at
+            # press, stopped on every exit from a recording - rather than the
+            # single always-on stream this used to be. See `_mic_pool` above.
+            audio=self.audio,
+            mic_submit=self._mic_pool.submit,
         )
         # The paste guard that clears his modifiers has to know when he has
         # already started the next utterance: a synthesised key-up goes through
@@ -263,10 +276,17 @@ class Application:
                 self.streaming = None
                 self.pipeline.streaming = None
 
-        # The second argument is what makes "some of that recording was thrown
-        # away" a thing he is told at the release rather than a warning in a log
-        # file that stops after the hundredth one.
+        # Proved once, here, so a missing or broken microphone is reported now
+        # rather than on his first dictation - the same eagerness as the
+        # cleanup rules and the punctuation file above. The second argument to
+        # `start` is what makes "some of that recording was thrown away" a
+        # thing he is told at the release rather than a warning in a log file
+        # that stops after the hundredth one. It is stopped again immediately:
+        # from here on, the pipeline opens it at each hotkey press and closes
+        # it at each release, so the mic is live only while he is actually
+        # dictating - not for the rest of the time dictate is running.
         self.audio.start(self.pipeline.push_audio, self.pipeline.note_input_loss)
+        self.audio.stop()
         self.console(f"dictate: microphone     {self.audio.describe}")
         self.console(f"dictate: paste method   {self.injector.describe}")
         # Said out loud, once, because a record of everything he says is not
@@ -907,11 +927,20 @@ class Application:
         # that is already in flight finish and paste - that is the user's last
         # sentence, and it is worth a moment - and only then take the server
         # away. Killing the server first would strand that request.
+        #
+        # "pipeline" comes before "microphone worker" and "microphone" on
+        # purpose: if he is mid-utterance when the stop arrives, `pipeline.
+        # close()` is what ends the recording and dispatches the release onto
+        # `_mic_pool` - draining that pool is what waits for it to actually
+        # happen before the device is torn down, rather than the release
+        # racing its own teardown.
         for step, fn in (
             ("hotkey listener", self.hotkey.stop),
+            ("pipeline", self.pipeline.close),
+            ("microphone worker", lambda: self._mic_pool.shutdown(
+                wait=True, cancel_futures=True)),
             ("microphone", self.audio.close),
             ("deferred delivery", self.deferred.close),
-            ("pipeline", self.pipeline.close),
             # cancel_futures drops work that has not started; the running job
             # is allowed to complete.
             ("transcription worker", lambda: self._pool.shutdown(

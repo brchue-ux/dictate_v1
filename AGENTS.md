@@ -497,6 +497,33 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   sessions. Anything that states the cost — the README, `autostart enable`'s output,
   the example config — reads that setting rather than asserting a number, because
   the honest answer is different when it is 0.
+- **The mic is released on every exit from a recording, not only the happy one.**
+  `Pipeline` owns the microphone's lifetime now (`audio`/`mic_submit` constructor
+  args) — started at `start_utterance`, stopped as the unconditional first thing in
+  `finish_utterance`, `cancel_utterance` and `close`, before anything that could
+  raise. The stop call is dispatched through `mic_submit`, never called inline,
+  because `push_audio`'s `max_utterance_s` ceiling can call all the way into a stop
+  from the audio callback's own thread, and PortAudio forbids stopping a stream
+  from inside its own callback (`Pa_StopStream`'s own documented restriction).
+  `app.Application` wires `mic_submit` to a dedicated one-worker pool (`_mic_pool`),
+  separate from the transcription pool, so a release is never queued behind a GPU
+  pass. `tests/test_pipeline.py::TheMicIsReleased` holds every path.
+  `pipeline.py`'s own module docstring carries the full reasoning.
+- **`global_hotkeys` (the hotkey package, pinned `>=0.1.7`) is not a
+  `WH_KEYBOARD_LL` hook, whatever `platform/windows/hotkey.py` used to claim.**
+  Its actual mechanism, read from the real 0.1.7 source
+  (`hotkey_checker.py::HotkeyChecker.run`), is a plain thread polling
+  `win32api.GetAsyncKeyState()` every 20 ms. Found diagnosing a report that
+  toggle-off (`[hotkey] mode = "toggle"`) only registered while focused in the
+  window dictation started in — traced the whole state machine and it resets
+  correctly on an ordinary full press-release-press-release regardless of
+  `actuate_on_partial_release`, so that setting is not the cause. The leading
+  suspect is the same boundary this file already documents for the mouse hook and
+  for `SendInput` (`hotkey_switch.MOUSE_COST`, `inject.py`'s "administrator"
+  error): what Windows will tell an unelevated process about the keyboard while a
+  different-privilege window is in front. Not confirmed — it depends on which
+  window he was in, which nobody off his machine can observe. `press()` now logs
+  every toggle it sees, so the next report carries evidence instead of a guess.
 
 ## Maintaining this file
 

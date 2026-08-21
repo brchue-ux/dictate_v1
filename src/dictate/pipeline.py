@@ -7,7 +7,9 @@
     audio blocks ──────┼──► utterance buffer   (kept whole, for the GPU pass)
                        └──► caption queue      (disposable, display only)
                        │
-    hotkey up   ──► the caption DECODER is closed here and its queued audio
+    hotkey up   ──► the mic is released FIRST, before anything else below
+                    can fail - see the guarantee note
+                    the caption DECODER is closed here and its queued audio
                     invalidated: no new caption text can ever be produced
                     the words already on screen stay there, greyed, so he can
                     still see what he said while the GPU works
@@ -28,6 +30,25 @@
 
 `clean` may only delete words; `punctuate` turns a spoken "comma" into ",". They
 are separate stages in that order on purpose - see `_punctuate`.
+
+**The mic is released on every exit from a recording, not only the one where
+he presses the hotkey again.** `finish_utterance`, `cancel_utterance` and
+`close` each stop it as the very first thing they do once `_recording` goes
+back to `False` - before the caption session is closed, before anything is
+queued for transcription, before any of it has a chance to raise. It is a
+plain statement, never inside a `try` that could skip it, so nothing later in
+those methods can leave the capture stream running. `start_utterance` is the
+only place that starts it, guarded the same way `begin_deferred` already is:
+a mic that fails to start is logged and notified, never something that stops
+the recording from being marked as begun, because leaving `_recording` stuck
+`True` from a half-finished press would itself become a way to leak the mic
+forever. The actual `AudioCapture.start`/`.stop()` calls are dispatched
+through `mic_submit` rather than called inline, because `finish_utterance` can
+run on the audio callback's own thread (the `max_utterance_s` ceiling in
+`push_audio`), and PortAudio forbids stopping a stream from inside its own
+callback. `tests/test_pipeline.py::TheMicIsReleased` holds this across every
+path out of a recording - normal stop, cancel, delivery failure, target
+closure, a second dictation starting, and `close()` mid-utterance.
 
 **Constraint 4, and where it is enforced.** Caption text is display-only: it
 must never reach his document. This module is what makes that structural rather
@@ -69,7 +90,7 @@ from . import deferred as deferred_mod, delivery
 from .audio.buffer import UtteranceBuffer
 from .cleanup.engine import CleanResult
 from .errors import DictateError, InjectionError
-from .platform.base import KEEP, CaptionOverlay, OverlayState, TargetWindow
+from .platform.base import KEEP, AudioCapture, CaptionOverlay, OverlayState, TargetWindow
 from .punctuation.engine import PunctuationResult
 
 log = logging.getLogger(__name__)
@@ -159,12 +180,25 @@ class Pipeline:
         notify: Notify | None = None,
         record: Record | None = None,
         clock: Callable[[], float] = time.monotonic,
+        audio: AudioCapture | None = None,
+        mic_submit: Submit | None = None,
     ) -> None:
         self.batch = batch
         self.cleaner = cleaner
         self.injector = injector
         self.windows = windows
         self.overlay = overlay
+        #: The microphone. `None` is a legitimate embedding (a caller that
+        #: does not want this module managing capture at all - most tests);
+        #: whenever it is supplied, `start_utterance`/`finish_utterance` etc.
+        #: own its lifetime completely - see the module docstring's guarantee.
+        self.audio = audio
+        #: Where an `AudioCapture.start`/`.stop()` call actually runs. Never
+        #: called inline - see the guarantee note above for why. Defaults to
+        #: running it on the calling thread, which is only safe for tests and
+        #: embeddings with no real audio callback thread to collide with;
+        #: `app.Application` gives this a dedicated worker.
+        self.mic_submit: Submit = mic_submit or (lambda fn: fn())
         #: Spoken punctuation, AFTER cleanup - see `_finalize`. None (the
         #: default, and what `[punctuation] enabled = false` produces) leaves
         #: the cleaned text exactly as it is.
@@ -263,6 +297,7 @@ class Pipeline:
                 except Exception:
                     self._session = None
                     log.exception("live captions failed to start")
+        self._audio_start()
         # The target goes with the state: it is what tells the overlay which
         # monitor to appear on, and the window it names is the one the text will
         # be pasted into, so the captions come up where he is already looking.
@@ -277,6 +312,33 @@ class Pipeline:
         except Exception:
             log.exception("could not read the focused window")
             return None
+
+    # -- the mic itself ----------------------------------------------------
+    #
+    # Both of these are called outside `self._lock` - matching every other
+    # platform call this class makes - and neither may ever raise: a mic that
+    # will not start is a degraded recording, reported and notified, never a
+    # reason to leave `_recording` stuck; a mic that will not stop is reported
+    # and dropped, because raising here would skip whatever runs after it in
+    # the caller, which is exactly the leak this pair exists to prevent.
+
+    def _audio_start(self) -> None:
+        if self.audio is None:
+            return
+        try:
+            self.mic_submit(lambda: self.audio.start(self.push_audio, self.note_input_loss))
+        except Exception:
+            log.exception("could not start the microphone")
+            self.notify("warning", "dictate could not start the microphone for "
+                                   "that recording.")
+
+    def _audio_stop(self) -> None:
+        if self.audio is None:
+            return
+        try:
+            self.mic_submit(self.audio.stop)
+        except Exception:
+            log.exception("could not stop the microphone")
 
     # -- audio -----------------------------------------------------------
 
@@ -469,6 +531,13 @@ class Pipeline:
             duration = len(pcm) / 2 / self.sample_rate
             self._pending += 1
 
+        # First, unconditionally, before anything below gets a chance to
+        # raise: this is the guarantee the module docstring names. Whatever
+        # happens to the rest of this method - a transcription that can never
+        # be scheduled, a history that will not write - the mic is already
+        # off by the time it happens.
+        self._audio_stop()
+
         # Said at every release, with how long the key was actually held. It is
         # one line and it is the only record of an utterance that ended when he
         # did not mean it to - a chord half-released ends the recording, by
@@ -521,6 +590,7 @@ class Pipeline:
             self._uid += 1
             stale, self._session = self._session, None
             self.buffer.reset()
+        self._audio_stop()
         if stale is not None:
             self._enqueue((_CLOSE, stale))
         self.overlay.set_state(OverlayState.HIDDEN, "")
@@ -762,5 +832,6 @@ class Pipeline:
             self._closed = True
             self._recording = False
             stale, self._session = self._session, None
+        self._audio_stop()
         self._close_session(stale)
         self._drain_queue()
