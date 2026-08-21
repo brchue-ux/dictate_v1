@@ -407,10 +407,18 @@ jobs:
           # GUI interpreter the logon task actually launches, with no console
           # and therefore no stdout or stderr. A one-attempt config makes the
           # expected missing-model refusal quick and keeps MessageBoxW off.
+          # `-WorkingDirectory` is set away from both the checkout and the
+          # state directory on purpose: Task Scheduler starts the real task
+          # with `Start In` set to his profile root, never to wherever dictate
+          # happens to be installed, and nothing here had exercised that
+          # before - `icon_dir`, the config path and the state directory are
+          # all meant to be independent of it.
           $ErrorActionPreference = 'Stop'
           $state = Join-Path $env:RUNNER_TEMP 'dictate-pythonw-state'
+          $startIn = Join-Path $env:RUNNER_TEMP 'dictate-pythonw-startin'
           $config = Join-Path $state 'dictate.toml'
           New-Item -ItemType Directory -Path $state -Force | Out-Null
+          New-Item -ItemType Directory -Path $startIn -Force | Out-Null
           @'
           [autostart]
           startup_attempts = 1
@@ -427,7 +435,7 @@ jobs:
           $quotedConfig = '"' + $config + '"'
           $process = Start-Process -FilePath $pythonw -ArgumentList @(
             '-m', 'dictate', '--config', $quotedConfig, 'run', '--autostart'
-          ) -Wait -PassThru
+          ) -WorkingDirectory $startIn -Wait -PassThru
           if ($process.ExitCode -ne 2) {
             throw "the console-less refusal exited $($process.ExitCode), expected 2"
           }
@@ -439,6 +447,7 @@ jobs:
           $log = Get-Content -LiteralPath $logPath -Raw
           foreach ($needed in @('console-less package entry reached',
                                 'dictate starting at logon (pid ',
+                                "working directory: $startIn",
                                 'attempt 1 of 1',
                                 'gave up after 1 attempt(s)')) {
             if ($log -notmatch [regex]::Escape($needed)) {

@@ -261,6 +261,40 @@ class TheLogonLog(unittest.TestCase):
         self.assertIn("this morning", block)
         self.assertNotIn("irrelevant", block)
 
+    def test_the_block_before_the_last_one_is_the_bootstrap(self):
+        """`__main__.py` writes its own block, with its own pid line, moments
+        before `run_at_logon` writes the block `last_block` actually shows -
+        so the breadcrumb one block back, for the SAME pid, is what a run that
+        reached `run_at_logon` buried."""
+        text = (f"{autostart.BLOCK_MARK} entry 2026-08-18 ===\n"
+                f"{autostart.PID_MARK}8804)\n"
+                "interpreter: C:\\Python311\\pythonw.exe\n"
+                "working directory: C:\\Users\\bchue\n"
+                f"{autostart.BLOCK_MARK} 2026-08-18 ===\n"
+                f"{autostart.PID_MARK}8804)\n"
+                "attempt 1 of 1\n")
+        found = autostart.bootstrap_block(text, 8804)
+        self.assertIn("interpreter:", found)
+        self.assertIn("working directory:", found)
+        self.assertNotIn("attempt 1 of 1", found)
+
+    def test_a_bootstrap_block_for_a_different_pid_is_not_shown(self):
+        """Windows reuses process numbers; a bootstrap block that names a
+        different pid is somebody else's run, not evidence for this one."""
+        text = (f"{autostart.BLOCK_MARK} entry 2026-08-18 ===\n"
+                f"{autostart.PID_MARK}1111)\n"
+                "interpreter: C:\\Python311\\pythonw.exe\n"
+                f"{autostart.BLOCK_MARK} 2026-08-18 ===\n"
+                f"{autostart.PID_MARK}8804)\n"
+                "attempt 1 of 1\n")
+        self.assertEqual(autostart.bootstrap_block(text, 8804), "")
+
+    def test_no_pid_or_only_one_block_yields_nothing(self):
+        text = f"{autostart.BLOCK_MARK} entry 2026-08-18 ===\ninterpreter: x\n"
+        self.assertEqual(autostart.bootstrap_block(text, None), "")
+        self.assertEqual(autostart.bootstrap_block(text, 8804), "")
+        self.assertEqual(autostart.bootstrap_block("no blocks here", 8804), "")
+
     def test_a_log_with_no_blocks_in_it_is_shown_whole(self):
         self.assertEqual(autostart.last_block("just some text"), "just some text")
 
@@ -413,6 +447,102 @@ class TheConsolelessPackageEntry(unittest.TestCase):
         self.assertIn("console-less package entry reached", text)
         self.assertIn("attempt 1 of 1", text)
         self.assertIn("gave up after 1 attempt(s)", text)
+
+
+class TheScheduledLaunchShape(unittest.TestCase):
+    """`pythonw.exe -m dictate --autostart`, as Task Scheduler actually starts
+    it - console-less (covered above already), from `%USERPROFILE%` rather
+    than wherever dictate happens to be checked out, and with none of a
+    developer's shell environment inherited. That specific combination had
+    never been run together before: every existing consoleless test reused
+    `os.environ.copy()` and the parent's own working directory. This is what
+    would have caught a `Path.cwd()` or an assumed environment variable
+    reaching the resolved state or config path.
+    """
+
+    def _run(self, *, cwd: Path, env: dict[str, str], config_body: str,
+             timeout_s: float = 15) -> tuple[subprocess.CompletedProcess, str]:
+        config = cwd / "dictate.toml"
+        config.write_text(config_body, encoding="utf-8")
+        source = str(Path(__file__).resolve().parent.parent / "src")
+        env = dict(env)
+        env["PYTHONPATH"] = (
+            source + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH")
+            else source)
+        script = (
+            "import runpy, sys; "
+            "sys.stdout = None; sys.stderr = None; "
+            "runpy.run_module('dictate', run_name='__main__')"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script, "--config", str(config),
+             "run", "--autostart"],
+            cwd=str(cwd), env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False, timeout=timeout_s,
+        )
+        state = Path(env["DICTATE_STATE_DIR"])
+        text = (state / "autostart.log").read_text(encoding="utf-8")
+        return proc, text
+
+    def test_a_different_working_directory_and_a_bare_environment(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as home, \
+             tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as state:
+            # The one thing Task Scheduler is documented to set differently:
+            # `Start In` is his profile root, not dictate's install directory
+            # or a checkout - nothing here is the state directory or the
+            # source tree.
+            cwd = Path(home)
+            # No PYTHONHOME, no VIRTUAL_ENV, no LANG, no shell rc-file leftovers
+            # - only what a bare process needs to start and to find dictate.
+            # dictate's own state resolution goes through DICTATE_STATE_DIR,
+            # which stands in for LOCALAPPDATA here exactly as it does for
+            # the real Windows job in ci.yml.
+            env = {"DICTATE_STATE_DIR": state}
+            if sys.platform == "win32":
+                for var in ("SystemRoot", "PATHEXT"):
+                    if var in os.environ:
+                        env[var] = os.environ[var]
+            else:
+                env["PATH"] = "/usr/bin:/bin"
+            proc, text = self._run(
+                cwd=cwd, env=env,
+                config_body="[autostart]\nstartup_attempts = 1\n"
+                            "notify_on_failure = false\n")
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("console-less package entry reached", text)
+        self.assertIn(f"working directory: {cwd}", text)
+        self.assertIn("attempt 1 of 1", text)
+        self.assertIn("gave up after 1 attempt(s)", text)
+        # The log itself was found under `state`, not under `cwd` or beside
+        # the source tree - state resolution did not follow the process here.
+
+    def test_the_bootstrap_breadcrumb_is_recoverable_from_that_real_log(self):
+        """The breadcrumb `__main__.py` writes survives being buried under
+        `run_at_logon`'s own block in a REAL two-block log, not just a
+        hand-built string - `bootstrap_block` is exercised here against the
+        exact file the scheduled-launch shape above produces."""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as home, \
+             tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as state:
+            cwd = Path(home)
+            env = {"DICTATE_STATE_DIR": state}
+            if sys.platform != "win32":
+                env["PATH"] = "/usr/bin:/bin"
+            proc, text = self._run(
+                cwd=cwd, env=env,
+                config_body="[autostart]\nstartup_attempts = 1\n"
+                            "notify_on_failure = false\n")
+
+        self.assertEqual(proc.returncode, 2)
+        pid = autostart.parse_logon_start(autostart.last_block(text)).pid
+        self.assertIsNotNone(pid)
+        found = autostart.bootstrap_block(text, pid)
+        self.assertIn("console-less package entry reached", found)
+        self.assertIn(f"working directory: {cwd}", found)
+        # And it is genuinely a DIFFERENT block from the one `last_block`
+        # returns - the whole point is that the two do not collapse into one.
+        self.assertNotIn("attempt 1 of 1", found)
 
 
 class LoggingWithoutAConsole(unittest.TestCase):
@@ -638,6 +768,29 @@ class TheStatusReport(TempState):
         self.assertIn("running now:     YES", lines)
         self.assertIn("dictate stop", lines)
         self.assertIn(str(os.getpid()), lines)
+
+    def test_why_surfaces_the_bootstrap_block_the_plain_report_does_not(self):
+        """`status` (40 lines) and `status --why` (200) both read only the last
+        block by design - but only `--why` also looks one block back for the
+        breadcrumb `__main__.py` wrote before `run_at_logon` buried it."""
+        autostart.log_path().parent.mkdir(parents=True, exist_ok=True)
+        autostart.log_path().write_text(
+            f"{autostart.BLOCK_MARK} entry 2026-08-18 ===\n"
+            f"{autostart.PID_MARK}8804)\n"
+            "interpreter: C:\\Python311\\pythonw.exe\n"
+            "working directory: C:\\Users\\bchue\n"
+            f"{autostart.BLOCK_MARK} 2026-08-18 ===\n"
+            f"{autostart.PID_MARK}8804)\n"
+            "attempt 1 of 1\n"
+            "outcome: gave up after 1 attempt(s).\n",
+            encoding="utf-8")
+        plain = "\n".join(autostart.status_lines(why=False))
+        self.assertNotIn("interpreter:", plain)
+
+        why = "\n".join(autostart.status_lines(why=True))
+        self.assertIn("Before the CLI was even imported", why)
+        self.assertIn("interpreter: C:\\Python311\\pythonw.exe", why)
+        self.assertIn("working directory: C:\\Users\\bchue", why)
 
 
 class WhereHeWillActuallyRead(TempState):
