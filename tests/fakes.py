@@ -128,6 +128,40 @@ class FakeStreaming:
         pass
 
 
+class FakeAudioCapture:
+    """Stands in for the PortAudio stream.
+
+    `events` is the one thing every mic-release test reads: "start" and "stop"
+    in the order the pipeline actually called them, so a test can assert the
+    mic went live and came back down again rather than just that some call
+    happened somewhere.
+    """
+
+    def __init__(self, *, fail_start: Exception | None = None) -> None:
+        self.events: list[str] = []
+        self.fail_start = fail_start
+        self.running = False
+
+    def start(self, callback, on_loss=None) -> None:
+        if self.fail_start:
+            raise self.fail_start
+        self.callback = callback
+        self.on_loss = on_loss
+        self.running = True
+        self.events.append("start")
+
+    def stop(self) -> None:
+        self.running = False
+        self.events.append("stop")
+
+    def close(self) -> None:
+        self.stop()
+
+    @property
+    def describe(self) -> str:
+        return "fake microphone"
+
+
 class FakeInjector:
     def __init__(self, error: Exception | None = None) -> None:
         self.sent: list[tuple[str, TargetWindow | None]] = []

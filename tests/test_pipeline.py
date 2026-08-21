@@ -11,7 +11,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from dictate import pipeline as pipeline_mod
+from dictate import delivery, pipeline as pipeline_mod
 from dictate.cleanup.engine import CleanResult
 from dictate.errors import InjectionError, TranscriptionError
 from dictate.pipeline import Pipeline, PipelineState, Utterance, caption_tail
@@ -19,6 +19,7 @@ from dictate.platform.base import OverlayState, TargetWindow
 
 from .fakes import (
     DeferredSubmit,
+    FakeAudioCapture,
     FakeBatch,
     FakeInjector,
     FakeOverlay,
@@ -47,6 +48,8 @@ class PipelineTestCase(unittest.TestCase):
         self.overlay = kwargs.pop("overlay", FakeOverlay())
         self.streaming = kwargs.pop("streaming", FakeStreaming())
         self.submit = kwargs.pop("submit", InlineSubmit())
+        self.audio = kwargs.pop("audio", None)
+        self.mic_submit = kwargs.pop("mic_submit", None)
         self.notices: list[tuple[str, str]] = []
         return Pipeline(
             batch=self.batch,
@@ -56,6 +59,8 @@ class PipelineTestCase(unittest.TestCase):
             overlay=self.overlay,
             streaming=self.streaming,
             submit=self.submit,
+            audio=self.audio,
+            mic_submit=self.mic_submit,
             notify=lambda lvl, msg: self.notices.append((lvl, msg)),
             sample_rate=SR,
             **kwargs,
@@ -865,6 +870,126 @@ class Sequencing(PipelineTestCase):
         p.start_utterance()
         p.close()
         self.assertFalse(p.start_utterance())
+
+
+class TheMicIsReleased(PipelineTestCase):
+    """The guarantee named at the top of pipeline.py: whatever ends a
+    recording, the microphone comes back down with it. Every test here would
+    fail if a single exit path forgot to call `_audio_stop`."""
+
+    def test_the_normal_stop_releases_it(self):
+        mic = FakeAudioCapture()
+        p = self.build(audio=mic)
+        p.start_utterance()
+        self.assertEqual(mic.events, ["start"])
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(mic.events, ["start", "stop"])
+
+    def test_a_tap_too_short_to_transcribe_still_releases_it(self):
+        mic = FakeAudioCapture()
+        p = self.build(audio=mic, min_utterance_ms=350)
+        p.start_utterance()
+        p.push_audio(audio(100))
+        p.finish_utterance()
+        self.assertEqual(mic.events, ["start", "stop"])
+
+    def test_cancel_releases_it(self):
+        mic = FakeAudioCapture()
+        p = self.build(audio=mic)
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.cancel_utterance("test")
+        self.assertEqual(mic.events, ["start", "stop"])
+
+    def test_close_mid_recording_releases_it(self):
+        mic = FakeAudioCapture()
+        p = self.build(audio=mic)
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.close()
+        self.assertEqual(mic.events, ["start", "stop"])
+
+    def test_close_while_idle_is_still_safe(self):
+        mic = FakeAudioCapture()
+        p = self.build(audio=mic)
+        p.close()
+        # Nothing was ever recording, so there is no "start" to pair it with -
+        # `close` stops the mic unconditionally anyway, the same defensive
+        # shape as every other exit here, and it must be harmless when there
+        # was nothing to release.
+        self.assertEqual(mic.events, ["stop"])
+
+    def test_a_delivery_failure_still_leaves_it_released(self):
+        """The mic is gone before the paste is even attempted - a failure
+        deep in delivery must find it already off, not turn it back on."""
+        mic = FakeAudioCapture()
+        p = self.build(audio=mic, injector=FakeInjector(
+            error=InjectionError("no focus", "click it")))
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(mic.events, ["start", "stop"])
+
+    def test_the_target_window_closing_before_delivery_still_leaves_it_released(self):
+        windows = FakeWindows()
+        mic = FakeAudioCapture()
+        p = self.build(audio=mic, windows=windows,
+                       on_focus_change=delivery.RESTORE_MODE)
+        p.start_utterance()
+        p.push_audio(audio(600))
+        windows.closed.add(windows.window.handle)
+        windows.window = TargetWindow(handle=999, title="somewhere else")
+        p.finish_utterance()
+        self.assertEqual(mic.events, ["start", "stop"])
+
+    def test_a_second_dictation_starts_with_a_clean_start_stop_pair(self):
+        mic = FakeAudioCapture()
+        p = self.build(audio=mic)
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(mic.events, ["start", "stop", "start", "stop"])
+
+    def test_the_ceiling_stop_never_calls_the_mic_from_its_own_callback(self):
+        """`push_audio` plays the audio callback thread here. In the real
+        app, calling `AudioCapture.stop()` from inside that callback can
+        deadlock PortAudio (`Pa_StopStream` forbids it) - so the release must
+        go through `mic_submit`, never straight to `audio.stop()`."""
+        mic = FakeAudioCapture()
+        deferred = DeferredSubmit()
+        p = self.build(audio=mic, mic_submit=deferred, max_utterance_s=0.5)
+        p.start_utterance()
+        deferred.run_all()                    # let the start land first
+        mic.events.clear()
+        p.push_audio(audio(1000))             # twice the ceiling - audio thread
+        self.assertFalse(p.is_recording)
+        # Not yet: the stop is queued, not executed inline on this "thread".
+        self.assertEqual(mic.events, [])
+        deferred.run_all()
+        self.assertEqual(mic.events, ["stop"])
+
+    def test_a_mic_that_will_not_start_does_not_abandon_the_recording(self):
+        """Every other auxiliary system here degrades rather than refusing
+        to record (captions, the deferred-delivery generation); the mic must
+        match that, or a flaky device would cost him dictations it need not."""
+        mic = FakeAudioCapture(fail_start=OSError("device busy"))
+        p = self.build(audio=mic)
+        self.assertTrue(p.start_utterance())
+        self.assertTrue(p.is_recording)
+        self.assertTrue(any(lvl == "warning" for lvl, _ in self.notices))
+
+    def test_no_audio_dependency_is_a_legitimate_embedding(self):
+        """Every other test in this file builds with no `audio` at all - this
+        just makes that support explicit and permanent."""
+        p = self.build()
+        p.start_utterance()
+        p.push_audio(audio(600))
+        p.finish_utterance()
+        self.assertEqual(self.injector.sent, [("Hello world.", self.windows.window)])
 
 
 class Concurrency(PipelineTestCase):

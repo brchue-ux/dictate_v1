@@ -1,14 +1,35 @@
 """The global push-to-talk hotkey.
 
 Windows' own `RegisterHotKey` only reports key-down, so it cannot express
-"recording lasts as long as you hold this". The `global_hotkeys` package
-installs a low-level keyboard hook and gives separate press and release
-callbacks, which is what push-to-talk needs. `PinW/whisper-key-local` (MIT) uses
-the same package for the same reason; reading it is what pointed here.
+"recording lasts as long as you hold this". The `global_hotkeys` package gives
+separate press and release callbacks, which is what push-to-talk needs.
+`PinW/whisper-key-local` (MIT) uses the same package for the same reason;
+reading it is what pointed here.
 
-`actuate_on_partial_release=True` matters: releasing the *last* key of
-Ctrl+Alt+Space should end the recording even though Ctrl and Alt are still down,
-because that is how people actually let go of a chord.
+**Correction, found while diagnosing toggle-off being missed away from the
+window he started in (2026-08-21): this is not a `WH_KEYBOARD_LL` hook.**
+`global_hotkeys==0.1.7` (`hotkey_checker.py::HotkeyChecker.run`) is a plain
+Python thread that calls `win32api.GetAsyncKeyState()` for every registered
+combination every 20 ms. It only *behaves* like a hook because that poll is
+fast enough and global enough that the difference is invisible in the
+ordinary case. The distinction matters because `GetAsyncKeyState` is a
+key-STATE query, not an event: unlike a real `WH_KEYBOARD_LL` hook it cannot
+be "missed" by a slow callback, but it inherits whatever Windows will and will
+not tell an unelevated process about the keyboard right now - the same
+boundary this codebase already documents for the mouse hook and for
+`SendInput` (`hotkey_switch.MOUSE_COST`, `inject.py`'s "administrator" error).
+That boundary is the leading suspect for the toggle-off report; it is not
+confirmed, because it depends on which window he was in, which nobody here can
+observe. See the PR that added this correction for what is proved and what
+still needs his machine.
+
+`actuate_on_partial_release=True` matters for "hold": releasing the *last* key
+of Ctrl+Alt+Space should end the recording even though Ctrl and Alt are still
+down, because that is how people actually let go of a chord. Traced through
+`hotkey_checker.py`'s own state machine, this setting does not change toggle
+mode's observed behaviour for an ordinary full press-then-release - toggle's
+`False` was not the cause of a missed stop, and is left as it was rather than
+changed on an unproven hunch.
 """
 
 from __future__ import annotations
@@ -58,11 +79,26 @@ class WindowsHotkeyListener:
         if self.mode == "toggle":
             def press() -> None:
                 self._toggle_on = not self._toggle_on
+                # The one piece of evidence a poll-based "hook" can give: that
+                # the combination WAS seen. If a report ever says a toggle
+                # press did nothing, this line's absence in the log for that
+                # moment is what tells the difference between "Windows never
+                # told dictate" and a fault somewhere after this point.
+                log.info("toggle hotkey seen: recording now %s",
+                         "on" if self._toggle_on else "off")
                 (on_press if self._toggle_on else on_release)()
 
             binding = [self.combination, _guard(press), None, False]
         else:
-            binding = [self.combination, _guard(on_press), _guard(on_release), True]
+            def press() -> None:
+                log.debug("hotkey press seen")
+                on_press()
+
+            def release() -> None:
+                log.debug("hotkey release seen")
+                on_release()
+
+            binding = [self.combination, _guard(press), _guard(release), True]
 
         try:
             api.register_hotkeys([binding])
