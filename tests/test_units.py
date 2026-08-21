@@ -325,6 +325,54 @@ class DoctorReport(unittest.TestCase):
         cfg = config_mod.from_mapping({"cleanup": {"rules_file": str(shipped)}})
         self.assertIs(check_cleanup_rules(cfg).status, Status.OK)
 
+    def test_the_import_shadow_check_is_quiet_about_an_ordinary_folder(self):
+        import tempfile
+
+        from dictate.doctor import check_import_shadow
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = check_import_shadow(cwd=tmp)
+        self.assertIs(result.status, Status.OK)
+        self.assertTrue(
+            "nothing" in result.detail
+            or "resolves to the installed copy" in result.detail
+        )
+
+    def test_the_import_shadow_check_catches_a_fake_dictate_py(self):
+        """The bug this exists to catch: something called `dictate` sitting
+        in the directory a command is run from is found before the installed
+        package - and finding that out must never mean importing it."""
+        import tempfile
+
+        from dictate.doctor import check_import_shadow
+
+        with tempfile.TemporaryDirectory() as tmp:
+            impostor = Path(tmp) / "dictate.py"
+            impostor.write_text(
+                "raise SystemExit('this must never be imported to find out')\n",
+                encoding="utf-8",
+            )
+            result = check_import_shadow(cwd=tmp)
+        self.assertIs(result.status, Status.FAIL)
+        self.assertIn(str(impostor), result.detail)
+        self.assertIn("not the installed", result.detail)
+
+    def test_the_import_shadow_check_catches_a_fake_dictate_package(self):
+        import tempfile
+
+        from dictate.doctor import check_import_shadow
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp) / "dictate"
+            pkg.mkdir()
+            (pkg / "__init__.py").write_text(
+                "raise SystemExit('this must never be imported to find out')\n",
+                encoding="utf-8",
+            )
+            result = check_import_shadow(cwd=tmp)
+        self.assertIs(result.status, Status.FAIL)
+        self.assertIn(str(pkg / "__init__.py"), result.detail)
+
     def test_worst_ranks_correctly(self):
         self.assertEqual(worst([CheckResult("a", Status.OK)]), Status.OK)
         self.assertEqual(worst([CheckResult("a", Status.OK),

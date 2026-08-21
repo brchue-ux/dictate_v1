@@ -120,6 +120,19 @@ def quote_argument(value: str) -> str:
     return '"' + value.replace('"', r"\"") + '"'
 
 
+#: `python -m dictate` and `python -c "import dictate"` both prepend the
+#: process's current directory to `sys.path` before anything else - so a
+#: `dictate.py` or `dictate/` folder wherever the task happens to start is what
+#: gets imported, and merely importing it can run an entire other program and
+#: never return (measured on his machine: `import dictate` from `C:\Users\bchue`
+#: printed a banner that is not this codebase's and never gave the prompt
+#: back). `-P` is Python 3.11's "safe path" flag - it turns that prepending off
+#: for THIS invocation, no environment variable to lose track of, and it is
+#: written directly into the task's own Arguments field, so it travels with the
+#: task rather than depending on anything set at logon time.
+SAFE_PATH_FLAG = "-P"
+
+
 def task_arguments(config_path: str | None = None) -> str:
     """What `pythonw.exe` is asked to run.
 
@@ -127,12 +140,25 @@ def task_arguments(config_path: str | None = None) -> str:
     itself a console program: running it under pythonw would still create a
     window. `--config` is only pinned into the task when one was named
     explicitly, so the ordinary case keeps looking wherever dictate looks.
+    `SAFE_PATH_FLAG` comes first - interpreter flags have to precede `-m` to be
+    read as flags at all, rather than as an argument `dictate` itself sees.
     """
-    args = ["-m", "dictate"]
+    args = [SAFE_PATH_FLAG, "-m", "dictate"]
     if config_path:
         args += ["--config", str(config_path)]
     args += ["run", "--autostart"]
     return " ".join(quote_argument(a) for a in args)
+
+
+def task_is_shadow_safe(command_line: str) -> bool:
+    """Does a "Task To Run" string (or an `Arguments` string) carry `-P`?
+
+    Whitespace-bounded, not a substring test: `-Pfoo` or a config path that
+    happens to contain `-P` must not read as safe. This is how both the repair
+    check and the tests tell an old registration from a fixed one, without
+    asking Windows to run anything.
+    """
+    return any(tok == SAFE_PATH_FLAG for tok in command_line.split())
 
 
 def task_xml(
@@ -722,16 +748,34 @@ def enable(cfg: Config, *, config_path: str | None = None,
 
     `start=False` is for a caller that only wants the registration; nothing
     ships passing it, and the three ways he reaches this all start it.
+
+    Also the repair: `/Create ... /F` overwrites whatever is registered under
+    this name, so a task from before `SAFE_PATH_FLAG` existed is replaced by
+    this call exactly as a fresh registration would be - `enable` does not need
+    a separate repair path, it needs to notice and say so, which is what
+    `previously_unsafe` below is for.
     """
     _require_windows("`dictate autostart enable`")
+    was_registered = is_registered()
+    previous_command = registered_command() if was_registered else ""
+    previously_unsafe = bool(previous_command) and not task_is_shadow_safe(previous_command)
+
     user = interactive_user()
     command = windowless_python(executable)
     arguments = task_arguments(config_path)
+    # Not his home folder: `%USERPROFILE%` is where the shadowing was actually
+    # observed, and `-P` above is what makes the launch immune to whatever is
+    # in it regardless of this setting - but there is no reason to start the
+    # task in a folder he fills with his own files when the install's own
+    # folder, which dictate already checked is a real dictate tree, is right
+    # there.
+    from . import update as update_mod  # noqa: PLC0415
+
     xml = task_xml(
         user=user,
         command=str(command),
         arguments=arguments,
-        working_directory=os.environ.get("USERPROFILE", ""),
+        working_directory=str(update_mod.find_install_root()),
         delay_s=cfg.autostart.logon_delay_s,
         description=task_description(),
     )
@@ -783,6 +827,16 @@ def enable(cfg: Config, *, config_path: str | None = None,
         f"dictate will now start when you log in, about "
         f"{cfg.autostart.logon_delay_s} seconds after you reach the desktop.",
         "",
+    ]
+    if previously_unsafe:
+        lines += [
+            "Repaired: the task that was registered before this could import a "
+            "`dictate` from wherever it happened to start, instead of the "
+            "installed copy. It now runs with -P, which stops that regardless "
+            "of where it starts.",
+            "",
+        ]
+    lines += [
         f"  runs:      {command} {arguments}",
         f"  as:        {user}, in your own desktop session, without administrator rights",
         f"  task:      Task Scheduler Library -> {TASK_NAME}",
@@ -1565,6 +1619,19 @@ def render(reading: Reading) -> list[str]:
             lines.append(f"  task:          Task Scheduler Library -> {TASK_NAME}")
             if status.task_to_run:
                 lines.append(f"  runs:          {status.task_to_run}")
+                if not task_is_shadow_safe(status.task_to_run):
+                    lines.append(
+                        "                 UNSAFE: this task can import a "
+                        "`dictate` from wherever it happens to")
+                    lines.append(
+                        "                 start, instead of the one installed "
+                        "at " + str(Path(__file__).resolve().parent) + ",")
+                    lines.append(
+                        "                 which is what made a different "
+                        "program run silently at logon before.")
+                    lines.append(
+                        "                 fix it with `dictate autostart "
+                        "enable` - it re-registers the task")
             if status.state:
                 lines.append(f"  state:         {status.state}")
             if status.last_run:

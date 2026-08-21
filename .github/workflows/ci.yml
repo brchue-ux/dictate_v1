@@ -455,6 +455,39 @@ jobs:
             }
           }
 
+      - name: A dictate shadowing the real one from the working directory is not imported
+        shell: pwsh
+        run: |
+          # The bug itself, reproduced on real Windows: `python -m dictate`
+          # prepends the current directory to sys.path, so a `dictate.py` sitting
+          # in whatever folder the process starts in is found - and imported -
+          # before the installed package ever is. `-P` is what the registered
+          # task now carries specifically to stop this. Proven both ways: the
+          # control case shows the vulnerability is real on this interpreter,
+          # not just in theory; the `-P` case is what the task actually runs.
+          $ErrorActionPreference = 'Stop'
+          $shadowDir = Join-Path $env:RUNNER_TEMP 'dictate-shadow-test'
+          New-Item -ItemType Directory -Path $shadowDir -Force | Out-Null
+          "print('SHADOW-IMPORTED')`nimport sys`nsys.exit(0)" |
+            Set-Content -LiteralPath (Join-Path $shadowDir 'dictate.py') -Encoding UTF8
+
+          Push-Location $shadowDir
+          try {
+            $unsafeOut = & python -m dictate --help 2>&1 | Out-String
+            $safeOut = & python -P -m dictate --help 2>&1 | Out-String
+          } finally {
+            Pop-Location
+          }
+          if ($unsafeOut -notmatch 'SHADOW-IMPORTED') {
+            throw "expected the control case to prove the vulnerability, got:`n$unsafeOut"
+          }
+          if ($safeOut -match 'SHADOW-IMPORTED') {
+            throw "-P did not stop the shadow import:`n$safeOut"
+          }
+          if ($safeOut -notmatch 'Push-to-talk dictation') {
+            throw "-P ran neither the shadow nor the real dictate:`n$safeOut"
+          }
+
       - name: Windows Task Scheduler accepts the task dictate registers
         shell: pwsh
         run: |
@@ -466,10 +499,35 @@ jobs:
           #
           # It does NOT prove the task fires: a hosted runner never logs on.
           $ErrorActionPreference = 'Continue'
+
+          # The repair, proven against a real Windows registration: this is the
+          # shape every task registered before -P existed has - his among them.
+          # `enable` must replace it and say so, not just do the right thing for
+          # a task that was never wrong.
+          $oldXml = Join-Path $env:RUNNER_TEMP 'dictate-old-task.xml'
+          $pyw = (& python -c 'import sys, os; print(os.path.join(os.path.dirname(sys.executable), "pythonw.exe"))').Trim()
+          @"
+          <?xml version="1.0" encoding="UTF-16"?>
+          <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+            <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>
+            <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType></Principal></Principals>
+            <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy></Settings>
+            <Actions Context="Author"><Exec><Command>$pyw</Command><Arguments>-m dictate run --autostart</Arguments></Exec></Actions>
+          </Task>
+          "@ | Set-Content -LiteralPath $oldXml -Encoding Unicode
+          schtasks /Create /TN dictate /XML $oldXml /F | Out-Null
+          Remove-Item -LiteralPath $oldXml
+          $beforeStatus = dictate autostart status 2>&1 | Out-String
+          if ($beforeStatus -notmatch 'UNSAFE') { throw "status did not flag the pre-existing unsafe task:`n$beforeStatus" }
+
           $out = dictate autostart enable 2>&1 | Out-String
           Write-Host $out
           if ($LASTEXITCODE -ne 0) { throw "dictate autostart enable failed: $out" }
           if ($out -notmatch '1.6 GB') { throw 'enable did not state what it costs to leave on' }
+          if ($out -notmatch 'Repaired') { throw "enable did not say it repaired the old task:`n$out" }
+
+          $afterStatus = dictate autostart status 2>&1 | Out-String
+          if ($afterStatus -match 'UNSAFE') { throw "status still flags the task as unsafe after enable:`n$afterStatus" }
 
           # Turning it on also starts the windowless copy, so the report carries
           # a second outcome - and it has to be one of the three dictate can
@@ -492,7 +550,8 @@ jobs:
           Write-Host $query
           if ($LASTEXITCODE -ne 0) { throw 'the task is not registered with Windows' }
           foreach ($needed in @('LogonTrigger', 'PT30S', 'InteractiveToken',
-                                'IgnoreNew', 'PT0S', 'pythonw.exe', 'run --autostart')) {
+                                'IgnoreNew', 'PT0S', 'pythonw.exe', '-P -m dictate',
+                                'run --autostart')) {
             if ($query -notmatch [regex]::Escape($needed)) {
               throw "the registered task lost '$needed' on the way into Windows"
             }
@@ -501,6 +560,13 @@ jobs:
           # rights at every logon. Nothing dictate does at run time needs them.
           if ($query -match 'HighestAvailable') {
             throw 'the registered task asks to run elevated'
+          }
+          # And the other half of the same fix: `-P` is what makes the launch
+          # immune to whatever is in the working directory, but there is still
+          # no reason for it to BE his profile folder, which is what was
+          # actually observed shadowing `dictate`.
+          if ($query -match [regex]::Escape($env:USERPROFILE)) {
+            throw "the registered task still starts in the user profile folder:`n$query"
           }
 
           # And dictate reading Windows' answer back - the parsing that tells
