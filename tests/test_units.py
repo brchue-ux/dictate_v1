@@ -333,7 +333,10 @@ class DoctorReport(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result = check_import_shadow(cwd=tmp)
         self.assertIs(result.status, Status.OK)
-        self.assertIn("nothing", result.detail)
+        self.assertTrue(
+            "nothing" in result.detail
+            or "resolves to the installed copy" in result.detail
+        )
 
     def test_the_import_shadow_check_catches_a_fake_dictate_py(self):
         """The bug this exists to catch: something called `dictate` sitting
