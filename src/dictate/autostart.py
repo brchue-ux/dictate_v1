@@ -500,11 +500,19 @@ def run_schtasks(args: list[str]) -> ToolResult:
     Its exit code is the answer to "did that work", and its output is the
     evidence for why not - both are kept, because a failure that arrives without
     the tool's own words is a failure nobody can act on.
+
+    `stdin=DEVNULL`: this is reached by `dictate autostart status --why`, which
+    has to stay safe to run mid-sentence. Nothing here is meant to read stdin,
+    but a child process that silently inherited a strange or blocking handle
+    from whatever launched dictate is exactly the kind of thing that would turn
+    a report into a hang instead of an answer - so it is closed off rather than
+    trusted to never come up.
     """
     try:
         proc = subprocess.run(
             ["schtasks"] + args,
             capture_output=True, text=True, errors="replace", check=False,
+            stdin=subprocess.DEVNULL,
         )
     except OSError as exc:
         raise DictateError(
@@ -907,10 +915,11 @@ def disable() -> list[str]:
 # sentence.
 # ---------------------------------------------------------------------------
 
-#: What to list. Image names only - `tasklist` does not print command lines, so
-#: this cannot tell a copy of dictate from any other Python program on the PC
-#: and the report says so rather than implying otherwise. whisper-server is the
-#: one that is unambiguous, and it is the one that settles the question.
+#: What to list. `tasklist` only ever gets an image name off this, which
+#: cannot by itself tell a copy of dictate from any other Python program on
+#: the PC - `command_line_of` below is what closes that gap, one pid at a
+#: time, and the report says so honestly wherever it could not. whisper-server
+#: is the one image name that was always unambiguous on its own.
 IMAGES_WORTH_LISTING = ("pythonw.exe", "python.exe", "dictate.exe",
                         "whisper-server.exe")
 
@@ -924,6 +933,12 @@ class Evidence:
     unavailable: str = ""
     #: (image name, pid), in the order of `IMAGES_WORTH_LISTING`.
     processes: list[tuple[str, int]] = field(default_factory=list)
+    #: pid -> full command line, or `None` when that pid's command line could
+    #: not be read. A pid from `processes` that is absent here was never
+    #: asked about at all (off Windows, or the run stopped before it got that
+    #: far) - `None` and "absent" are rendered the same way, but are not the
+    #: same fact.
+    command_lines: dict[int, str | None] = field(default_factory=dict)
     port: int = 0
     #: (pid, image name) for whoever holds the transcription port.
     port_holders: list[tuple[int, str]] = field(default_factory=list)
@@ -964,6 +979,17 @@ def gather_evidence(cfg: Config | None, reading: Reading) -> Evidence:
             return found
         found.processes += [(image, pid) for pid in sorted(pids)]
 
+    # One pid's command line failing to read is not the whole report failing -
+    # unlike the loop above, which is foundational, this is the extra fact on
+    # top of it, and losing one entry of it must never blank the rest.
+    for _image, pid in found.processes:
+        try:
+            found.command_lines[pid] = tools.command_line_of(pid)
+        except Exception:  # noqa: BLE001 - a report may never be the fault
+            log.debug("asking for the command line of pid %s raised", pid,
+                     exc_info=True)
+            found.command_lines[pid] = None
+
     if found.port:
         try:
             for row in tools.listeners(found.port):
@@ -971,6 +997,44 @@ def gather_evidence(cfg: Config | None, reading: Reading) -> Evidence:
         except Exception:  # noqa: BLE001
             log.debug("asking who holds port %s raised", found.port, exc_info=True)
     return found
+
+
+def _normalize_command(text: str) -> str:
+    """A command line with quoting and casing differences ignored.
+
+    Task Scheduler's own `Task To Run` and what Windows reports back through
+    `Win32_Process.CommandLine` for the same launch are not always quoted the
+    same way, and Windows paths are not case-sensitive - only the words are
+    what "is this the same command" can mean here.
+    """
+    return " ".join(text.replace('"', "").split()).lower()
+
+
+def command_matches_task(command_line: str | None, task_to_run: str) -> bool:
+    """Is `command_line` the exact command the logon task is registered to run?
+
+    A match here is strong evidence even when the log has nothing in it: it
+    means a live process is running the words Task Scheduler has on file for
+    this task, independent of any pid the log may or may not have recorded. A
+    non-match proves nothing on its own - a hand-started `dictate run` is not
+    "the logon task's command" either, and that does not make it a stranger.
+    """
+    if not command_line or not task_to_run:
+        return False
+    return _normalize_command(command_line) == _normalize_command(task_to_run)
+
+
+def _log_mentions_pid(reading: Reading, pid: int) -> bool:
+    """Does anything the log has for this run - the last block, or the
+    bootstrap breadcrumb one block back from it - name `pid`?
+
+    Both use the same `PID_MARK` line, written at the top of `run_at_logon`
+    and, since PR #26, before that by `__main__.py`'s own bootstrap. A pid
+    that appears in neither has not been written about at all, however long
+    the log otherwise is.
+    """
+    marker = f"{PID_MARK}{pid})"
+    return marker in reading.block or marker in reading.bootstrap
 
 
 def evidence_lines(reading: Reading) -> list[str]:
@@ -994,14 +1058,25 @@ def evidence_lines(reading: Reading) -> list[str]:
         lines.append("  nothing named python.exe, pythonw.exe, dictate.exe or "
                      "whisper-server.exe")
     width = max((len(str(pid)) for _, pid in found.processes), default=1)
+    task_cmd = reading.status.task_to_run
     for image, pid in found.processes:
         marks = []
         if reading.logon.pid == pid:
             marks.append("the logon task started this one")
         if reading.holder is not None and reading.holder.pid == pid:
             marks.append("holds dictate's lock")
+        command = found.command_lines.get(pid)
+        if command_matches_task(command, task_cmd):
+            marks.append("this is the logon task's own registered command")
         note = f"  <- {', and '.join(marks)}" if marks else ""
         lines.append(f"  {image:<20} pid {pid:<{width}}{note}")
+        if pid in found.command_lines:
+            if command:
+                lines.append(f"      command line: {command}")
+            else:
+                lines.append("      command line: could not be read - it may "
+                             "have exited between being listed and being "
+                             "asked about, or dictate was not allowed to see it")
 
     lines.append("")
     if not found.port:
@@ -1053,6 +1128,30 @@ def _evidence_reading(reading: Reading) -> list[str]:
     maybe_dictate = [pid for image, pid in found.processes
                      if image.lower() != "whisper-server.exe"]
     said = False
+
+    task_cmd = reading.status.task_to_run
+    task_matches = [pid for image, pid in found.processes
+                    if command_matches_task(found.command_lines.get(pid), task_cmd)]
+    unlogged_matches = [pid for pid in task_matches
+                        if not _log_mentions_pid(reading, pid)]
+    if unlogged_matches and holder is None:
+        said = True
+        who = ", ".join(str(p) for p in unlogged_matches)
+        lines += [
+            f"  * pid {who} is running the exact command the logon task is "
+            "registered to run",
+            f'    ("{task_cmd.strip()}"), and is alive - but holds no lock, '
+            "and the log has",
+            "    nothing recorded for it: not the last time it started at "
+            "logon, and not the",
+            "    bootstrap breadcrumb `__main__.py` writes before importing "
+            "the rest of dictate.",
+            "    That is a specific state, distinct from a copy that started "
+            "and failed: the",
+            "    process Windows has running exists, but it has not - or not "
+            "yet - reached",
+            "    dictate's own code at all.",
+        ]
 
     if len(servers) > 1:
         said = True
@@ -1113,16 +1212,38 @@ def _evidence_reading(reading: Reading) -> list[str]:
     if not said:
         lines.append("  nothing in the list settles it by itself. Send the whole "
                      "of this on.")
-    lines += [
-        "",
-        f"  ({len(maybe_dictate)} process(es) above could be a copy of dictate. "
-        "That is an image",
-        "   name only - tasklist does not print command lines, so anything else "
-        "on this PC",
-        "   written in Python is in that list too. The whisper-server count and "
-        "the lock are",
-        "   what actually settle it.)",
-    ]
+
+    unresolved = [pid for pid in maybe_dictate if not found.command_lines.get(pid)]
+    if len(unresolved) < len(maybe_dictate):
+        # At least one command line was read. Say so honestly for whichever
+        # pids still have none, but do not repeat the old blanket caveat - the
+        # command lines printed above already answer "is this dictate" for
+        # everything that could be asked.
+        if unresolved:
+            lines += [
+                "",
+                f"  ({len(unresolved)} of {len(maybe_dictate)} process(es) above "
+                "have no command line",
+                "   dictate could read - image name only for those. The rest are "
+                "shown with their",
+                "   full command line above, which is what actually tells them "
+                "apart from an",
+                "   unrelated Python program.)",
+            ]
+    else:
+        # None of them could be read - off Windows this is `pids_named` never
+        # having been asked to try; on Windows it is every `command_line_of`
+        # call failing. Either way this is the original caveat, unchanged.
+        lines += [
+            "",
+            f"  ({len(maybe_dictate)} process(es) above could be a copy of dictate. "
+            "That is an image",
+            "   name only - tasklist does not print command lines, so anything else "
+            "on this PC",
+            "   written in Python is in that list too. The whisper-server count and "
+            "the lock are",
+            "   what actually settle it.)",
+        ]
     return lines
 
 

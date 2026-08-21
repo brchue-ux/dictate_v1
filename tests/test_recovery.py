@@ -113,6 +113,22 @@ class WhatWindowsPrints(unittest.TestCase):
         self.assertEqual(recovery.parse_task_rows('"pythonw.exe"\n'), [])
         self.assertEqual(recovery.parse_task_rows("pythonw.exe,8804\n"), [])
 
+    def test_it_reads_the_command_line_powershell_printed_back(self):
+        """`Get-CimInstance ... CommandLine` prints the one value and nothing
+        else when the filter matched - no quoting, no CSV, unlike tasklist."""
+        text = '"C:\\Python311\\pythonw.exe" -m dictate run --autostart\r\n'
+        self.assertEqual(
+            recovery.parse_command_line(text),
+            '"C:\\Python311\\pythonw.exe" -m dictate run --autostart')
+
+    def test_a_filter_that_matched_nothing_prints_nothing(self):
+        """The process ended between being listed and being asked about, or
+        Windows would not disclose it - both come back the same way: `None`,
+        not a guess and not a crash."""
+        self.assertIsNone(recovery.parse_command_line(""))
+        self.assertIsNone(recovery.parse_command_line("\r\n"))
+        self.assertIsNone(recovery.parse_command_line("   \n"))
+
 
 class NothingIsRunning(unittest.TestCase):
     """The state he is in when he is not sure whether anything is running,

@@ -543,6 +543,15 @@ jobs:
           if ($why -match 'nothing named python\.exe') {
             throw '--why found no processes at all, and one of them is itself'
           }
+          # The new fact this step is here to prove: a command line per
+          # process, not just an image name - real WMI/CIM, through real
+          # PowerShell, asked about a real process on real Windows. Every
+          # process the list above found gets a line under it, resolved or an
+          # honest "could not be read"; either is proof the new code path ran
+          # for real rather than being skipped.
+          if ($why -notmatch 'command line:') {
+            throw '--why did not report a command line for anything it found'
+          }
           schtasks /Query /TN dictate 2>&1 | Out-Null
           if ($LASTEXITCODE -ne 0) { throw '--why changed something; the task is gone' }
 
