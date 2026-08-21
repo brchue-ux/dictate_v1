@@ -235,6 +235,19 @@ class ReadingWindowsAnswer(unittest.TestCase):
         self.assertIn("schtasks", ctx.exception.message)
         self.assertTrue(ctx.exception.remedy)
 
+    def test_schtasks_never_inherits_a_readable_stdin(self):
+        """`--why` has to stay safe to run mid-sentence. schtasks has no
+        business reading stdin, but a child that silently inherited a strange
+        or blocking handle from whatever launched dictate is exactly the shape
+        of fault that would turn a report into a hang - closed off rather than
+        trusted to never come up."""
+        from unittest import mock
+
+        with mock.patch("dictate.autostart.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, "", "")
+            autostart.run_schtasks(["/Query"])
+        self.assertEqual(run.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
+
 
 class TheLogonLog(unittest.TestCase):
     def test_it_stands_in_for_the_console_that_is_not_there(self):
@@ -1528,6 +1541,185 @@ class WhatIsActuallyRunning(TempState):
         found = autostart.gather_evidence(None, a_reading())
         self.assertIn("only the Windows PC can answer", found.unavailable)
         self.assertEqual(found.processes, [])
+
+    def test_it_asks_for_the_command_line_of_every_process_it_found(self):
+        """This is the fact `pids_named` cannot get - the point of the whole
+        change - so `gather_evidence` has to ask for it, per pid, not just
+        list image names and stop."""
+        from unittest import mock
+
+        from dictate import recovery
+        from tests import fakes
+
+        tools = fakes.FakeProcessTools(
+            names={8804: "pythonw.exe", 22188: "pythonw.exe"},
+            command_lines={
+                8804: 'C:\\Python311\\pythonw.exe -m dictate run --autostart',
+                # 22188 deliberately absent: dictate could not read it.
+            })
+        with mock.patch.object(recovery, "platform_tools", return_value=tools):
+            found = autostart.gather_evidence(None, a_reading())
+        self.assertEqual(found.command_lines[8804],
+                         'C:\\Python311\\pythonw.exe -m dictate run --autostart')
+        self.assertIsNone(found.command_lines[22188])
+
+    def test_one_unreadable_command_line_does_not_blank_the_rest(self):
+        """Unlike `pids_named`, which is foundational and aborts the whole
+        report if it fails, one pid's command line failing is the extra fact
+        on top - losing it must never blank the process list underneath it."""
+        from unittest import mock
+
+        from dictate import recovery
+        from tests import fakes
+
+        class Flaky(fakes.FakeProcessTools):
+            def command_line_of(self, pid):
+                if pid == 8804:
+                    raise OSError("access denied")
+                return super().command_line_of(pid)
+
+        tools = Flaky(names={8804: "pythonw.exe", 22188: "pythonw.exe"},
+                      command_lines={22188: "C:\\Python311\\python.exe -m dictate"})
+        with mock.patch.object(recovery, "platform_tools", return_value=tools):
+            found = autostart.gather_evidence(None, a_reading())
+        self.assertEqual(found.unavailable, "")
+        self.assertIn(("pythonw.exe", 8804), found.processes)
+        self.assertIsNone(found.command_lines[8804])
+        self.assertEqual(found.command_lines[22188],
+                         "C:\\Python311\\python.exe -m dictate")
+
+
+class WhatTheCommandLineAdds(unittest.TestCase):
+    """`--why` reporting a command line, not just an image name - the fact
+    that turns "something named pythonw.exe" into "the logon task's own
+    command" or leaves it honestly unread."""
+
+    def evidence(self, **over) -> autostart.Evidence:
+        from dictate import instance
+
+        found = autostart.Evidence(
+            lock_file=str(instance.lock_path()),
+            port=8178, schtasks_raw=SCHTASKS_RUNNING)
+        for key, value in over.items():
+            setattr(found, key, value)
+        return found
+
+    def test_the_command_line_is_shown_next_to_the_process(self):
+        text = "\n".join(autostart.render(a_reading(
+            alive=True, holder=None,
+            evidence=self.evidence(
+                processes=[("pythonw.exe", 16664)],
+                command_lines={16664: "notepad.exe C:\\Users\\bchue\\todo.txt"}))))
+        self.assertIn("command line: notepad.exe C:\\Users\\bchue\\todo.txt", text)
+
+    def test_a_command_line_that_matches_the_task_says_so(self):
+        """This is the gap the brief names directly: pid 16664 is
+        `pythonw.exe -m dictate run --autostart`, which is the logon task's
+        own command - stated, not left for him to compare by eye."""
+        text = "\n".join(autostart.render(a_reading(
+            alive=True, holder=None,
+            evidence=self.evidence(
+                processes=[("pythonw.exe", 16664)],
+                command_lines={
+                    16664: 'C:\\Python311\\pythonw.exe -m dictate run --autostart'}))))
+        self.assertIn("logon task's own registered command", text)
+
+    def test_a_command_line_that_does_not_match_is_not_called_the_task(self):
+        text = "\n".join(autostart.render(a_reading(
+            alive=True, holder=None,
+            evidence=self.evidence(
+                processes=[("pythonw.exe", 5555)],
+                command_lines={5555: "C:\\Python311\\pythonw.exe -m some_other_tool"}))))
+        self.assertNotIn("logon task's own registered command", text)
+
+    def test_an_unreadable_command_line_says_so_honestly_rather_than_hiding_it(self):
+        """Degrading honestly: a pid that was asked about and came back empty
+        is not the same as a pid nobody asked about, and the report must not
+        pretend it knows nothing changed."""
+        text = "\n".join(autostart.render(a_reading(
+            alive=True, holder=a_holder(),
+            evidence=self.evidence(
+                processes=[("pythonw.exe", 8804)],
+                command_lines={8804: None}))))
+        self.assertIn("command line: could not be read", text)
+
+    def test_once_every_command_line_is_read_the_tasklist_caveat_is_dropped(self):
+        """The old blanket "tasklist does not print command lines" caveat is
+        for when nothing was read. Once everything above it has a real command
+        line, repeating it would be misleading - it is not an image name any
+        more, it is answered."""
+        text = "\n".join(autostart.render(a_reading(
+            alive=True, holder=a_holder(),
+            evidence=self.evidence(
+                processes=[("pythonw.exe", 22188)],
+                command_lines={22188: "C:\\Python311\\pythonw.exe -m dictate run"}))))
+        self.assertNotIn("tasklist does not print command lines", text)
+
+    def test_a_still_unreadable_one_among_readable_ones_is_named_not_hidden(self):
+        text = "\n".join(autostart.render(a_reading(
+            alive=True, holder=a_holder(pid=8804),
+            evidence=self.evidence(
+                processes=[("pythonw.exe", 8804), ("pythonw.exe", 22188)],
+                command_lines={
+                    8804: "C:\\Python311\\pythonw.exe -m dictate run --autostart",
+                    22188: None,
+                }))))
+        self.assertIn("1 of 2 process(es)", text)
+        self.assertIn("have no command line", text)
+
+    def test_no_command_line_read_at_all_keeps_the_original_caveat(self):
+        """Backward compatibility with every report before this change:
+        nothing here has improved on "tasklist does not print command lines"
+        when nothing was actually read, so it says exactly what it always
+        said."""
+        text = "\n".join(autostart.render(a_reading(
+            alive=True, holder=a_holder(),
+            evidence=self.evidence(
+                processes=[("pythonw.exe", 8804), ("pythonw.exe", 22188)]))))
+        self.assertIn("tasklist does not print command lines", text)
+
+    def test_a_process_matching_the_task_alive_with_an_empty_log_names_the_state(self):
+        """His actual morning: the run Windows started is still `Running`, a
+        pid matching the task's own command is alive, nothing holds the lock,
+        and the log has nothing in it for that pid at all - not the bootstrap
+        breadcrumb, not a logon-start block. `reconcile` alone lands on
+        "cannot-tell" here because the log has no pid to compare; the command
+        line is what turns that into a specific, nameable state instead."""
+        text = "\n".join(autostart.render(a_reading(
+            schtasks=SCHTASKS_RUNNING, block="", holder=None,
+            evidence=self.evidence(
+                processes=[("pythonw.exe", 16664)],
+                command_lines={
+                    16664: 'C:\\Python311\\pythonw.exe -m dictate run --autostart'}))))
+        self.assertIn(autostart.DISAGREE_MARK, text)  # `reconcile` alone: cannot-tell
+        self.assertIn("has not - or not yet - reached", text)
+        self.assertIn("dictate's own code", text)
+
+    def test_the_same_state_is_not_named_once_the_log_does_mention_the_pid(self):
+        """The negative case: once the pid the command line matches is the one
+        the log's own block is about, this is the ordinary "alive but serving
+        nobody" state `reconcile` already names, not a new one."""
+        block = f"{autostart.BLOCK_MARK} 2026-08-21 11:40:30 ===\n" \
+                f"{autostart.PID_MARK}16664)\nattempt 1 of 5"
+        text = "\n".join(autostart.render(a_reading(
+            schtasks=SCHTASKS_RUNNING, block=block, alive=True, holder=None,
+            evidence=self.evidence(
+                processes=[("pythonw.exe", 16664)],
+                command_lines={
+                    16664: 'C:\\Python311\\pythonw.exe -m dictate run --autostart'}))))
+        self.assertNotIn("has not - or not yet - reached", text)
+
+    def test_the_state_is_not_named_while_something_holds_the_lock(self):
+        """A stray process matching the task's command with nothing logged
+        about it is not this finding once dictate IS being served by
+        something else - that is a different, already-covered shape."""
+        text = "\n".join(autostart.render(a_reading(
+            schtasks=SCHTASKS_RUNNING, block="", holder=a_holder(),
+            evidence=self.evidence(
+                processes=[("pythonw.exe", 16664)],
+                command_lines={
+                    16664: 'C:\\Python311\\pythonw.exe -m dictate run --autostart'}))))
+        self.assertNotIn("has not - or not yet - reached", text)
 
 
 class TheCommands(TempState):

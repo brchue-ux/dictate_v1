@@ -159,6 +159,21 @@ def parse_task_rows(text: str) -> list[tuple[str, int]]:
     return rows
 
 
+def parse_command_line(text: str) -> str | None:
+    """The command line out of `Get-CimInstance Win32_Process`'s answer for
+    one pid, or `None` if there is nothing to read.
+
+    PowerShell prints the `CommandLine` property's value and nothing else when
+    the filter matched a process that has one; a filter that matched nothing -
+    the process already gone by the time it was asked about - and a process
+    Windows would not disclose the command line of both print nothing at all.
+    Those two cannot be told apart from here, so both come back as the same
+    honest answer: not available.
+    """
+    line = text.strip()
+    return line or None
+
+
 def is_whisper_server(name: str) -> bool:
     return name.strip().lower() in WHISPER_SERVER_NAMES
 

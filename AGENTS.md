@@ -400,9 +400,25 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **`dictate autostart status --why` reports and changes nothing.** It is the one
   line he pastes: what Windows has running (`ProcessTools.pids_named`, tasklist),
   who holds the transcription port, the lock, and schtasks' raw answer. It may
-  never end a process or write a file. It is also honest about its own limits -
-  tasklist prints no command lines, so two `pythonw.exe` is not two dictates and
-  the report says so; the whisper-server count and the lock are what settle it.
+  never end a process or write a file. **tasklist only ever gets an image name,
+  so `ProcessTools.command_line_of` asks a different way** - WMI/CIM through
+  `Get-CimInstance`, run as `powershell`, the one Windows tool of the three
+  (`netstat`/`tasklist`/`taskkill`) that can answer this at all - and the report
+  prints the full command line under each process, plus whether it matches the
+  task's own registered `Task To Run` (`autostart.command_matches_task`). A pid
+  whose command line could not be read (gone between listing and asking, or
+  refused) says so honestly rather than being dropped or guessed at
+  (`Evidence.command_lines`, `None` vs. absent-from-the-dict are different
+  facts - see the field's own docstring). This is also what lets the report
+  name one more specific state: a process alive, running the exact command the
+  task is registered to run, holding no lock, with nothing about it anywhere in
+  the log - not the last block, not the bootstrap breadcrumb - which means it
+  has not, or not yet, reached dictate's own code at all
+  (`autostart._log_mentions_pid`). Every subprocess call behind `--why`
+  (`WindowsProcessTools._run_tool`, `run_schtasks`) sets `stdin=DEVNULL`: this
+  command has to stay safe to run mid-sentence, and a child that inherited a
+  strange or blocking handle from whatever launched dictate must never be able
+  to turn a report into a hang.
 - **Nothing under test may reach a blocking Win32 call.** `MessageBoxW` in
   `platform/windows/notify.py` waits for a click, and on a CI runner nobody ever
   clicks: the suite hung for hours instead of failing. `tests/test_autostart.py`

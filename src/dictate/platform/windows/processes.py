@@ -1,4 +1,4 @@
-"""The three questions a rescue has to ask Windows.
+"""The three questions a rescue has to ask Windows - and the one a report does.
 
 Who is holding this TCP port, what is that process called, and end it - along
 with everything it started. That is all. Everything about *whether* to end
@@ -11,6 +11,12 @@ Windows, their output is stable and can be parsed in a test against a real
 sample, and they are the same commands the messages tell him to type when
 dictate cannot do it for him. What they print is parsed by pure functions in
 `recovery.py`; nothing about the parsing lives here.
+
+`command_line_of` is the one thing here for a report rather than a rescue, and
+it reaches for something else: none of the three tools above print a command
+line, only an image name, so `dictate autostart status --why` asks Windows'
+WMI/CIM through `Get-CimInstance` instead - PowerShell, not a fourth console
+tool, because this is the one question they cannot answer.
 
 `taskkill /T` and never `/PID` alone: ending dictate without its whisper-server
 is exactly the orphan this whole change exists to make impossible.
@@ -43,9 +49,16 @@ class WindowsProcessTools:
 
     def _run_tool(self, argv: list[str]) -> tuple[int, str]:
         try:
+            # stdin=DEVNULL: every caller of this is a read-only report and has
+            # to stay safe to run mid-sentence. None of netstat, tasklist,
+            # taskkill or powershell mean to read stdin, but a child that
+            # silently inherited a strange or blocking handle from whatever
+            # launched dictate is exactly the shape of the fault this is here
+            # to close off before it ever turns a report into a hang.
             proc = subprocess.run(
                 argv, capture_output=True, text=True, errors="replace",
                 check=False, timeout=TOOL_TIMEOUT_S, creationflags=_NO_WINDOW,
+                stdin=subprocess.DEVNULL,
             )
         except FileNotFoundError as exc:
             raise DictateError(
@@ -76,6 +89,29 @@ class WindowsProcessTools:
         if code != 0:
             log.debug("tasklist exited %s: %s", code, output.strip()[:400])
         return recovery.parse_task_name(output)
+
+    def command_line_of(self, pid: int) -> str | None:
+        """The full command line `pid` was started with, or `None` if it could
+        not be read.
+
+        tasklist does not carry this - `name_of` and `pids_named` above only
+        ever get the image name. This asks Windows a different way: WMI/CIM,
+        through `Get-CimInstance`, which every PowerShell since 3.0 ships with
+        and needs no extra install and no elevated rights for an ordinary
+        process. `-ErrorAction SilentlyContinue` and the exit-code check both
+        turn a refused or empty answer into `None` rather than an exception -
+        this is read by a report that may never be the thing that fails.
+        """
+        code, output = self._run([
+            "powershell", "-NoProfile", "-NonInteractive", "-Command",
+            f"(Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\" "
+            "-ErrorAction SilentlyContinue).CommandLine",
+        ])
+        if code != 0:
+            log.debug("powershell exited %s asking for the command line of "
+                      "pid %s: %s", code, pid, output.strip()[:400])
+            return None
+        return recovery.parse_command_line(output)
 
     def pids_named(self, image: str) -> list[int]:
         """Everything running under that image name, for the evidence report.
@@ -108,4 +144,4 @@ class WindowsProcessTools:
 
     @property
     def describe(self) -> str:
-        return "netstat, tasklist and taskkill"
+        return "netstat, tasklist, taskkill and powershell"

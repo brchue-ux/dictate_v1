@@ -315,10 +315,13 @@ class FakeProcessTools:
     branch - including the ones that must NOT end anything.
     """
 
-    def __init__(self, listeners=None, names=None, *, refuse: Exception | None = None,
+    def __init__(self, listeners=None, names=None, command_lines=None, *,
+                 refuse: Exception | None = None,
                  lingering: bool = False, on_end=None) -> None:
         self._listeners = listeners or {}
         self.names = names or {}
+        #: pid -> command line, or `None`/absent for "could not be read".
+        self.command_lines = command_lines or {}
         self.refuse = refuse
         #: True: ended processes keep holding the port, as a wedged one would.
         self.lingering = lingering
@@ -334,6 +337,9 @@ class FakeProcessTools:
     def name_of(self, pid: int) -> str:
         self.asked.append(pid)
         return self.names.get(pid, "")
+
+    def command_line_of(self, pid: int) -> str | None:
+        return self.command_lines.get(pid)
 
     def pids_named(self, image: str) -> list[int]:
         wanted = image.strip().lower()

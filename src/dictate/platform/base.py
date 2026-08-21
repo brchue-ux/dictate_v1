@@ -255,6 +255,17 @@ class ProcessTools(Protocol):
     def name_of(self, pid: int) -> str:
         """The image name of `pid` ("whisper-server.exe"), or "" if it is gone."""
 
+    def command_line_of(self, pid: int) -> str | None:
+        """The full command line `pid` was started with, or `None` if it could
+        not be read - the process may have gone between being listed and being
+        asked about, or the query may have been refused.
+
+        `tasklist` (`name_of`, `pids_named`) only ever gets an image name; this
+        is what turns "something named pythonw.exe" into "the logon task's own
+        command", or tells `dictate autostart status --why` plainly that it
+        could not, rather than leaving that question to tasklist's limits.
+        """
+
     def pids_named(self, image: str) -> list[int]:
         """Every process running `image` right now, by pid. May be empty.
 
