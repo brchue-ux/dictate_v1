@@ -821,6 +821,38 @@ affects only the screen, and the second may cost him a word in the document.
   `autostart.run_at_logon` block remains the account of the run after dispatch.
   Windows CI launches the real `pythonw.exe -m dictate`, rather than merely
   checking the task XML that names it.
+* **`--why` looks one block back for the breadcrumb the windowless entry
+  wrote.** `run_at_logon` opens its OWN `BLOCK_MARK` block moments after
+  `__main__.py`'s, in the same file, for the same run - and `last_block`
+  (by design: "only the newest") then hides the interpreter/arguments/working
+  directory lines behind it for every run that reaches `run_at_logon` at all,
+  which is the ordinary case and even most retried failures. That is
+  backwards from the breadcrumb's purpose, which was to let him settle
+  "is the logon copy even the same install, from the same place" by pasting
+  `dictate autostart status --why`. `autostart.bootstrap_block` finds the
+  block just before the last one and shows it only when that block's own pid
+  line names the same process, so a stale, unrelated earlier run is never
+  shown as if it were this one. Investigated and added while chasing a report
+  that the logon-started copy came up **reduced** rather than dead - a
+  gold-menu hand-started tray beside a black-square one with no menu. Nothing
+  in `src/dictate/` explains that from code alone: `icon_dir`, the default
+  config path and `state_dir` all resolve from `LOCALAPPDATA`/`APPDATA`, never
+  from `Path.cwd()`, so Task Scheduler's `Start In: %USERPROFILE%` was ruled
+  out as stated, and both entry points create the tray and register the
+  hotkey through the identical code in `Application.start()` - `console` and
+  `suggest_autostart` only change what gets printed. A visible-but-unresponsive
+  icon requires the instance lock to have been held long enough to create it,
+  which only happens after `lock.acquire()` succeeds in both `cli.cmd_run` and
+  `autostart.run_at_logon` - so the two live hypotheses are a still-alive,
+  properly-locked copy whose tray is otherwise broken (which `--why`'s
+  "What happened the last time..." transcript, being everything
+  `Application.start()` printed, should already show), or a stale Windows
+  notification icon left by a PAST process that exited without reaching
+  `WindowsTrayIcon._remove_icon()` - a hard kill or crash, not a code path
+  dictate controls. Unresolved without the product owner's machine; see
+  `tests/test_autostart.py::TheScheduledLaunchShape` for what was proved
+  instead (cwd- and environment-independence, under the real console-less,
+  different-`Start In`, unmodified-environment shape).
 * **Turning it on starts it now, and turning it off does not stop it.** The same
   discoverability defect came back wearing a different hat: he turned it on, saw
   nothing happen, and had no reason to believe it had worked - the feature did

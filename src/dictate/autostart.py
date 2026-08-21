@@ -1395,6 +1395,10 @@ class Reading:
     holder: instance.Holder | None = None
     log_file: str = ""
     block: str = ""
+    #: The console-less entry point's own block for this run, one block back
+    #: from `block` - see `bootstrap_block`. Only populated with `--why`, the
+    #: existing full-log-read is already gated on.
+    bootstrap: str = ""
     evidence: Evidence | None = None
 
 
@@ -1407,6 +1411,11 @@ def take_reading(*, why: bool = False, cfg: Config | None = None) -> Reading:
     reading.logon = read_logon_start(block=reading.block)
     reading.holder = instance.running_instance()
     if why:
+        try:
+            full_text = log_path().read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            full_text = ""
+        reading.bootstrap = bootstrap_block(full_text, reading.logon.pid)
         reading.evidence = gather_evidence(cfg, reading)
     return reading
 
@@ -1474,6 +1483,13 @@ def render(reading: Reading) -> list[str]:
         lines.append("                 (nothing in it yet - it is written the first "
                      "time dictate starts at logon)")
 
+    if reading.bootstrap:
+        lines.append("")
+        lines.append("Before the CLI was even imported, the console-less entry "
+                     "point itself recorded:")
+        for line in reading.bootstrap.splitlines():
+            lines.append(f"  {line}")
+
     if reading.evidence is not None:
         lines.append("")
         lines += evidence_lines(reading)
@@ -1522,6 +1538,33 @@ def last_block(text: str) -> str:
     """The most recent logon start's block out of the log."""
     index = text.rfind(BLOCK_MARK)
     return text if index < 0 else text[index:].rstrip()
+
+
+def bootstrap_block(text: str, pid: int | None) -> str:
+    """The console-less entry point's own block for `pid`, one block back.
+
+    `__main__.py` opens the log and writes the interpreter, the arguments and
+    the working directory before it dares import the CLI at all; `run_at_logon`
+    then opens its OWN block moments later, in the same process, under the
+    same `BLOCK_MARK`. `last_block` keeps only the newest of the two, so on an
+    ordinary run - or a run that failed inside the retry loop, not before it -
+    that breadcrumb is buried the moment it is written, which is backwards
+    from its purpose: it exists to say what a run that never got this far
+    looked like. This looks at the block just before the last one, and shows
+    it only when that block's own pid line names the same process, so an old,
+    unrelated block from an earlier logon is never mistaken for this run's.
+    """
+    if pid is None:
+        return ""
+    starts = []
+    index = text.find(BLOCK_MARK)
+    while index != -1:
+        starts.append(index)
+        index = text.find(BLOCK_MARK, index + len(BLOCK_MARK))
+    if len(starts) < 2:
+        return ""
+    block = text[starts[-2]:starts[-1]].rstrip()
+    return block if f"{PID_MARK}{pid})" in block else ""
 
 
 def read_last_block(*, path: Path | None = None, max_lines: int = 40) -> str:

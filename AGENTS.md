@@ -390,7 +390,13 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   run block. Keep its minimal state-path resolver and marker literals aligned
   with `instance.state_dir`/`autostart` (the tests compare them), and keep the
   Windows CI launch of the real `pythonw.exe` — registering task XML alone does
-  not exercise this boundary.
+  not exercise this boundary. **That second block also buries the first
+  one**: `last_block` keeps only the newest `BLOCK_MARK` section, so the
+  interpreter/arguments/working-directory breadcrumb is hidden the moment
+  `run_at_logon` opens its own block — which is every ordinary run.
+  `autostart.bootstrap_block` looks one block back and shows it (only when
+  that block's own pid line matches) under `--why`; `status` alone stays at
+  40 lines and does not.
 - **`dictate autostart status --why` reports and changes nothing.** It is the one
   line he pastes: what Windows has running (`ProcessTools.pids_named`, tasklist),
   who holds the transcription port, the lock, and schtasks' raw answer. It may
