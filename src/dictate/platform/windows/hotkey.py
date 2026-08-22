@@ -51,6 +51,30 @@ correctly, and that an intentional continuous hold (all three keys reading
 down at every poll) is unaffected - the flag only changes when the *reset*
 after a release happens, never the press edge. See the PR that made this
 change for the full methodology and what still needs his machine.
+
+**Open question, found immediately after: the fix above assumes physical
+fingers, and he does not use them for this trigger.** The button is a
+Logitech G502 mapped through G HUB to synthesize Ctrl+Alt+Space -
+reportedly a couple of milliseconds of key-down, not a human hold. That is
+short enough to fall entirely between two 20 ms polls, on its own, with
+nothing to do with release timing or window focus - a different, structural
+blind spot that `actuate_on_partial_release` cannot touch, because that flag
+only changes what happens *after* a poll has already caught the chord down,
+and here a poll may never catch it at all. Checked and ruled out as a
+contributing cause: `sherpa-onnx`'s streaming calls (`accept_waveform`,
+`is_ready`, `decode_stream`, `get_result`) all declare
+`py::call_guard<py::gil_scoped_release>()` at the pinned `>=1.13.5` floor
+(read from the real source, not assumed), so decoding captions cannot hold
+the GIL and starve this thread; `overlay.set_state` is a non-blocking queue
+put, never a cross-thread wait. Still not established: why the first
+(start) press is reported reliable and the second (stop) press is not -
+that asymmetry is the open part. `pynput`'s Windows backend
+(`SetWindowsHookEx(WH_KEYBOARD_LL, ...)`, actively maintained) is the
+concrete shape a real hook replacement would take if one is needed - a
+*sampled* key-state query structurally cannot see a keystroke shorter than
+its sampling interval; an *event-driven* hook does not have that failure
+mode at all, at any duration. See the PR for the cheap checks that would
+settle this before that scale of change is undertaken.
 """
 
 from __future__ import annotations

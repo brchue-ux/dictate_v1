@@ -540,6 +540,27 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   same reason `platform/windows/mouse.py` and `platform/windows/tray.py` are.
   `press()` still logs every toggle it sees, which is what would show whether a
   *different* cause remains if this one turns out not to be the whole story.
+- **That fix assumes physical fingers, and for the mouse-triggered case he
+  actually uses, it almost certainly does not apply.** His trigger is a Logitech
+  G502 button mapped through G HUB to synthesize Ctrl+Alt+Space, reportedly a
+  couple of milliseconds of key-down — not a human release, staggered or
+  otherwise. That short a pulse can fall entirely between two 20 ms
+  `GetAsyncKeyState` polls with nothing to do with release timing at all, which
+  `actuate_on_partial_release` cannot touch (it only changes what happens
+  *after* a poll has already caught the chord down). Checked and ruled out as a
+  contributing cause: `sherpa-onnx`'s streaming calls (`accept_waveform`,
+  `is_ready`, `decode_stream`, `get_result`) all declare
+  `py::call_guard<py::gil_scoped_release>()` at the pinned `>=1.13.5` floor
+  (read from the real source), so caption decoding cannot hold the GIL and
+  starve the hotkey poll thread; `overlay.set_state` is a non-blocking queue
+  put, not a cross-thread wait. Still open: why the first (start) press is
+  reported reliable and the second (stop) press is not. If a real fix is
+  needed, `pynput`'s Windows backend (`SetWindowsHookEx(WH_KEYBOARD_LL, ...)`,
+  actively maintained) is the concrete, lower-risk shape it would take over
+  writing a raw hook from scratch — a *sampled* query cannot see a keystroke
+  shorter than its sampling interval regardless of load; an *event-driven*
+  hook has no such floor at any duration. Not yet decided or implemented; see
+  the PR thread for the two cheap checks proposed before that scale of change.
 
 ## Maintaining this file
 
