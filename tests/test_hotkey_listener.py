@@ -15,6 +15,20 @@ import unittest
 from dictate.platform.windows.hotkey import WindowsHotkeyListener
 
 
+class FakeClock:
+    """A controllable clock so a test can put two presses on either side of
+    the bounce window without a real `time.sleep`."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.value = start
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
 class FakeGlobalHotkeys(types.ModuleType):
     """Records exactly the binding list `register()` builds - the one thing
     this file needs to see, never called for real off Windows."""
@@ -85,15 +99,70 @@ class TogglePartialRelease(HotkeyListenerTestCase):
     def test_toggle_press_still_alternates_start_and_stop(self) -> None:
         """The flag only changes when the library re-arms itself - toggle's
         own alternation, which is what actually starts and stops a
-        recording, is unchanged."""
+        recording, is unchanged - for presses far enough apart to be
+        genuinely distinct (see ToggleBounceDebounce for the other case)."""
         seen: list[str] = []
-        listener = WindowsHotkeyListener("ctrl + alt + space", "toggle")
+        clock = FakeClock()
+        listener = WindowsHotkeyListener("ctrl + alt + space", "toggle", clock=clock)
         listener.register(lambda: seen.append("start"), lambda: seen.append("stop"))
         _combination, press_cb, _release, _actuate = self._binding()
         press_cb()
+        clock.advance(1.0)
         press_cb()
+        clock.advance(1.0)
         press_cb()
         self.assertEqual(seen, ["start", "stop", "start"])
+
+
+class ToggleBounceDebounce(HotkeyListenerTestCase):
+    """The regression: his trigger holds the whole chord down synthetically
+    for as long as the button is held, rather than a human tapping it. Driven
+    against the real pinned library source (see the module docstring's
+    "Regression" section), a single missed 20ms poll of just one key of an
+    otherwise still-held chord is enough, under `actuate_on_partial_release=
+    True`, to make the library reset and immediately re-detect the same
+    still-down chord as a brand new press - one physical hold, two
+    `press_callback` calls, with no release from him in between. dictate
+    cannot fix the library's poll, so it debounces the symptom: two press
+    edges closer together than `_BOUNCE_WINDOW_S` collapse into one."""
+
+    def test_a_bounce_within_the_window_is_ignored(self) -> None:
+        seen: list[str] = []
+        clock = FakeClock()
+        listener = WindowsHotkeyListener("ctrl + alt + space", "toggle", clock=clock)
+        listener.register(lambda: seen.append("start"), lambda: seen.append("stop"))
+        _combination, press_cb, _release, _actuate = self._binding()
+        press_cb()
+        clock.advance(0.02)  # one library poll tick - the measured bounce gap
+        press_cb()
+        self.assertEqual(seen, ["start"])
+
+    def test_a_press_after_the_window_registers_normally(self) -> None:
+        seen: list[str] = []
+        clock = FakeClock()
+        listener = WindowsHotkeyListener("ctrl + alt + space", "toggle", clock=clock)
+        listener.register(lambda: seen.append("start"), lambda: seen.append("stop"))
+        _combination, press_cb, _release, _actuate = self._binding()
+        press_cb()
+        clock.advance(0.2)  # well past the bounce window
+        press_cb()
+        self.assertEqual(seen, ["start", "stop"])
+
+    def test_hold_mode_is_not_debounced(self) -> None:
+        """Deliberately unguarded - see the module docstring's "Hold mode"
+        section: the same risk exists there in principle, but it is not what
+        was reported, and is left alone rather than changed on a guess."""
+        seen: list[str] = []
+        clock = FakeClock()
+        listener = WindowsHotkeyListener("ctrl + alt + space", "hold", clock=clock)
+        listener.register(lambda: seen.append("start"), lambda: seen.append("stop"))
+        _combination, press_cb, release_cb, _actuate = self._binding()
+        press_cb()
+        press_cb()
+        self.assertEqual(seen, ["start", "start"])
+        release_cb()
+        release_cb()
+        self.assertEqual(seen, ["start", "start", "stop", "stop"])
 
 
 if __name__ == "__main__":

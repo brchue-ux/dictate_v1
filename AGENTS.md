@@ -541,26 +541,58 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `press()` still logs every toggle it sees, which is what would show whether a
   *different* cause remains if this one turns out not to be the whole story.
 - **That fix assumes physical fingers, and for the mouse-triggered case he
-  actually uses, it almost certainly does not apply.** His trigger is a Logitech
-  G502 button mapped through G HUB to synthesize Ctrl+Alt+Space, reportedly a
-  couple of milliseconds of key-down — not a human release, staggered or
-  otherwise. That short a pulse can fall entirely between two 20 ms
-  `GetAsyncKeyState` polls with nothing to do with release timing at all, which
-  `actuate_on_partial_release` cannot touch (it only changes what happens
-  *after* a poll has already caught the chord down). Checked and ruled out as a
-  contributing cause: `sherpa-onnx`'s streaming calls (`accept_waveform`,
-  `is_ready`, `decode_stream`, `get_result`) all declare
+  actually uses, it almost certainly does not apply the way first guessed.**
+  His trigger is a Logitech G502 button mapped through G HUB to synthesize
+  Ctrl+Alt+Space. **Correction (2026-08-21, PR #31 follow-up): "a couple of
+  milliseconds of key-down" was wrong — the decisive fact, from the product
+  owner directly, is that the macro genuinely holds all three keys down for
+  as long as the button is held and releases them together, which is a
+  *longer, continuous* hold than any human tap, not a short pulse.** Checked
+  and ruled out as a contributing cause to anything in this section:
+  `sherpa-onnx`'s streaming calls (`accept_waveform`, `is_ready`,
+  `decode_stream`, `get_result`) all declare
   `py::call_guard<py::gil_scoped_release>()` at the pinned `>=1.13.5` floor
   (read from the real source), so caption decoding cannot hold the GIL and
   starve the hotkey poll thread; `overlay.set_state` is a non-blocking queue
-  put, not a cross-thread wait. Still open: why the first (start) press is
-  reported reliable and the second (stop) press is not. If a real fix is
-  needed, `pynput`'s Windows backend (`SetWindowsHookEx(WH_KEYBOARD_LL, ...)`,
-  actively maintained) is the concrete, lower-risk shape it would take over
-  writing a raw hook from scratch — a *sampled* query cannot see a keystroke
-  shorter than its sampling interval regardless of load; an *event-driven*
-  hook has no such floor at any duration. Not yet decided or implemented; see
-  the PR thread for the two cheap checks proposed before that scale of change.
+  put, not a cross-thread wait. If a real fix is ever needed for a genuinely
+  sub-poll pulse, `pynput`'s Windows backend
+  (`SetWindowsHookEx(WH_KEYBOARD_LL, ...)`, actively maintained) is the
+  concrete, lower-risk shape it would take over writing a raw hook from
+  scratch — a *sampled* query cannot see a keystroke shorter than its
+  sampling interval regardless of load; an *event-driven* hook has no such
+  floor at any duration.
+- **The genuine-hold correction above exposed a real regression from PR #31:
+  a held synthetic chord double-fires toggle, and every press counted twice.**
+  Driving the real pinned `hotkey_checker.py` with a synthetic key-state feed
+  (same methodology as PR #31) confirms neither an atomic hold+release nor a
+  non-simultaneous release causes a second `press_callback` — only a single
+  missed 20 ms poll of ANY ONE key of the chord, while the other two still
+  read as held, does. With `actuate_on_partial_release=True` (PR #31's fix)
+  that one dip is indistinguishable from a real release: the library resets
+  its press state immediately and the very next poll, seeing the chord still
+  down because it never actually went anywhere, is read as a brand new press
+  — one physical hold, two `press_callback` calls, on and immediately back
+  off, with no release from him in between. A long synthesized hold spends
+  far more polls continuously down than a human tap, which is what gives a
+  single poll far more chances to miss; `False` (the pre-#31 setting) is
+  immune to this specific dip, because it requires every key to read
+  simultaneously up before resetting. Fixed in `platform/windows/hotkey.py`
+  by debouncing toggle's own press edge in dictate's code — `_BOUNCE_WINDOW_S`
+  — rather than trusting the library's edge is real or reintroducing the
+  never-re-arms fault by turning the flag back off; `actuate_on_partial_release`
+  stays `True`. `tests/test_hotkey_listener.py::ToggleBounceDebounce` holds it
+  against an injected clock. Hold mode carries the identical structural risk
+  (it has used `actuate_on_partial_release=True` since before PR #30, for its
+  own reason) and is deliberately left unguarded — not reported, not what he
+  uses for this trigger; see the module docstring's "Hold mode" note if it
+  ever is. **This also explains "auto paste did not work" without a separate
+  cause**: `Pipeline.finish_utterance`'s `min_utterance_ms` floor (350 ms,
+  `pipeline.py`) silently discards a recording shorter than that — no error,
+  no notification, just the overlay going to HIDDEN — and a spurious
+  toggle-off tens of milliseconds after a spurious toggle-on is exactly such
+  a recording. Not confirmed as THE explanation for any specific report (that
+  needs his machine), but confirmed as a mechanism that produces the exact
+  symptom, and the debounce fix removes it either way.
 
 ## Maintaining this file
 
