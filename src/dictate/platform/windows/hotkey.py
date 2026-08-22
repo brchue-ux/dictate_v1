@@ -75,11 +75,62 @@ concrete shape a real hook replacement would take if one is needed - a
 its sampling interval; an *event-driven* hook does not have that failure
 mode at all, at any duration. See the PR for the cheap checks that would
 settle this before that scale of change is undertaken.
+
+**Regression, found immediately after shipping the above (2026-08-21): his
+trigger does not use physical fingers at all, and `actuate_on_partial_release
+=True` double-fires a held synthetic chord.** His toggle combination is not
+pressed by hand - the G502/G HUB macro genuinely holds Ctrl, Alt and Space
+down for as long as the button is down, all three released together when he
+lets go. That is a *longer, continuous* hold than any human tap, which
+matters: driving the real pinned `hotkey_checker.py` with a synthetic
+key-state feed (methodology unchanged from the PR above; this file's own
+`AGENTS.md` entry has the counts) shows that neither an atomic hold+release
+nor a non-simultaneous ("staggered") release causes a second `press_callback`
+- only a **single missed poll of ANY ONE key of the chord while the other two
+are still read as down** does. With `actuate_on_partial_release=False` (the
+pre-PR-#31 setting) that same single-poll dip is harmless: the library
+requires every key to read simultaneously up before it resets, so a
+transient one-key miss changes nothing. With `True`, that one dip is
+indistinguishable from a real release - the library resets its internal
+press state immediately, and the very next poll (which sees the chord still
+down, because it never actually went anywhere) is read as a brand new press.
+One physical hold, one missed 20ms poll, two `press_callback` calls - his
+toggle flips on then immediately back off, mid-hold, with no release from
+him in between. A long synthesized hold spends far more polls continuously
+down than a human's quick tap-and-release, which is what gives a single poll
+far more chances to miss - not a difference in the release itself, which the
+same test shows is not the risk.
+
+**Fix: dictate debounces toggle's own press edge, in `register()`'s toggle
+closure, rather than trusting the library's edge is real.** `_BOUNCE_WINDOW_S`
+below is chosen from that same test: the spurious second press lands one poll
+(~20ms) after the first, and no legitimate second press - human or macro -
+plausibly lands that close together on purpose. This targets only the
+*symptom* dictate can observe (two press callbacks too close together), not
+the poll miss itself, which happens inside the library and pywin32 and is not
+observable from here. `actuate_on_partial_release` stays `True` for toggle:
+turning it back off would resurrect the never-re-arms fault fixed above for
+every keyboard user, which is strictly worse - that fault drops a real press
+silently forever, where a debounced bounce merely delays the next real one by
+under `_BOUNCE_WINDOW_S`. `tests/test_hotkey_listener.py::ToggleBounceDebounce`
+holds this against an injected clock, since the real interval is real wall
+time this file cannot control off Windows.
+
+**Hold mode carries the identical structural risk and is deliberately left
+alone.** It has asked for `actuate_on_partial_release=True` since before
+PR #30 (see above) for its own, unrelated reason (ending on the last key of
+the chord to lift), and the same single-poll-miss mechanism applies equally
+to *its* press/release pair - a synthesized long hold could, in principle,
+see a spurious stop-then-restart mid-recording. Nobody has reported that, and
+he does not use hold mode for the macro trigger this was diagnosed against,
+so it is not fixed here; if it is ever reported, this section and the
+debounce shape above are the starting point.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 
 from ...errors import MissingDependencyError, PlatformUnsupportedError
@@ -87,17 +138,26 @@ from ..hotkey_spec import describe, normalise
 
 log = logging.getLogger(__name__)
 
+#: See the module docstring's "Regression" section. Measured against the real
+#: pinned library source, the library's own spurious second press lands one
+#: 20ms poll after the first; this is comfortably above that and comfortably
+#: below any interval a real second press - human or macro - would use.
+_BOUNCE_WINDOW_S = 0.15
+
 
 class WindowsHotkeyListener:
     """Implements `platform.base.HotkeyListener`."""
 
-    def __init__(self, combination: str, mode: str = "hold") -> None:
+    def __init__(self, combination: str, mode: str = "hold",
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.combination = normalise(combination)
         self.pretty = describe(combination)
         self.mode = mode
         self._started = False
         self._api = None
         self._toggle_on = False
+        self._clock = clock
+        self._last_toggle_press: float | None = None
 
     @property
     def describe(self) -> str:
@@ -123,6 +183,17 @@ class WindowsHotkeyListener:
 
         if self.mode == "toggle":
             def press() -> None:
+                now = self._clock()
+                last = self._last_toggle_press
+                if last is not None and (now - last) < _BOUNCE_WINDOW_S:
+                    # See the module docstring's "Regression" section: the
+                    # library itself cannot tell a real second press from its
+                    # own single-poll bounce on a held synthetic chord, so
+                    # dictate does not trust that this edge is real.
+                    log.debug("toggle hotkey press ignored: %.3fs since the "
+                              "last one, inside the bounce window", now - last)
+                    return
+                self._last_toggle_press = now
                 self._toggle_on = not self._toggle_on
                 # The one piece of evidence a poll-based "hook" can give: that
                 # the combination WAS seen. If a report ever says a toggle
